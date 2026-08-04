@@ -8,21 +8,25 @@
 //! 本模块为纯几何后处理：输入折线路径（经纬度+高度），输出平滑路径；
 //! 与 Phase 2 细层搜索解耦，地形净空/禁飞检查通过注入接口接入。
 
+use crate::config::AircraftType;
 use crate::dubins::dubins_path;
 use crate::path::{Path, PathPoint, angle_diff_deg, point_seg_distance_m};
 
 /// 平滑器参数（Phase 0 标定前用保守初值，参数化可调；标定项见 docs/phase0_baseline.md）。
 #[derive(Debug, Clone)]
 pub struct SmoothOptions {
+    /// 机型（Phase 4 机型分流；旋翼机可悬停/极小转弯半径——急转/垂直机动合法，
+    /// 复验按机型放宽，链不拟合 Dubins 圆弧）。
+    pub aircraft_type: AircraftType,
     /// 抽稀弦高容差（米）。Phase 0 标定项，初值 100m（粗层 1-2km 格距的 ~1/10）。
     pub chord_tol_m: f64,
-    /// 最小转弯半径（米，Dubins 拟合 + 运动学复验）。
+    /// 最小转弯半径（米，Dubins 拟合 + 运动学复验；仅固定翼）。
     pub turn_radius_m: f64,
-    /// 最大爬升角（度，运动学复验）。
+    /// 最大爬升角（度，运动学复验；仅固定翼）。
     pub max_climb_deg: f64,
     /// 地形净空（米，复验）。
     pub clearance_m: f64,
-    /// 最大转角（度，相邻航段航向差；运动学复验）。
+    /// 最大转角（度，相邻航段航向差；运动学复验；仅固定翼）。
     pub max_turn_deg: f64,
     /// Dubins 采样密度（每段点数）。
     pub dubins_sample_n: usize,
@@ -33,6 +37,7 @@ pub struct SmoothOptions {
 impl Default for SmoothOptions {
     fn default() -> Self {
         Self {
+            aircraft_type: AircraftType::FixedWing,
             chord_tol_m: 100.0,
             turn_radius_m: 5_000.0,
             max_climb_deg: 8.0,
@@ -452,12 +457,17 @@ pub struct VerifyContext<'a> {
 /// { 地形净空 } ∪ { 禁飞/限飞包含（A4/A5 硬阈值） } ∪ { 转弯半径/转弯角/航向连续性（A3） }
 /// ∪ { 爬升角 } ∪ { 弦高（几何，相对美化前参考路径） } ∪ { A6 速度-转弯半径自洽（参数化，缺省跳过） }。
 ///
+/// 机型分支（旋翼机可悬停/极小转弯半径，九轮共识）：
+/// `AircraftType::Rotorcraft` 跳过固定翼运动学硬拦（转弯半径/转角/爬升角）——
+/// 悬停原地转向/垂直机动在位置空间表现为急转（类方波/尖角），是**合法航路**，不得误判；
+/// 净空/禁飞/弦高对两机型一律硬约束。A6 仅固定翼物理自洽（r_min ≥ v²/(g·tan φ_max)）。
+///
 /// - 采样密度：每段等距 `verify_seg_samples` 点（段内最坏情况，端点+中点+加密）；
 /// - 地形净空：Land → z ≥ h + clearance；Water/Lake → 水面（净空 0 起算）；
 ///   NoData → 保守不通过（净空不确定，warning 注明）；OutOfBounds → 不通过（越界墙）；
-/// - 转弯半径：三点外接圆半径（等距平面近似），≥ opts.turn_radius_m；
-/// - 转角：相邻段航向差 ≤ opts.max_turn_deg；
-/// - 爬升角：段高度差/水平距离 ≤ tan(max_climb_deg)；
+/// - 转弯半径：三点外接圆半径（等距平面近似），≥ opts.turn_radius_m（仅固定翼）；
+/// - 转角：相邻段航向差 ≤ opts.max_turn_deg（仅固定翼）；
+/// - 爬升角：段高度差/水平距离 ≤ tan(max_climb_deg)（仅固定翼）；
 /// - 弦高：相对 `reference`（美化前）逐点弦高 ≤ opts.chord_tol_m（几何逼近误差）；
 /// - A6：`phys_min_radius_m` 提供时校验 r_min ≥ phys_min_radius_m（参数化，Phase 4 接入）。
 #[allow(clippy::too_many_arguments)]
@@ -483,6 +493,9 @@ pub fn verify_path(
         }
     }
 
+    // 固定翼运动学约束（旋翼机跳过：悬停原地转向/垂直机动为合法急转/陡爬升）
+    let kinematic = opts.aircraft_type == AircraftType::FixedWing;
+
     // 1) 航向连续性 + 转角 + 转弯半径 + 爬升角（逐段/逐三点）
     let proj = {
         let mid = path.points[n / 2];
@@ -491,21 +504,23 @@ pub fn verify_path(
     let xy: Vec<(f64, f64)> = path.points.iter().map(|p| proj.to_xy(p.lon, p.lat)).collect();
     for i in 1..n {
         let h = path.segment_heading_deg(i - 1).unwrap_or(0.0);
-        // 爬升角
-        let (ax, ay) = xy[i - 1];
-        let (bx, by) = xy[i];
-        let horiz = ((bx - ax).powi(2) + (by - ay).powi(2)).sqrt();
-        let dh = (path.points[i].alt_m - path.points[i - 1].alt_m).abs();
-        if horiz > 1e-9 {
-            let climb = (dh / horiz).atan().to_degrees();
-            if climb > opts.max_climb_deg {
-                rep.issues.push(format!(
-                    "segment {i}: climb {climb:.2}deg > max {:.1}deg",
-                    opts.max_climb_deg
-                ));
+        // 爬升角（仅固定翼）
+        if kinematic {
+            let (ax, ay) = xy[i - 1];
+            let (bx, by) = xy[i];
+            let horiz = ((bx - ax).powi(2) + (by - ay).powi(2)).sqrt();
+            let dh = (path.points[i].alt_m - path.points[i - 1].alt_m).abs();
+            if horiz > 1e-9 {
+                let climb = (dh / horiz).atan().to_degrees();
+                if climb > opts.max_climb_deg {
+                    rep.issues.push(format!(
+                        "segment {i}: climb {climb:.2}deg > max {:.1}deg",
+                        opts.max_climb_deg
+                    ));
+                }
             }
         }
-        if i > 1 {
+        if i > 1 && kinematic {
             // 转角
             let h0 = path.segment_heading_deg(i - 2).unwrap_or(0.0);
             let turn = angle_diff_deg(h, h0).abs();
@@ -603,8 +618,9 @@ pub fn verify_path(
         }
     }
 
-    // 4) A6 速度-转弯半径自洽（参数化，Phase 4 接入 VehicleProfile）
-    if let Some(r_phys) = phys_min_radius_m
+    // 4) A6 速度-转弯半径自洽（仅固定翼；旋翼机 r_min→0 无物理下限）
+    if opts.aircraft_type == AircraftType::FixedWing
+        && let Some(r_phys) = phys_min_radius_m
         && opts.turn_radius_m < r_phys - 1e-9
     {
         rep.issues.push(format!(
@@ -692,19 +708,22 @@ impl Smoother for GreedySimplifySmoother {
     }
 }
 
-/// 默认策略链（九轮链序修正）：
-/// Theta* 去锯齿 → Dubins 拟合 → 贪心抽稀。
+/// 默认策略链（九轮链序修正 + 旋翼机分支）：
+/// - 固定翼：Theta* 去锯齿 → Dubins 拟合 → 贪心抽稀；
+/// - 旋翼机：Theta* 去锯齿 → 贪心抽稀（**不含 Dubins 全局拟合**——悬停原地转向
+///   是合法机动，圆弧拟合会拉直/破坏转向点；尖角由机型感知复验放行）。
 pub fn default_chain<'a>(opts: &SmoothOptions, check: &'a SegmentCheck<'a>) -> Vec<Box<dyn Smoother + 'a>> {
-    vec![
-        Box::new(ThetaStarSmoother { check }),
-        Box::new(DubinsSmoother {
+    let mut chain: Vec<Box<dyn Smoother + 'a>> = vec![Box::new(ThetaStarSmoother { check })];
+    if opts.aircraft_type == AircraftType::FixedWing {
+        chain.push(Box::new(DubinsSmoother {
             r_m: opts.turn_radius_m,
             sample_n: opts.dubins_sample_n,
-        }),
-        Box::new(GreedySimplifySmoother {
-            tol_m: opts.chord_tol_m,
-        }),
-    ]
+        }));
+    }
+    chain.push(Box::new(GreedySimplifySmoother {
+        tol_m: opts.chord_tol_m,
+    }));
+    chain
 }
 
 /// 平滑结果。
@@ -955,5 +974,103 @@ mod chain_tests {
         let out = smooth_path_chain(&input, &chain, &opts, &ctx, None);
         // 不 panic；NaN 输入复验 fail → 回退原始
         assert!(!out.verify.ok);
+    }
+
+    /// 水平梳齿方波（近 90° 急转阶梯，齿距 step_deg 度、齿深 step_deg 度）。
+    fn square_wave(teeth: usize, step_deg: f64) -> Path {
+        let mut pts = vec![PathPoint::new(0.0, 0.0, 500.0)];
+        for t in 0..teeth {
+            let (x, y) = (t as f64 * 2.0 * step_deg, t as f64 * step_deg);
+            pts.push(PathPoint::new(x + 2.0 * step_deg, y, 500.0));
+            pts.push(PathPoint::new(x + 2.0 * step_deg, y + step_deg, 500.0));
+        }
+        pts.push(PathPoint::new(
+            teeth as f64 * 2.0 * step_deg,
+            teeth as f64 * step_deg,
+            500.0,
+        ));
+        Path::new(pts)
+    }
+
+    #[test]
+    fn fixed_wing_square_wave_rejected() {
+        // 固定翼 + 绕障方波（check 拒绝斜穿）：截不了直 → 90° 尖角违反运动学约束
+        // → 复验拦截，链回退原始 + smoothing_failed
+        let opts = SmoothOptions::default(); // FixedWing
+        let ctx = VerifyContext {
+            terrain: Some(&FlatTerrain),
+            nofly: None,
+        };
+        let wave = square_wave(4, 0.02);
+        let check = |lon1: f64, lat1: f64, _: f64, lon2: f64, lat2: f64, _: f64| {
+            !((lon2 - lon1).abs() > 0.025 && (lat2 - lat1).abs() > 0.01)
+        };
+        let chain = default_chain(&opts, &check);
+        let out = smooth_path_chain(&wave, &chain, &opts, &ctx, None);
+        assert_eq!(
+            out.warning.as_deref(),
+            Some("smoothing_failed: no smoothed stage passed full verification")
+        );
+        assert!(!out.verify.ok);
+        assert!(out.verify.issues.iter().any(|s| s.contains("turn")));
+    }
+
+    #[test]
+    fn fixed_wing_clean_square_wave_straightened() {
+        // 固定翼 + 无障碍方波（纯锯齿伪影）：Theta* 直接截弯取直，输出直线
+        let opts = SmoothOptions::default(); // FixedWing
+        let ctx = VerifyContext {
+            terrain: Some(&FlatTerrain),
+            nofly: None,
+        };
+        let wave = square_wave(4, 0.02);
+        let check = |_: f64, _: f64, _: f64, _: f64, _: f64, _: f64| true;
+        let chain = default_chain(&opts, &check);
+        let out = smooth_path_chain(&wave, &chain, &opts, &ctx, None);
+        assert!(out.warning.is_none(), "warning: {:?}", out.warning);
+        assert!(out.verify.ok, "issues: {:?}", out.verify.issues);
+        // 截直成 2 点直线
+        assert_eq!(out.path.len(), 2, "got {}", out.path.len());
+    }
+
+    #[test]
+    fn rotorcraft_square_wave_passes() {
+        // 旋翼机：急转/悬停原地转向为合法机动（九轮共识）→ 复验放行，不误判
+        let opts = SmoothOptions {
+            aircraft_type: AircraftType::Rotorcraft,
+            ..Default::default()
+        };
+        let ctx = VerifyContext {
+            terrain: Some(&FlatTerrain),
+            nofly: None,
+        };
+        let wave = square_wave(4, 0.02);
+        let rep = verify_path(&wave, None, &opts, &ctx, None);
+        assert!(rep.ok, "rotorcraft square wave misjudged: {:?}", rep.issues);
+        assert!(rep.issues.is_empty());
+    }
+
+    #[test]
+    fn rotorcraft_chain_keeps_turns_not_dubins() {
+        // 旋翼机链不含 Dubins：方波通过链后保持急转结构（不得被圆弧拟合拉直）
+        let opts = SmoothOptions {
+            aircraft_type: AircraftType::Rotorcraft,
+            ..Default::default()
+        };
+        let ctx = VerifyContext {
+            terrain: Some(&FlatTerrain),
+            nofly: None,
+        };
+        // check 拒绝斜穿（模拟绕障方波）→ theta_star 截不了 → 保持
+        let wave = square_wave(4, 0.02);
+        let check = |lon1: f64, lat1: f64, _: f64, lon2: f64, lat2: f64, _: f64| {
+            !((lon2 - lon1).abs() > 0.025 && (lat2 - lat1).abs() > 0.01)
+        };
+        let chain = default_chain(&opts, &check);
+        let out = smooth_path_chain(&wave, &chain, &opts, &ctx, None);
+        assert!(out.verify.ok, "issues: {:?}", out.verify.issues);
+        assert!(out.warning.is_none(), "warning: {:?}", out.warning);
+        // 尖角保留：输出仍含近 90° 转角（复验放行，未被截直）
+        assert!(out.path.len() >= 6, "turns lost: {}", out.path.len());
     }
 }
