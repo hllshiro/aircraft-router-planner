@@ -7,6 +7,9 @@
 pub mod config;
 pub mod coord;
 pub mod costfield;
+pub mod dubins;
 pub mod error;
+pub mod path;
+pub mod smooth;
 pub mod spatial;
 pub mod terrain;

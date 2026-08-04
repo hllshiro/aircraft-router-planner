@@ -347,3 +347,123 @@ fn output_serialize_with_extremes_no_panic() {
     };
     let _ = serde_json::to_string(&out2).expect("serialize ok");
 }
+
+// ==================== Phase 3 平滑链 ====================
+
+use aircraft_router_planner_cli::path::{Path, PathPoint};
+use aircraft_router_planner_cli::smooth::{
+    SmoothOptions, SmoothResult, Smoother, ThetaStarSmoother, VerifyContext, catmull_rom_spline,
+    chaikin_smooth, dubins_fit, greedy_simplify, smooth_path_chain, theta_star_smooth,
+    verify_path,
+};
+
+fn always_true() -> impl Fn(f64, f64, f64, f64, f64, f64) -> bool {
+    |_, _, _, _, _, _| true
+}
+
+#[test]
+fn smooth_empty_path_no_panic() {
+    let p = Path::new(vec![]);
+    let check = always_true();
+    assert_eq!(theta_star_smooth(&p, &check).len(), 0);
+    assert_eq!(greedy_simplify(&p, 100.0).len(), 0);
+    assert_eq!(chaikin_smooth(&p, 2).len(), 0);
+    assert_eq!(catmull_rom_spline(&p, 4).len(), 0);
+    assert!(dubins_fit(&p, 1000.0, 32).is_none());
+}
+
+#[test]
+fn smooth_single_point_no_panic() {
+    let p = Path::new(vec![PathPoint::new(0.0, 0.0, 100.0)]);
+    let check = always_true();
+    assert_eq!(theta_star_smooth(&p, &check).len(), 1);
+    assert_eq!(greedy_simplify(&p, 100.0).len(), 1);
+    assert_eq!(chaikin_smooth(&p, 2).len(), 1);
+    assert_eq!(catmull_rom_spline(&p, 4).len(), 1);
+    assert!(dubins_fit(&p, 1000.0, 32).is_none());
+}
+
+#[test]
+fn smooth_nan_inf_no_panic() {
+    let bad = Path::new(vec![
+        PathPoint::new(f64::NAN, 0.0, 100.0),
+        PathPoint::new(1.0, 0.0, f64::INFINITY),
+        PathPoint::new(2.0, 0.0, -f64::INFINITY),
+    ]);
+    let check = always_true();
+    let _ = theta_star_smooth(&bad, &check);
+    let _ = greedy_simplify(&bad, 100.0);
+    let _ = chaikin_smooth(&bad, 2);
+    let _ = catmull_rom_spline(&bad, 4);
+    assert!(dubins_fit(&bad, 1000.0, 32).is_none());
+    // 直接 dubins 入口
+    let _ = aircraft_router_planner_cli::dubins::dubins_path(
+        (f64::NAN, 0.0),
+        0.0,
+        (1.0, 0.0),
+        0.0,
+        1000.0,
+    );
+    let _ = aircraft_router_planner_cli::dubins::dubins_path(
+        (0.0, 0.0),
+        0.0,
+        (1.0, 0.0),
+        0.0,
+        -5.0, // 负半径
+    );
+    let _ = aircraft_router_planner_cli::dubins::dubins_path(
+        (0.0, 0.0),
+        0.0,
+        (1e9, 1e9), // 极端坐标
+        0.0,
+        1e12,
+    );
+}
+
+#[test]
+fn smooth_extreme_geometry_no_panic() {
+    // 极端经纬度/高差
+    let p = Path::new(vec![
+        PathPoint::new(-180.0, -90.0, -1000.0),
+        PathPoint::new(180.0, 90.0, 100_000.0),
+        PathPoint::new(0.0, 0.0, 0.0),
+    ]);
+    let check = always_true();
+    let _ = theta_star_smooth(&p, &check);
+    let _ = greedy_simplify(&p, 1e-9);
+    let _ = chaikin_smooth(&p, 10);
+    let _ = catmull_rom_spline(&p, 100);
+    let _ = dubins_fit(&p, 1e-9, 4);
+    // verify 极端
+    let opts = SmoothOptions::default();
+    let ctx = VerifyContext {
+        terrain: None,
+        nofly: None,
+    };
+    let _ = verify_path(&p, None, &opts, &ctx, None);
+}
+
+#[test]
+fn smooth_chain_degenerate_no_panic() {
+    let opts = SmoothOptions::default();
+    let ctx = VerifyContext {
+        terrain: None,
+        nofly: None,
+    };
+    // 空链 + 空路径
+    let p = Path::new(vec![]);
+    let r: SmoothResult = smooth_path_chain(&p, &[], &opts, &ctx, None);
+    assert!(!r.verify.ok);
+    // NaN 输入走链
+    let bad = Path::new(vec![PathPoint::new(f64::NAN, 0.0, 100.0)]);
+    let check = always_true();
+    let chain: Vec<Box<dyn Smoother>> = vec![Box::new(ThetaStarSmoother { check: &check })];
+    let _ = smooth_path_chain(&bad, &chain, &opts, &ctx, None);
+    // 退化的 verify 参数（零采样/负容差）不 panic
+    let opts2 = SmoothOptions {
+        verify_seg_samples: 0,
+        chord_tol_m: -1.0,
+        ..Default::default()
+    };
+    let _ = verify_path(&bad, None, &opts2, &ctx, None);
+}
