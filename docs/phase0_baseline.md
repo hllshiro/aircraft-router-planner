@@ -21,6 +21,7 @@
 | B3 rstar 索引/碰撞（~30%） | 1000 条线段 | 900ms | **≈1ms**（含候选精确检查） | PASS |
 | B4 射线-地形求交（~40%） | 1000 条 LOS | 1200ms | **13.4ms** | PASS |
 | B5 细层基元拟合（~10%） | 100 段 | 300ms | **0.14ms** | PASS |
+| t_load_decompress 内置格式加载（Phase 1 实测，cli benches/b_load_decompress.rs） | — | ≤300ms | parse 1024² **8.89ms** / 1000 次采样 **171.75µs** | PASS |
 
 ## 标定值（已定 / 待数据）
 
@@ -54,4 +55,6 @@
 - 数据规格：分辨率 >10 弧秒拒绝；压缩后 ≤800MB（L10 实测 179.5MiB 达标；Beijing_DEM 测试 8.5MiB/区域）
 
 ## 崩溃测试套件（B9，CI 一票否决）
-- `tests/crash_suite.rs` 13 用例 + 单元 9 = **22 测试全过**；FMM 越界源/空网格、Dubins NaN/零半径/极端坐标、Terrain 出界/NaN、rstar 空树均不 panic
+- Phase 0：`tests/crash_suite.rs` 13 用例 + 单元 9 = **22 测试全过**；FMM 越界源/空网格、Dubins NaN/零半径/极端坐标、Terrain 出界/NaN、rstar 空树均不 panic
+- Phase 1（cli）：`cli/tests/crash_suite.rs` **20 用例**（config 畸形/非法坐标/退化、coord NaN/极端反算、terrain 垃圾字节/截断/零维度、spatial 空树+NaN 查询、costfield 退化网格/不可达回溯、输出序列化）+ 单元 **42** = **62 测试全过**
+- 内置格式 fail-fast 三用例：哈希不符 / 版本不符 / 文件截断（+ 魔数不符）均 fail-fast 返回错误

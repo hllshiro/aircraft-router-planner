@@ -1,0 +1,41 @@
+# AircraftRouterPlanner 核心 CLI（Phase 1 核心骨架）
+#
+# 依赖说明（技术方案 3.2/3.2.1）：
+#   - 核心 8 依赖 + 数据源 3 依赖（geotiff/dted2/ruzstd），全部纯 Rust 零 C 依赖
+#   - 静态编译红线：禁 blas/proj/flate2 C 后端（红线注释见 phase0/Cargo.toml 同款）
+#   - 版本锁定（2026-08 crates.io 实测）：
+#       rand ^0.10（geo 0.33.1 非可选依赖，勿降 0.8）
+#       rstar ^0.12（geo 0.33.1 锁 ^0.12，勿升 0.13）
+#       geotiff ^0.1（锁具体版本，依赖全纯 Rust，v0.1.0 后有 breaking 预告）
+#       dted2 ^1（锁 1.0.0，2024-08 后未更新但 1.0 稳定，升级需单独评审）
+#       ruzstd（纯 Rust Zstd 解码，勿引 libzstd C 后端）
+#   - thiserror 双版本（^2 + dted2 带 ^1）可接受（体积影响可忽略）
+
+[package]
+name = "aircraft-router-planner-cli"
+version.workspace = true
+edition.workspace = true
+description = "AircraftRouterPlanner 核心 CLI（lib+bin）：JSON 契约解析 / 坐标系统 / 地形数据源 / 代价场 / 空间索引"
+
+[dependencies]
+clap.workspace = true
+geo.workspace = true
+nalgebra.workspace = true
+rand.workspace = true
+rstar.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+# 数据源（发布版必含，技术方案 3.2 C）
+geotiff = "0.1"
+dted2 = "1.0.0"
+ruzstd = "0.7"
+geo-types = "0.7"
+sha2 = "0.10"
+
+[dev-dependencies]
+criterion.workspace = true
+
+[[bench]]
+name = "b_load_decompress"
+harness = false

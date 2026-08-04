@@ -55,10 +55,3 @@ harness = false
 [[bench]]
 name = "b7_real_costfield_fmm"
 harness = false
-
-[profile.release]
-# 确定性构建（技术方案 5.2）：禁 FMA 收缩与固定 target-cpu 由 .cargo/config.toml 的
-# rustflags 控制（-C target-feature=-fma）；此处仅做通用 release 优化。
-opt-level = 3
-lto = "thin"
-codegen-units = 1

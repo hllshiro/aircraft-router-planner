@@ -1,0 +1,35 @@
+# AircraftRouterPlanner workspace（技术方案 4.1 模块划分）
+#
+# 成员：
+#   cli/    —— 核心 CLI（lib+bin），正式工程（Phase 1 起）
+#   phase0/ —— 性能原型与基准工程（已并入 workspace 保持可复跑，代码安排后期再讨论）
+#   demo/   —— 开发期可视化工具（Phase 5 落地，暂不建）
+#
+# 静态编译红线与版本锁定见 cli/Cargo.toml 与 docs/技术方案.md 3.2/3.2.1。
+# 确定性构建 flags 在根 .cargo/config.toml（workspace 级生效）。
+
+[workspace]
+members = ["cli", "phase0"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+
+[workspace.dependencies]
+clap = { version = "4.6.5", features = ["derive"] }
+geo = "0.33.1"
+nalgebra = "0.35.0"
+rand = "0.10"
+rstar = "0.12"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+thiserror = "2.0.19"
+criterion = "0.8.2"
+
+[profile.release]
+# 确定性构建（技术方案 5.2）：禁 FMA 收缩与固定 target-cpu 由根 .cargo/config.toml
+# 的 rustflags 控制（-C target-feature=-fma）；此处仅做通用 release 优化。
+opt-level = 3
+lto = "thin"
+codegen-units = 1
