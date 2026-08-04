@@ -10,6 +10,8 @@ use aircraft_router_planner_cli::costfield::{backtrack_path, fmm_propagate, Cost
 use aircraft_router_planner_cli::error::{AppError, InputInvalidReason};
 use aircraft_router_planner_cli::spatial::{CircleIndex, RadarEntry, RadarIndex};
 use aircraft_router_planner_cli::terrain::builtin::{write_pack_raw, BuiltinSource};
+use aircraft_router_planner_cli::terrain::mask::{GeoMask, MaskedSource};
+use aircraft_router_planner_cli::terrain::{los_blocked, semantic_degradation_ratios, TerrainSource};
 
 // ==================== config ====================
 
@@ -150,6 +152,115 @@ fn open_unsupported_extension_no_panic() {
     let dir = std::env::temp_dir();
     let p = dir.join("terrain.xyz");
     let _ = crate_terrain_open(&p);
+}
+
+// ==================== mask（Phase 2 掩膜集成） ====================
+
+#[test]
+fn mask_garbage_bytes_no_panic() {
+    let bytes = [0u8; 4096];
+    assert!(GeoMask::parse(&bytes).is_err());
+}
+
+#[test]
+fn mask_empty_bytes_no_panic() {
+    let bytes: [u8; 0] = [];
+    assert!(GeoMask::parse(&bytes).is_err());
+}
+
+#[test]
+fn mask_truncated_index_no_panic() {
+    // magic 正确 + version 2，但索引区截断
+    let mut b = vec![0u8; 100];
+    b[0..16].copy_from_slice(b"ARPACK_MASK_V2__");
+    b[16..20].copy_from_slice(&2u32.to_be_bytes());
+    b[24..28].copy_from_slice(&1u32.to_be_bytes()); // rows=1
+    b[28..32].copy_from_slice(&4u32.to_be_bytes()); // cols=4
+    assert!(GeoMask::parse(&b).is_err());
+}
+
+#[test]
+fn mask_absurd_dimensions_no_panic() {
+    // rows/cols 巨大但文件小 → 校验失败（不 OOM）
+    let mut b = vec![0u8; 64 + 2000 * 8 + 16];
+    b[0..16].copy_from_slice(b"ARPACK_MASK_V2__");
+    b[16..20].copy_from_slice(&2u32.to_be_bytes());
+    b[24..28].copy_from_slice(&2000u32.to_be_bytes()); // rows=2000
+    b[28..32].copy_from_slice(&4u32.to_be_bytes());
+    assert!(GeoMask::parse(&b).is_err());
+}
+
+/// 极小合法掩膜（1×4：行 0 = 陆地 [1,3)）。
+fn tiny_mask_bytes() -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(b"ARPACK_MASK_V2__");
+    out.extend_from_slice(&2u32.to_be_bytes()); // version
+    out.extend_from_slice(&1u32.to_be_bytes()); // arcsec
+    out.extend_from_slice(&1u32.to_be_bytes()); // rows
+    out.extend_from_slice(&4u32.to_be_bytes()); // cols
+    out.extend_from_slice(&0.0f64.to_be_bytes()); // lon0
+    out.extend_from_slice(&(-90.0f64).to_be_bytes()); // lat0
+    out.extend_from_slice(&1.0f64.to_be_bytes()); // res
+    out.extend_from_slice(&[0u8; 8]); // padding
+    let seg_base = 64 + (1 + 1) * 8;
+    out.extend_from_slice(&[seg_base as u64, (seg_base + 4 + 9) as u64].iter().flat_map(|o| o.to_be_bytes()).collect::<Vec<_>>().as_slice());
+    out.extend_from_slice(&1u32.to_be_bytes()); // nseg
+    out.push(1);
+    out.extend_from_slice(&1u32.to_be_bytes());
+    out.extend_from_slice(&3u32.to_be_bytes());
+    out
+}
+
+#[test]
+fn mask_class_at_extreme_coords_no_panic() {
+    let m = GeoMask::parse(&tiny_mask_bytes()).unwrap();
+    // 极端/非有限坐标不 panic
+    assert!(m.class_at(f64::NAN, 0.0) == aircraft_router_planner_cli::terrain::mask::MaskClass::Sea);
+    assert!(m.class_at(f64::INFINITY, -90.0) == aircraft_router_planner_cli::terrain::mask::MaskClass::Sea);
+    assert!(m.class_at(-f64::INFINITY, -90.0) == aircraft_router_planner_cli::terrain::mask::MaskClass::Sea);
+    assert!(m.class_at(0.0, 90.0) == aircraft_router_planner_cli::terrain::mask::MaskClass::Sea);
+    assert!(m.class_at(0.0, -90.0) == aircraft_router_planner_cli::terrain::mask::MaskClass::Sea);
+    assert!(m.class_at(180.0, 0.0) == aircraft_router_planner_cli::terrain::mask::MaskClass::Sea);
+    assert!(m.class_at(-180.0, 0.0) == aircraft_router_planner_cli::terrain::mask::MaskClass::Sea);
+}
+
+#[test]
+fn masked_source_empty_inner_no_panic() {
+    // 空 TerrainSource（0 尺寸）包装掩膜：采样不 panic（返回 OOB/NoData）
+    let m = GeoMask::parse(&tiny_mask_bytes()).unwrap();
+    let empty = aircraft_router_planner_cli::terrain::memory::Terrain {
+        rows: 0,
+        cols: 0,
+        origin_lon: 0.0,
+        origin_lat: 0.0,
+        cell_lon_deg: 1.0,
+        cell_lat_deg: 1.0,
+        h: vec![],
+    };
+    let masked = MaskedSource::new(empty, m);
+    let _ = masked.sample_at(1.5, -89.5);
+    let _ = masked.sample_at(f64::NAN, f64::NAN);
+}
+
+#[test]
+fn los_extreme_and_nodata_no_panic() {
+    use aircraft_router_planner_cli::terrain::memory::Terrain;
+    // 全 NaN 地形（全空洞）→ NoData → LOS 不遮挡（保守端），不 panic
+    let t = Terrain {
+        rows: 4,
+        cols: 4,
+        origin_lon: 0.0,
+        origin_lat: 0.0,
+        cell_lon_deg: 1.0,
+        cell_lat_deg: 1.0,
+        h: vec![f32::NAN; 16],
+    };
+    let _ = los_blocked(&t, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 100);
+    let _ = los_blocked(&t, f64::NAN, 0.0, f64::INFINITY, 1.0, 1.0, 0.0, 1.0, 0);
+    // 退化统计：n=0 / 全空洞
+    let (nd, oob) = semantic_degradation_ratios(&t, 0);
+    assert_eq!((nd, oob), (0.0, 0.0));
+    let _ = semantic_degradation_ratios(&t, 16);
 }
 
 // ==================== spatial ====================

@@ -4,12 +4,16 @@
 //! - `fmm_propagate`：Godunov 迎风差分 + BinaryHeap 窄带，O(NlogN)，确定性；
 //! - `backtrack_path`：沿 T 场最大下降方向回溯（走廊质量代理）；
 //! - `synthetic_cost_field`：测试用合成场（平滑地形 + 雷达球 + 禁飞块）；
+//! - `build_semantic_cost_field`：空洞分层语义代价场（Land/Water/Lake 基础 1.0、
+//!   NoData 5x 初值、OOB 禁行墙，主管 2026-08-04 拍板）；
 //! - Phase 2 以真实威胁/地形构建代价场（本模块只做传播骨架）。
 //!
 //! Phase 0 实测（docs/phase0_baseline.md）：128² 单次传播 2.62ms，常数 11-12.5ns/op。
 
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
+
+use crate::terrain::Sample;
 
 /// 2D 代价场（行优先，`idx = r * cols + c`）。`cost >= 1`，越大越难通过。
 #[derive(Debug, Clone)]
@@ -107,6 +111,25 @@ pub fn synthetic_cost_field(rows: usize, cols: usize, cell_m: f64, seed: u64) ->
         }
     }
 
+    f
+}
+
+/// 语义代价场（空洞分层，主管 2026-08-04 拍板）。
+/// 对每个格点 `(r, c)` 调用 `sample` 得到语义采样，映射为代价：
+/// - Land/Water/Lake → 1.0（基础代价；地形高度代价由调用方按高度叠加）；
+/// - NoData → `nodata_mult`（NODATA 高代价倍数，初值 5x）；
+/// - OutOfBounds → `f32::INFINITY`（禁行墙，路径不得越出）。
+pub fn build_semantic_cost_field<F>(rows: usize, cols: usize, mut sample: F, nodata_mult: f32) -> CostField
+where
+    F: FnMut(usize, usize) -> Sample,
+{
+    let mut f = CostField::new(rows, cols);
+    for r in 0..rows {
+        for c in 0..cols {
+            let i = r * cols + c;
+            f.cost[i] = sample(r, c).base_cost(nodata_mult);
+        }
+    }
     f
 }
 

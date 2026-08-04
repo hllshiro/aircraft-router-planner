@@ -16,6 +16,10 @@ phase0_out/
 # phase0 real-DEM data (Beijing_DEM f32 raw, ~150MiB, regenerate via scripts/beijing_prep.py)
 phase0/data/
 
+# python caches (phase0/scripts)
+__pycache__/
+*.pyc
+
 # build artifacts (workspace root target/ + crate-local targets)
 target/
 **/target/
