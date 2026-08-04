@@ -6,3 +6,12 @@
 
 # archived TODO files (cleanup 2026-08-04)
 todo_archive_2026-08-04.zip
+
+# archived Phase 0 TODO files (cleanup 2026-08-04, Phase 0 completed)
+todo_archive_phase0_2026-08-04.zip
+
+# phase0 compression artifacts (terrain.zstd etc., regenerate per data source)
+phase0_out/
+
+# phase0 real-DEM data (Beijing_DEM f32 raw, ~150MiB, regenerate via scripts/beijing_prep.py)
+phase0/data/

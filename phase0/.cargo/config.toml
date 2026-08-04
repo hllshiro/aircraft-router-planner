@@ -1,0 +1,15 @@
+# AircraftRouterPlanner Phase 0 —— 确定性构建配置（技术方案 5.2）
+# 跨平台逐位复现约定：
+#  - 编译期 IEEE754 严格语义（默认即严格，不引入 fast-math 类优化）
+#  - 显式禁 FMA 收缩：-C target-feature=-fma（防 LLVM 自动 FMA 引入跨平台位差）
+#  - target-cpu 保持默认(generic)，不设 native（native 随机器变化破坏跨平台复现）
+#  - 并行归约顺序确定性由代码层保证（BTreeMap/固定索引分块 reduce，见方案 5.2）
+
+[build]
+rustflags = ["-C", "target-feature=-fma"]
+
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=-fma"]
+
+[target.x86_64-unknown-linux-musl]
+rustflags = ["-C", "target-feature=-fma"]

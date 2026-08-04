@@ -1,0 +1,64 @@
+[package]
+name = "phase0"
+version = "0.1.0"
+edition = "2024"
+description = "AircraftRouterPlanner Phase 0 性能原型（FMM 粗层传播 / rstar 索引 / 射线-地形求交 / 细层基元 benchmark）"
+
+# ===== 静态编译红线（技术方案 3.2.1，2026-08 核实）=====
+# ① nalgebra 禁用 blas feature（会拉 openblas-src C/Fortran，破坏 musl 静态单二进制）
+#    ——当前默认特性(macros/matrixmultiply/std)均为纯 Rust，勿启用 blas 相关特性
+# ② geo 不启用 proj feature（PROJ C 库绑定）；geo 只做测地线算法，不做投影——投影层自研
+#    （自定义 TM 主算面 + 输出投影 codec，见技术方案 4.2.3）
+# ③ flate2 保持默认 rust_backend，不启用 zlib / zlib-ng-compat（C 后端）
+# ④ Zstd 解码运行时用 ruzstd（纯 Rust），不引入 libzstd（C）；压缩仅开发期 zstd CLI 完成
+# 版本锁定（crates.io 2026-08 实测）：
+#   rstar ^0.12（geo 0.33.1 锁 ^0.12，勿升 0.13 —— 升了即双版本）
+#   rand ^0.10（geo 0.33.1 非可选依赖 rand ^0.10，勿降 0.8 —— 降了即双版本）
+
+[dependencies]
+clap = { version = "4.6.5", features = ["derive"] }
+geo = "0.33.1"
+nalgebra = "0.35.0"
+rand = "0.10"
+rstar = "0.12"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+thiserror = "2.0.19"
+
+[dev-dependencies]
+criterion = "0.8.2"
+
+[[bench]]
+name = "b1_fmm"
+harness = false
+
+[[bench]]
+name = "b2_costfield_reuse"
+harness = false
+
+[[bench]]
+name = "b3_rstar_index"
+harness = false
+
+[[bench]]
+name = "b4_ray_terrain"
+harness = false
+
+[[bench]]
+name = "b5_dubins"
+harness = false
+
+[[bench]]
+name = "b6_real_dem"
+harness = false
+
+[[bench]]
+name = "b7_real_costfield_fmm"
+harness = false
+
+[profile.release]
+# 确定性构建（技术方案 5.2）：禁 FMA 收缩与固定 target-cpu 由 .cargo/config.toml 的
+# rustflags 控制（-C target-feature=-fma）；此处仅做通用 release 优化。
+opt-level = 3
+lto = "thin"
+codegen-units = 1
