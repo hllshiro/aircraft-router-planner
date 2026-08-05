@@ -17,6 +17,10 @@ phase0/*_analyze_out.json
 # phase0 real-DEM data (Beijing_DEM f32 raw, ~150MiB, regenerate via scripts/beijing_prep.py)
 phase0/data/
 
+# phase0 transient run logs / scratch (regenerated per run)
+phase0/recompress_z19.log
+phase0/debug_err.txt
+
 # python caches (phase0/scripts)
 __pycache__/
 *.pyc

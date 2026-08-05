@@ -73,9 +73,31 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
             match p {
                 Some(p) => Some(Box::new(BuiltinSource::open(&p)?)),
                 None => {
-                    return Err(AppError::Data(
-                        "terrain.source=path/builtin 但未提供地形文件（--terrain 或 terrain.path）".into(),
-                    ))
+                    // 主管决策 2026-08-05：默认低精度地形 = 量化中国数据（china_dem_l12.arpack）。
+                    // 候选：exe 同目录 / exe 上溯 workspace 根 / 工作目录相对路径。
+                    let mut candidates = vec![
+                        PathBuf::from("china_dem_l12.arpack"),
+                        PathBuf::from("phase0/data/pending/china_dem_l12.arpack"),
+                        PathBuf::from("../phase0/data/pending/china_dem_l12.arpack"),
+                    ];
+                    if let Ok(exe) = std::env::current_exe() {
+                        if let Some(dir) = exe.parent() {
+                            candidates.insert(0, dir.join("china_dem_l12.arpack"));
+                            // 上溯 3 层（target/release → target → workspace 根），逐层试开发路径
+                            for anc in dir.ancestors().skip(1).take(3) {
+                                candidates.push(anc.join("phase0/data/pending/china_dem_l12.arpack"));
+                            }
+                        }
+                    }
+                    if let Some(c) = candidates.iter().find(|c| c.exists()) {
+                        Some(Box::new(BuiltinSource::open(c)?))
+                    } else {
+                        return Err(AppError::Data(
+                            "terrain.source=path/builtin 但未提供地形文件，且默认低精度地形 \
+                             (china_dem_l12.arpack) 未找到（--terrain / terrain.path / exe 同目录 / phase0/data/pending）"
+                                .into(),
+                        ));
+                    }
                 }
             }
         }
@@ -154,7 +176,9 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
 
     // 5b. 雷达静态代价（Phase 4 M3）：膨胀半径内 cost ×(1+几何并集概率)——FMM 倾向绕行；
     //     LOS 动态遮挡由 verify 威胁评估判定（不进静态代价场）。
+    let mut degradations = Vec::new();
     let params_merged = crate::config::DefaultParams::default().merge(&input.mission.parameters);
+    radar_param_degradations(input, &mut degradations);
     let threat_params = radar_threat_params(&params_merged);
     let threat = SphericalRadarThreat::new(&input.mission.red_forces.radars, threat_params.clone());
     if !input.mission.red_forces.radars.is_empty() {
@@ -175,7 +199,6 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
     // 6. 每机：分段 FMM（start → mid[0..] → target，共享代价场）→ 拼接 → 平滑 → 输出
     let mut out_vehicles = Vec::new();
     let mut fmm_ms = 0.0f64;
-    let mut degradations = Vec::new();
     for v in &specs {
         // 段序列：起点 + 必经点 + 目标
         let mut seg_ends: Vec<Geo> = Vec::with_capacity(v.mid_waypoints.len() + 2);
@@ -365,6 +388,8 @@ fn circle_index(zones: &[&Zone]) -> CircleIndex {
 }
 
 /// 雷达威胁参数（默认参数表落默认值；输入覆盖合并）。
+/// base_p 与 p_cross 联动（外部可经 parameters.p_cross 同时调阈值与探测概率基准；
+/// 真实雷达参数标定前两者均为占位，见 threat.rs 文档）。
 fn radar_threat_params(d: &crate::config::DefaultParams) -> ThreatParams {
     ThreatParams {
         radar_inflation: d.radar_inflation,
@@ -372,6 +397,37 @@ fn radar_threat_params(d: &crate::config::DefaultParams) -> ThreatParams {
         p_cross: d.p_cross,
         suppression_delta: d.suppression_delta,
         base_p: d.p_cross,
+    }
+}
+
+/// 无效参数回落默认的降级报告（主管决策 2026-08-05：无外部参数或参数无效使用默认值）。
+/// merge 已回落；此处把"输入无效"事实记入 stats.degradations 供验收可见。
+fn radar_param_degradations(input: &Input, out: &mut Vec<String>) {
+    let p = &input.mission.parameters;
+    if let Some(v) = p.radar_inflation
+        && !(v.is_finite() && v > 1.0)
+    {
+        out.push(format!("parameter radar_inflation={v} invalid -> default 1.2"));
+    }
+    if let Some(v) = p.p_cross
+        && !(v.is_finite() && v >= 0.0 && v <= 1.0)
+    {
+        out.push(format!("parameter p_cross={v} invalid -> default 0.1"));
+    }
+    if let Some(v) = p.suppression_delta
+        && !(v.is_finite() && v >= 0.0 && v < 1.0)
+    {
+        out.push(format!("parameter suppression_delta={v} invalid -> default 0.5"));
+    }
+    if let Some(v) = p.los_mask_coef
+        && !(v.is_finite() && v >= 0.0 && v <= 1.0)
+    {
+        out.push(format!("parameter los_mask_coef={v} invalid -> default 0.08"));
+    }
+    if let Some(s) = &p.detection_curve
+        && !matches!(s.to_ascii_lowercase().as_str(), "exponential" | "linear")
+    {
+        out.push(format!("parameter detection_curve={s} invalid -> default exponential"));
     }
 }
 

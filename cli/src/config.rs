@@ -390,8 +390,10 @@ pub struct LaunchEnvelope {
 pub struct ParamsOverride {
     #[serde(default)]
     pub radar_inflation: Option<f64>,
+    /// 探测曲线形态字符串（"exponential"/"linear" 不区分大小写；无效 → 默认 exponential，
+    /// 主管决策 2026-08-05：无外部参数或参数无效使用默认值）。
     #[serde(default)]
-    pub detection_curve: Option<DetectionCurve>,
+    pub detection_curve: Option<String>,
     #[serde(default)]
     pub p_cross: Option<f64>,
     #[serde(default)]
@@ -519,22 +521,30 @@ impl DefaultParams {
     }
 
     /// 合并参数覆盖（覆盖优先，未覆盖用默认）。
+    /// 数值参数无效（非有限/出域）与无效曲线字符串 → 回落默认（主管决策 2026-08-05：
+    /// 无外部参数或参数无效使用默认值；回落由 solver 记入 stats.degradations）。
     pub fn merge(&self, o: &ParamsOverride) -> DefaultParams {
         let mut d = self.clone();
-        if let Some(v) = o.radar_inflation {
+        // 合法域与旧契约一致（radar_inflation>1 为膨胀、p_cross/los_mask_coef∈[0,1]、
+        // suppression_delta∈[0,1)）；出域/非有限 → 回落默认。
+        if let Some(v) = o.radar_inflation.filter(|v| v.is_finite() && *v > 1.0) {
             d.radar_inflation = v;
         }
-        if let Some(v) = o.detection_curve {
-            d.detection_curve = v;
-        }
-        if let Some(v) = o.p_cross {
+        if let Some(v) = o.p_cross.filter(|v| v.is_finite() && *v >= 0.0 && *v <= 1.0) {
             d.p_cross = v;
         }
-        if let Some(v) = o.suppression_delta {
+        if let Some(v) = o.suppression_delta.filter(|v| v.is_finite() && *v >= 0.0 && *v < 1.0) {
             d.suppression_delta = v;
         }
-        if let Some(v) = o.los_mask_coef {
+        if let Some(v) = o.los_mask_coef.filter(|v| v.is_finite() && *v >= 0.0 && *v <= 1.0) {
             d.los_mask_coef = v;
+        }
+        if let Some(s) = o.detection_curve.as_deref() {
+            match s.to_ascii_lowercase().as_str() {
+                "exponential" => d.detection_curve = DetectionCurve::Exponential,
+                "linear" => d.detection_curve = DetectionCurve::Linear,
+                _ => {} // 无效 → 默认
+            }
         }
         if let Some(v) = o.main_budget_ms {
             d.main_budget_ms = v;
@@ -617,9 +627,11 @@ pub struct VehicleOutput {
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct PathPoint {
-    /// 输出投影坐标（默认经纬度；projection 声明时按 codec 转换）
+    /// 经度（度，WGS84；主管决策 2026-08-05：输入输出坐标点均为经纬高定义，x=经度）
     pub x: f64,
+    /// 纬度（度，WGS84；y=纬度）
     pub y: f64,
+    /// MSL 几何高度（米；与 path.rs 高程口径一致）
     pub alt_m: f64,
 }
 
@@ -690,23 +702,8 @@ pub fn validate(input: &Input) -> Result<(), AppError> {
             return Err(AppError::InputInvalid(InputInvalidReason::OutOfBounds));
         }
     }
-    // 参数覆盖数值域
-    let o = &input.mission.parameters;
-    if let Some(v) = o.radar_inflation {
-        if v <= 1.0 {
-            return Err(AppError::InputInvalid(InputInvalidReason::OutOfBounds));
-        }
-    }
-    if let Some(v) = o.p_cross {
-        if !(0.0..=1.0).contains(&v) {
-            return Err(AppError::InputInvalid(InputInvalidReason::OutOfBounds));
-        }
-    }
-    if let Some(v) = o.los_mask_coef {
-        if !(0.0..=1.0).contains(&v) {
-            return Err(AppError::InputInvalid(InputInvalidReason::OutOfBounds));
-        }
-    }
+    // 参数覆盖数值域：主管决策 2026-08-05（无外部参数或参数无效使用默认值）——
+    // 不再 fail-fast，无效值由 DefaultParams::merge 回落默认，事实记入 stats.degradations。
     Ok(())
 }
 
@@ -999,5 +996,40 @@ mod tests {
         let m = d.merge(&o);
         assert_eq!(m.radar_inflation, 1.5);
         assert_eq!(m.los_mask_coef, 0.08);
+    }
+
+    #[test]
+    fn invalid_params_fall_back_to_defaults() {
+        // 主管决策 2026-08-05：无外部参数或参数无效使用默认值。
+        let d = DefaultParams::default();
+        let o = ParamsOverride {
+            radar_inflation: Some(-3.0),            // 无效：≤1
+            p_cross: Some(5.0),                     // 无效：>1
+            suppression_delta: Some(2.0),           // 无效：≥1
+            detection_curve: Some("weird".into()),  // 无效：非 exponential/linear
+            los_mask_coef: Some(-0.5),              // 无效：<0
+            ..Default::default()
+        };
+        let m = d.merge(&o);
+        assert_eq!(m.radar_inflation, d.radar_inflation);
+        assert_eq!(m.p_cross, d.p_cross);
+        assert_eq!(m.suppression_delta, d.suppression_delta);
+        assert_eq!(m.detection_curve, DetectionCurve::Exponential);
+        assert_eq!(m.los_mask_coef, d.los_mask_coef);
+    }
+
+    #[test]
+    fn invalid_detection_curve_parsed_case_insensitive() {
+        let d = DefaultParams::default();
+        let o = ParamsOverride {
+            detection_curve: Some("LINEAR".into()),
+            ..Default::default()
+        };
+        assert_eq!(d.merge(&o).detection_curve, DetectionCurve::Linear);
+        let o2 = ParamsOverride {
+            detection_curve: Some("linear".into()),
+            ..Default::default()
+        };
+        assert_eq!(d.merge(&o2).detection_curve, DetectionCurve::Linear);
     }
 }

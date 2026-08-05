@@ -8,6 +8,7 @@ use aircraft_router_planner_cli::config::{self, Input};
 use aircraft_router_planner_cli::coord::{Ellipsoid, Geo, TransverseMercator, WebMercator};
 use aircraft_router_planner_cli::costfield::{backtrack_path, fmm_propagate, CostField};
 use aircraft_router_planner_cli::error::{AppError, InputInvalidReason};
+use aircraft_router_planner_cli::solver;
 use aircraft_router_planner_cli::spatial::{CircleIndex, RadarEntry, RadarIndex};
 use aircraft_router_planner_cli::terrain::builtin::{write_pack_raw, BuiltinSource};
 use aircraft_router_planner_cli::terrain::mask::{GeoMask, MaskedSource};
@@ -471,3 +472,44 @@ fn smooth_chain_degenerate_no_panic() {
     };
     let _ = verify_path(&bad, None, &opts2, &ctx, None);
 }
+
+// ==================== 无效参数回落默认（主管决策 2026-08-05） ====================
+
+#[test]
+fn invalid_radar_params_recorded_as_degradations() {
+    // 无外部参数或参数无效 → 使用默认值，且回落事实记入 stats.degradations。
+    let s = r#"{
+        "schema_version":"0.20",
+        "mission":{
+            "start":{"lon":115.0,"lat":39.0,"alt_m":3000},
+            "target":{"lon":116.5,"lat":39.9,"alt_m":3000},
+            "parameters":{
+                "radar_inflation":-1.0,
+                "p_cross":5.0,
+                "suppression_delta":9.0,
+                "detection_curve":"weird"
+            }
+        }
+    }"#;
+    let input = Input::from_json_str(s).unwrap();
+    config::validate(&input).unwrap();
+    let out = solver::solve(&input, &solver::SolveParams::default(), 0).unwrap();
+    let degs = &out.stats.degradations;
+    assert!(
+        degs.iter().any(|d| d.contains("radar_inflation=-1 invalid -> default 1.2")),
+        "missing radar_inflation degradation: {degs:?}"
+    );
+    assert!(
+        degs.iter().any(|d| d.contains("p_cross=5 invalid -> default 0.1")),
+        "missing p_cross degradation: {degs:?}"
+    );
+    assert!(
+        degs.iter().any(|d| d.contains("suppression_delta=9 invalid -> default 0.5")),
+        "missing suppression_delta degradation: {degs:?}"
+    );
+    assert!(
+        degs.iter().any(|d| d.contains("detection_curve=weird invalid -> default exponential")),
+        "missing detection_curve degradation: {degs:?}"
+    );
+}
+
