@@ -25,6 +25,11 @@ phase0/debug_err.txt
 __pycache__/
 *.pyc
 
+# demo web (node_modules/dist 可再生；开发期工具不入库)
+demo/web/node_modules/
+demo/web/dist/
+
 # build artifacts (workspace root target/ + crate-local targets)
 target/
 **/target/
+DEMO_TODO.md 

@@ -1,0 +1,209 @@
+import { useCallback, useMemo } from 'react';
+import { Canvas, useThree } from '@react-three/fiber';
+import { OrbitControls, Grid } from '@react-three/drei';
+import * as THREE from 'three';
+import type { ThreeEvent } from '@react-three/fiber';
+import type { Waypoint, GeoRef, VehicleInput, Radar, Zone, VehicleOutput, Vec2 } from '../types';
+import { geoToLocal, geoPointToLocal, localToGeo } from '../types';
+import { StartMarker } from './StartMarker';
+import { TargetZone } from './TargetZone';
+import { RadarSphere } from './RadarSphere';
+import { NFZPrism } from './NFZPrism';
+import { PathLine } from './PathLine';
+
+interface Scene3DProps {
+  ref: GeoRef;
+  start: Waypoint;
+  target: Waypoint;
+  vehicles: VehicleInput[];
+  radars: Radar[];
+  zones: Zone[];
+  results: VehicleOutput[] | null;
+  onGroundClick: (wp: Waypoint) => void;
+  activeClickMode: 'start' | 'target' | null;
+}
+
+/** 圆形 zone → 局部平面多边形（24 边近似） */
+function circleToLocalPolygon(center: [number, number], radiusKm: number, ref: GeoRef): Vec2[] {
+  const pts: Vec2[] = [];
+  const cx = (center[0] - ref.lon) * 111320 * Math.cos((ref.lat * Math.PI) / 180);
+  const cy = (center[1] - ref.lat) * 110574;
+  const r = radiusKm * 1000;
+  for (let i = 0; i < 24; i++) {
+    const a = (i / 24) * Math.PI * 2;
+    pts.push([cx + r * Math.cos(a), cy + r * Math.sin(a)]);
+  }
+  return pts;
+}
+
+function zoneBoundaryLocal(zone: Zone, ref: GeoRef): Vec2[] {
+  if (zone.shape === 'circle') {
+    const g = zone.geometry as { center: [number, number]; radius_km: number };
+    return circleToLocalPolygon(g.center, g.radius_km, ref);
+  }
+  return (zone.geometry as { vertices: [number, number][] }).vertices.map(
+    ([lon, lat]) => [
+      (lon - ref.lon) * 111320 * Math.cos((ref.lat * Math.PI) / 180),
+      (lat - ref.lat) * 110574,
+    ],
+  );
+}
+
+function GroundClickPlane({
+  active,
+  onClick,
+  ref,
+}: {
+  active: boolean;
+  onClick: (wp: Waypoint) => void;
+  ref: GeoRef;
+}) {
+  const { camera, pointer, raycaster } = useThree();
+
+  const handleClick = useCallback(
+    (e: ThreeEvent<MouseEvent>) => {
+      if (!active) return;
+      e.stopPropagation();
+      raycaster.setFromCamera(pointer, camera);
+      const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+      const intersection = new THREE.Vector3();
+      raycaster.ray.intersectPlane(plane, intersection);
+      if (intersection) {
+        // Three.js [x, y, z] → 局部平面 [x, z]（东, 北）→ 经纬度
+        onClick(localToGeo([intersection.x, intersection.z, 0], ref));
+      }
+    },
+    [active, onClick, ref, camera, pointer, raycaster],
+  );
+
+  return (
+    <mesh rotation={[-Math.PI / 2, 0, 0]} visible={active} onClick={handleClick}>
+      <planeGeometry args={[500000, 500000]} />
+      <meshBasicMaterial visible={false} />
+    </mesh>
+  );
+}
+
+const ZONE_COLORS: Record<string, string> = {
+  no_fly: '#ff8800',
+  restricted: '#44aaff',
+  obstacle: '#ff4455',
+};
+
+export function Scene3D({
+  ref,
+  start,
+  target,
+  vehicles,
+  radars,
+  zones,
+  results,
+  onGroundClick,
+  activeClickMode,
+}: Scene3DProps) {
+  const startPos = useMemo(() => geoToLocal(start, ref), [start, ref]);
+  const targetPos = useMemo(() => geoToLocal(target, ref), [target, ref]);
+
+  const radarMeshes = radars.map((r) => ({
+    id: r.id,
+    center: geoPointToLocal(r.lon, r.lat, r.alt_m ?? 10, ref),
+    radiusM: r.radius_km * 1000,
+  }));
+
+  const zoneMeshes = zones.map((z) => ({
+    id: z.id,
+    color: ZONE_COLORS[z.zone_type] ?? '#ff8800',
+    boundary: zoneBoundaryLocal(z, ref),
+    altMin: z.alt_min_m,
+    altMax: z.alt_max_m,
+  }));
+
+  // 车辆路径（输出，经纬高 → 局部平面）
+  const vehicleLines = useMemo(() => {
+    if (!results) return [];
+    return results.map((v) => ({
+      id: v.id,
+      status: v.status,
+      points: v.path.map((p) =>
+        geoPointToLocal(p.x, p.y, p.alt_m, ref),
+      ),
+    }));
+  }, [results, ref]);
+
+  // 必经点（输入）
+  const midPoints = useMemo(
+    () =>
+      vehicles.flatMap((v) =>
+        (v.mid_waypoints ?? []).map((m) => ({
+          id: v.id,
+          pos: geoToLocal(m, ref),
+        })),
+      ),
+    [vehicles, ref],
+  );
+
+  return (
+    <Canvas
+      camera={{
+        position: [80000, 60000, 80000],
+        fov: 50,
+        near: 10,
+        far: 2000000,
+      }}
+      style={{ background: '#0a0a1a' }}
+    >
+      <ambientLight intensity={0.4} />
+      <directionalLight position={[20000, 30000, 10000]} intensity={0.6} />
+
+      <OrbitControls makeDefault maxPolarAngle={Math.PI / 2.1} />
+
+      <Grid
+        args={[100000, 100000, 20, 20]}
+        position={[50000, 0, 50000]}
+        cellSize={1000}
+        cellThickness={0.5}
+        cellColor="#334455"
+        sectionSize={5000}
+        sectionThickness={1}
+        sectionColor="#556677"
+        fadeDistance={400000}
+        infiniteGrid
+      />
+
+      <StartMarker position={startPos} heading={vehicles[0]?.start_pose.heading_deg ?? 45} />
+      <TargetZone center={targetPos} />
+
+      {radarMeshes.map((r) => (
+        <RadarSphere key={r.id} center={r.center} radiusM={r.radiusM} />
+      ))}
+      {zoneMeshes.map((z) => (
+        <NFZPrism
+          key={z.id}
+          boundaryPoints={z.boundary}
+          altMin={z.altMin}
+          altMax={z.altMax}
+          color={z.color}
+        />
+      ))}
+
+      {/* 必经点（黄色小球） */}
+      {midPoints.map((m, i) => (
+        <mesh key={`mid_${i}`} position={[m.pos[0], m.pos[2], m.pos[1]]}>
+          <sphereGeometry args={[80, 16, 8]} />
+          <meshBasicMaterial color="#ffee00" />
+        </mesh>
+      ))}
+
+      {/* 车辆路径 */}
+      {vehicleLines.map((v) => (
+        <PathLine
+          key={v.id}
+          waypoints={v.points}
+          color={v.status === 'planned' ? '#ffdd00' : '#ff66aa'}
+        />
+      ))}
+
+      <GroundClickPlane active={activeClickMode !== null} onClick={onGroundClick} ref={ref} />
+    </Canvas>
+  );
+}

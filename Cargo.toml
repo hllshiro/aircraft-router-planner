@@ -1,15 +1,17 @@
 # AircraftRouterPlanner workspace（技术方案 4.1 模块划分）
 #
 # 成员：
-#   cli/    —— 核心 CLI（lib+bin），正式工程（Phase 1 起）
-#   phase0/ —— 性能原型与基准工程（已并入 workspace 保持可复跑，代码安排后期再讨论）
-#   demo/   —— 开发期可视化工具（Phase 5 落地，暂不建）
+#   cli/        —— 核心 CLI（lib+bin），正式工程（Phase 1 起）
+#   phase0/     —— 性能原型与基准工程（已并入 workspace 保持可复跑，代码安排后期再讨论）
+#   demo/server —— 开发期可视化工具后端（2026-08-05 主管要求按重构结果移植旧 Demo）
+#                  技术栈 Axum + tokio + tower-http（CORS），POST /api/plan → CLI 管道；
+#                  配套前端 demo/web（React18+TS+Vite+Three.js，pnpm，不随发布版分发）
 #
 # 静态编译红线与版本锁定见 cli/Cargo.toml 与 docs/技术方案.md 3.2/3.2.1。
 # 确定性构建 flags 在根 .cargo/config.toml（workspace 级生效）。
 
 [workspace]
-members = ["cli", "phase0"]
+members = ["cli", "phase0", "demo/server"]
 resolver = "2"
 
 [workspace.package]
