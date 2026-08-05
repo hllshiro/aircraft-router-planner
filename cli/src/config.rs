@@ -184,6 +184,22 @@ pub enum AircraftType {
     Rotorcraft,
 }
 
+impl Default for VehicleProfile {
+    /// 缺省机型配置（固定翼 + 全占位 None；solver 单机兜底构造）。
+    fn default() -> Self {
+        Self {
+            aircraft_type: AircraftType::FixedWing,
+            cruise_speed_mps: None,
+            speed_range_mps: None,
+            min_turn_radius_m: None,
+            max_climb_angle_deg: None,
+            max_bank_deg: None,
+            ceiling_m: None,
+            detection_probability: None,
+        }
+    }
+}
+
 /// 起点位姿（多机时每机独立起点；单机时与 mission.start 一致）。
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(deny_unknown_fields)]

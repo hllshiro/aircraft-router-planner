@@ -8,7 +8,7 @@
 //! 本模块为纯几何后处理：输入折线路径（经纬度+高度），输出平滑路径；
 //! 与 Phase 2 细层搜索解耦，地形净空/禁飞检查通过注入接口接入。
 
-use crate::config::AircraftType;
+use crate::config::{AircraftType, DefaultParams, VehicleProfile};
 use crate::dubins::dubins_path;
 use crate::path::{Path, PathPoint, angle_diff_deg, point_seg_distance_m};
 
@@ -47,6 +47,48 @@ impl Default for SmoothOptions {
             verify_seg_samples: 8,
         }
     }
+}
+
+/// Phase 4 M4：机型分流参数派生（VehicleProfile → SmoothOptions + A6 物理下限）。
+///
+/// 派生规则（技术方案 A6 自洽 + 八轮共识缺省落默认参数表）：
+/// - 速度 v：`cruise_speed_mps` → `speed_range_mps` 中值 → 机型默认
+///   （固定翼 250 m/s / 旋翼机 100 m/s）；
+/// - A6 物理下限 r_phys = v²/(g·tan φ_max)，φ_max = `max_bank_deg` → 默认 30°
+///   （与 Phase 0 标定表一致：442m@50m/s、11039m@250m/s 即此式）；
+/// - 固定翼 turn_radius = max(输入 `min_turn_radius_m` / 默认表 5000m, r_phys)，
+///   保证 A6 自洽恒过（显式输入更小值也钳到物理下限——宁物理不可行不出现非法航路）；
+/// - 旋翼机 r→0 合法（可悬停原地转向，九轮共识），turn_radius 不钳；
+/// - max_climb = `max_climb_angle_deg` → 默认表 15°（固定翼运动学复验用）。
+pub fn smooth_options_for(profile: &VehicleProfile, params: &DefaultParams) -> (SmoothOptions, f64) {
+    let v = profile
+        .cruise_speed_mps
+        .or_else(|| profile.speed_range_mps.map(|[a, b]| (a + b) / 2.0))
+        .unwrap_or(match profile.aircraft_type {
+            AircraftType::FixedWing => params.default_fixed_wing_speed_mps,
+            AircraftType::Rotorcraft => params.default_rotorcraft_speed_mps,
+        });
+    let bank_deg = profile.max_bank_deg.unwrap_or(params.default_max_bank_deg);
+    let phys_min_radius_m = v * v / (9.81 * bank_deg.to_radians().tan());
+    let base_r = profile
+        .min_turn_radius_m
+        .unwrap_or(match profile.aircraft_type {
+            AircraftType::FixedWing => params.default_fixed_wing_turn_radius_m,
+            AircraftType::Rotorcraft => params.default_rotorcraft_turn_radius_m,
+        });
+    let turn_radius_m = match profile.aircraft_type {
+        AircraftType::Rotorcraft => base_r, // r→0 合法，不钳
+        AircraftType::FixedWing => base_r.max(phys_min_radius_m),
+    };
+    let opts = SmoothOptions {
+        aircraft_type: profile.aircraft_type,
+        turn_radius_m,
+        max_climb_deg: profile
+            .max_climb_angle_deg
+            .unwrap_or(params.default_max_climb_angle_deg),
+        ..Default::default()
+    };
+    (opts, phys_min_radius_m)
 }
 
 /// 直线段合法性检查（Theta* 去锯齿用）：从 (lon1,lat1,alt1) 直飞到
@@ -1165,5 +1207,59 @@ mod chain_tests {
         assert!(out.warning.is_none(), "warning: {:?}", out.warning);
         // 尖角保留：输出仍含近 90° 转角（复验放行，未被截直）
         assert!(out.path.len() >= 6, "turns lost: {}", out.path.len());
+    }
+
+    #[test]
+    fn m4_profile_smooth_options_derivation() {
+        use crate::config::VehicleProfile;
+        let p = crate::config::DefaultParams::default();
+
+        // 默认固定翼：v=250 → phys = 250²/(9.81·tan30°) ≈ 11035；turn_radius 钳到 phys
+        let prof = VehicleProfile::default();
+        let (o, phys) = smooth_options_for(&prof, &p);
+        assert!((phys - 11035.0).abs() < 2.0, "phys = {phys}");
+        assert_eq!(o.aircraft_type, AircraftType::FixedWing);
+        assert!((o.turn_radius_m - 11035.0).abs() < 2.0, "turn {}", o.turn_radius_m);
+        // 默认 max_climb = 默认表 15°
+        assert!((o.max_climb_deg - 15.0).abs() < 1e-9);
+
+        // 显式慢速固定翼：v=50 → phys ≈ 442；默认表 5000 更大 → 用 5000
+        let prof = VehicleProfile {
+            cruise_speed_mps: Some(50.0),
+            ..Default::default()
+        };
+        let (o, phys) = smooth_options_for(&prof, &p);
+        assert!((phys - 441.6).abs() < 1.0, "phys = {phys}");
+        assert!((o.turn_radius_m - 5000.0).abs() < 1e-9);
+
+        // 显式 min_turn_radius 大于 phys → 用输入值
+        let prof = VehicleProfile {
+            cruise_speed_mps: Some(250.0),
+            min_turn_radius_m: Some(20_000.0),
+            ..Default::default()
+        };
+        let (o, _) = smooth_options_for(&prof, &p);
+        assert!((o.turn_radius_m - 20_000.0).abs() < 1e-9);
+
+        // 显式 min_turn_radius 小于 phys（物理不可行）→ 钳到 phys（A6 恒过）
+        let prof = VehicleProfile {
+            cruise_speed_mps: Some(250.0),
+            min_turn_radius_m: Some(2_000.0),
+            ..Default::default()
+        };
+        let (o, phys) = smooth_options_for(&prof, &p);
+        assert!(o.turn_radius_m >= phys, "钳制: {} >= {}", o.turn_radius_m, phys);
+
+        // 旋翼机：r→0 合法不钳；speed_range 中值取速
+        let prof = VehicleProfile {
+            aircraft_type: AircraftType::Rotorcraft,
+            speed_range_mps: Some([40.0, 80.0]),
+            ..Default::default()
+        };
+        let (o, phys) = smooth_options_for(&prof, &p);
+        assert_eq!(o.aircraft_type, AircraftType::Rotorcraft);
+        assert_eq!(o.turn_radius_m, 0.0);
+        // v=60 → phys = 3600/5.664 ≈ 635（仅信息：旋翼机不用于 A6）
+        assert!((phys - 635.0).abs() < 2.0, "phys = {phys}");
     }
 }

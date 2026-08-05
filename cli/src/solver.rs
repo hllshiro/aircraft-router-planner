@@ -19,7 +19,7 @@ use crate::coord::Geo;
 use crate::costfield::{backtrack_path, build_semantic_cost_field, fmm_propagate};
 use crate::error::{AppError, InputInvalidReason};
 use crate::path::{Path, PathPoint as RouterPoint};
-use crate::smooth::{default_chain, smooth_path_chain, SmoothOptions, VerifyContext};
+use crate::smooth::{default_chain, smooth_path_chain, VerifyContext};
 use crate::spatial::{CircleEntry, CircleIndex};
 use crate::terrain::builtin::BuiltinSource;
 use crate::terrain::{Sample, TerrainSource};
@@ -54,7 +54,8 @@ struct VehicleSpec {
     id: String,
     start: Geo,
     alt_m: f64,
-    aircraft_type: crate::config::AircraftType,
+    /// 机型配置（Phase 4 M4：平滑参数派生输入）。
+    profile: crate::config::VehicleProfile,
 }
 
 /// 端到端解算。elapsed_ms 为端到端耗时（main 计时传入）。
@@ -84,7 +85,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
             id: "v1".into(),
             start: input.mission.start.to_geo()?,
             alt_m: input.mission.start.alt_m,
-            aircraft_type: crate::config::AircraftType::FixedWing,
+            profile: crate::config::VehicleProfile::default(),
         }]
     } else {
         input
@@ -97,7 +98,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                     start: Geo::new(v.start_pose.lon, v.start_pose.lat)
                         .map_err(|_| AppError::InputInvalid(InputInvalidReason::IllegalCoordinate))?,
                     alt_m: v.start_pose.alt_m,
-                    aircraft_type: v.profile.aircraft_type,
+                    profile: v.profile.clone(),
                 })
             })
             .collect::<Result<Vec<_>, AppError>>()?
@@ -141,7 +142,8 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
 
     // 5b. 雷达静态代价（Phase 4 M3）：膨胀半径内 cost ×(1+几何并集概率)——FMM 倾向绕行；
     //     LOS 动态遮挡由 verify 威胁评估判定（不进静态代价场）。
-    let threat_params = radar_threat_params(input);
+    let params_merged = crate::config::DefaultParams::default().merge(&input.mission.parameters);
+    let threat_params = radar_threat_params(&params_merged);
     let threat = SphericalRadarThreat::new(&input.mission.red_forces.radars, threat_params.clone());
     if !input.mission.red_forces.radars.is_empty() {
         for r in 0..grid {
@@ -189,12 +191,10 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
             .collect();
 
         // 平滑链（≥2 点；VerifyContext 接地形净空 + Zone 高度层）
+        // Phase 4 M4：SmoothOptions + A6 物理下限由机型配置派生
         let mut warnings = Vec::new();
         if pts.len() >= 2 {
-            let opts = SmoothOptions {
-                aircraft_type: v.aircraft_type,
-                ..Default::default()
-            };
+            let (opts, phys_min_radius_m) = crate::smooth::smooth_options_for(&v.profile, &params_merged);
             let check = make_segment_check(&all_zones);
             let chain = default_chain(&opts, &check);
             let ctx = VerifyContext {
@@ -203,7 +203,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                 zones: Some(&all_zones),
                 threat: Some(&threat),
             };
-            let result = smooth_path_chain(&Path::new(pts), &chain, &opts, &ctx, None);
+            let result = smooth_path_chain(&Path::new(pts), &chain, &opts, &ctx, Some(phys_min_radius_m));
             pts = result.path.points;
             // 合并链级 + 复验级警告；雷达超阈值/平滑失败 → degradations
             warnings = Vec::new();
@@ -313,8 +313,7 @@ fn circle_index(zones: &[&Zone]) -> CircleIndex {
 }
 
 /// 雷达威胁参数（默认参数表落默认值；输入覆盖合并）。
-fn radar_threat_params(input: &Input) -> ThreatParams {
-    let d = crate::config::DefaultParams::default().merge(&input.mission.parameters);
+fn radar_threat_params(d: &crate::config::DefaultParams) -> ThreatParams {
     ThreatParams {
         radar_inflation: d.radar_inflation,
         detection_curve: d.detection_curve,

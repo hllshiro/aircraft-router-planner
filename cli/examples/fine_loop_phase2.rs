@@ -7,7 +7,7 @@
 //! - 多机线性预算：一次 FMM 多目标回溯 vs 每机独立 FMM（N=1/4/8/16）。
 //! 用法: cargo run --release --example fine_loop_phase2 -- <gmted.arpack> <china.arpack>
 
-use aircraft_router_planner_cli::config::{AircraftType, DefaultParams};
+use aircraft_router_planner_cli::config::DefaultParams;
 use aircraft_router_planner_cli::costfield::{backtrack_path, build_semantic_cost_field, fmm_propagate};
 use aircraft_router_planner_cli::smooth::{
     default_chain, smooth_path_chain, SmoothOptions, VerifyContext,
