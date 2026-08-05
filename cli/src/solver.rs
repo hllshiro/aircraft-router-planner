@@ -239,6 +239,63 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
         }
     }
 
+    // 5c2. 过渡带软罚（主管 2026-08-05 双禁飞区锯齿场景实测）：FMM 回溯路径总是贴
+    //      膨胀墙内缘走（最近列），Theta* 拉直时该段 clearance 差 ~1 格（~0.9km）被 verify
+    //      拒绝 → 全链失败 → 回退密集锯齿。光加大膨胀无效（FMM 永远贴"新墙"走）。
+    //      本块：膨胀墙外 band_cells 格内代价渐变递增（墙边 ×(1+band_coef)，band 外 ×1），
+    //      FMM 权衡代价后自然走离墙更远的栅格，拉直后 clearance 余量充足。
+    //      参数经实验标定：band=2 格 + coef=0.5——窄缝（双禁飞区间隙 18.9km/7.8km）
+    //      与主管真实场景均平滑；band=3+coef=0.5 会把窄缝中间挤成锯齿（已弃）。
+    //      BFS 距离变换（8 邻域，源 = 当前 INF 墙）。
+    {
+        use std::collections::VecDeque;
+        const BAND_CELLS: u32 = 2;
+        const BAND_COEF: f32 = 0.5;
+        let mut dist = vec![u32::MAX; grid * grid];
+        let mut q = VecDeque::new();
+        for i in 0..grid * grid {
+            if !field.cost[i].is_finite() {
+                dist[i] = 0;
+                q.push_back(i);
+            }
+        }
+        while let Some(idx) = q.pop_front() {
+            let r = idx / grid;
+            let c = idx % grid;
+            let nd = dist[idx] + 1;
+            for (dr, dc) in [
+                (0i32, 1i32),
+                (0, -1),
+                (1, 0),
+                (-1, 0),
+                (1, 1),
+                (1, -1),
+                (-1, 1),
+                (-1, -1),
+            ] {
+                let nr = r as i32 + dr;
+                let nc = c as i32 + dc;
+                if nr >= 0 && nr < grid as i32 && nc >= 0 && nc < grid as i32 {
+                    let ni = nr as usize * grid + nc as usize;
+                    if dist[ni] > nd {
+                        dist[ni] = nd;
+                        q.push_back(ni);
+                    }
+                }
+            }
+        }
+        for i in 0..grid * grid {
+            if !field.cost[i].is_finite() {
+                continue;
+            }
+            let d = dist[i];
+            if d >= 1 && d <= BAND_CELLS {
+                let t = 1.0 - (d as f32 - 1.0) / BAND_CELLS as f32; // d=1 → t=1.0；d=BAND → t≈0.33
+                field.cost[i] *= 1.0 + BAND_COEF * t;
+            }
+        }
+    }
+
     // 5b. 雷达静态代价（Phase 4 M3）：膨胀半径内 cost ×(1+coef·(几何并集概率 + 深穿惩罚))
     //     ——FMM 倾向绕行；LOS 动态遮挡由 verify 威胁评估判定（不进静态代价场）。
     //     coef = radar_cost_coef（默认 200）。几何深穿惩罚（u<1 时 ×(1+coef·(1-u))，
