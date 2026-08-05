@@ -13,8 +13,9 @@ use aircraft_router_planner_cli::smooth::{
     default_chain, smooth_path_chain, SmoothOptions, VerifyContext,
 };
 use aircraft_router_planner_cli::terrain::builtin::BuiltinSource;
-use aircraft_router_planner_cli::terrain::{Sample, TerrainSource};
+use aircraft_router_planner_cli::terrain::{los_blocked, Sample, TerrainSource};
 use rand::{RngExt, SeedableRng};
+use sha2::{Digest, Sha256};
 use std::hint::black_box;
 use std::time::Instant;
 
@@ -84,13 +85,14 @@ fn main() {
     println!("[A6] 默认 turn_radius 5000m 自洽 v_max ≈ {v_max:.0} m/s（超过需配置更大 min_turn_radius）");
     assert!(v_max > 150.0 && v_max < 200.0, "v_max 应在典型速度区间内");
 
-    // ============ 2) 细层闭环：100 组随机起止 ============
+    // ============ 2) 细层闭环：100 组随机起止（含确定性路径哈希） ============
     let pairs = gen_pairs(&c, N_TRIALS, 0xbeef);
     assert_eq!(pairs.len(), N_TRIALS);
     let mut ok = 0usize;
     let mut no_path = 0usize;
     let mut t_total = 0.0f64;
-    for (i, &((sr, sc), (dr, dc))) in pairs.iter().enumerate() {
+    let mut hasher = Sha256::new();
+    for (_, &((sr, sc), (dr, dc))) in pairs.iter().enumerate() {
         let t0 = Instant::now();
         let res = fmm_propagate(&field, sr, sc);
         let Some(p) = coarse_path(&field, &res, (sr, sc), (dr, dc), 3000.0) else {
@@ -105,10 +107,18 @@ fn main() {
         if result.path.len() >= 2 {
             ok += 1;
         }
+        // 确定性黄金基线：输出路径坐标位级哈希（两遍运行应逐位一致）
+        for pt in &result.path.points {
+            hasher.update(pt.lon.to_le_bytes());
+            hasher.update(pt.lat.to_le_bytes());
+            hasher.update(pt.alt_m.to_le_bytes());
+            hasher.update(pt.heading_deg.unwrap_or(-1.0).to_le_bytes());
+        }
         t_total += t0.elapsed().as_secs_f64() * 1000.0;
     }
+    let digest = format!("{:x}", hasher.finalize());
     println!(
-        "[fine] {N_TRIALS} pairs: smooth ok {ok} ({:.0}%) no_path {no_path} | avg {:.2}ms/trial total {:.0}ms",
+        "[fine] {N_TRIALS} pairs: smooth ok {ok} ({:.0}%) no_path {no_path} | avg {:.2}ms/trial total {:.0}ms | path-sha256 {digest}",
         100.0 * ok as f64 / N_TRIALS as f64,
         t_total / N_TRIALS as f64,
         t_total
@@ -173,5 +183,76 @@ fn main() {
             shared_ms + bt_ms
         );
     }
+    // ============ 5) 山地遮蔽场景（A7：四川 102E/30N——遮蔽>0 用例） ============
+    let m_lon = 102.0;
+    let m_lat = 30.0;
+    // 5a) 山地 LOS 遮挡统计（低空相对射线，GMTED2010——全球含山地）
+    let mut rng = rand::rngs::StdRng::seed_from_u64(0xa7a7);
+    let mut rays = Vec::new();
+    let mut attempts = 0u32;
+    while rays.len() < 200 && attempts < 40000 {
+        attempts += 1;
+        let lon = m_lon + rng.random_range(-0.5..0.5);
+        let lat = m_lat + rng.random_range(-0.5..0.5);
+        let Some(ground) = c.height_at(lon, lat) else { continue };
+        let oz = ground + rng.random_range(500.0..3_000.0);
+        let theta = rng.random_range(0.0..std::f64::consts::TAU);
+        rays.push(([lon, lat, oz], [theta.cos(), theta.sin(), 0.0]));
+    }
+    let blocked = rays
+        .iter()
+        .filter(|(o, d)| los_blocked(&c, o[0], o[1], o[2], d[0], d[1], d[2], 0.54, 1000))
+        .count();
+    println!(
+        "[A7-mt] Sichuan LOS: blocked {:.1}% ({}/{} rays, vs Beijing plain {:.1}%)",
+        100.0 * blocked as f64 / rays.len() as f64,
+        blocked,
+        rays.len(),
+        5.0
+    );
+    // 5b) 山地 FNR/FPR（粗 256² vs 细 1024²，真值=细）——遮蔽地形下粗层漏检
+    let m_src = &c;
+    let mfield = build_semantic_cost_field(GRID, GRID, |r, cc| {
+        let lon = m_lon - 0.5 + (cc as f64 + 0.5) / GRID as f64 * 1.0;
+        let lat = m_lat - 0.5 + (r as f64 + 0.5) / GRID as f64 * 1.0;
+        m_src.sample_at(lon, lat)
+    }, 5.0);
+    let mfine = build_semantic_cost_field(1024, 1024, |r, cc| {
+        let lon = m_lon - 0.5 + (cc as f64 + 0.5) / 1024.0 * 1.0;
+        let lat = m_lat - 0.5 + (r as f64 + 0.5) / 1024.0 * 1.0;
+        m_src.sample_at(lon, lat)
+    }, 5.0);
+    let mut mboth = 0usize;
+    let mut mcoarse_only = 0usize;
+    let mut mfine_only = 0usize;
+    let mut mnone = 0usize;
+    let mut mpairs = 0usize;
+    let mut mrng = rand::rngs::StdRng::seed_from_u64(0xa7a8);
+    while mpairs < 100 {
+        let (r1, c1) = (mrng.random_range(0..GRID), mrng.random_range(0..GRID));
+        let (r2, c2) = (mrng.random_range(0..GRID), mrng.random_range(0..GRID));
+        if (r1, c1) == (r2, c2) {
+            continue;
+        }
+        let rc = fmm_propagate(&mfield, r1, c1);
+        let c_reach = backtrack_path(&mfield, &rc, r2, c2, r1, c1).is_some();
+        let (fr1, fc1, fr2, fc2) = (r1 * 4 + 2, c1 * 4 + 2, r2 * 4 + 2, c2 * 4 + 2);
+        let rf = fmm_propagate(&mfine, fr1, fc1);
+        let f_reach = backtrack_path(&mfine, &rf, fr2, fc2, fr1, fc1).is_some();
+        match (c_reach, f_reach) {
+            (true, true) => mboth += 1,
+            (true, false) => mcoarse_only += 1,
+            (false, true) => mfine_only += 1,
+            (false, false) => mnone += 1,
+        }
+        mpairs += 1;
+    }
+    let m_fine_pos = mboth + mcoarse_only;
+    let m_coarse_neg = mfine_only + mnone;
+    println!(
+        "[A7-mt] Sichuan FNR/FPR: both {mboth} coarse-only {mcoarse_only} fine-only {mfine_only} none {mnone} | FNR {:.1}% ({mcoarse_only}/{m_fine_pos}) FPR {:.1}% ({mfine_only}/{m_coarse_neg})",
+        if m_fine_pos > 0 { 100.0 * mcoarse_only as f64 / m_fine_pos as f64 } else { f64::NAN },
+        if m_coarse_neg > 0 { 100.0 * mfine_only as f64 / m_coarse_neg as f64 } else { f64::NAN }
+    );
     black_box(&field);
 }
