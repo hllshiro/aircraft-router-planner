@@ -56,6 +56,8 @@ struct VehicleSpec {
     alt_m: f64,
     /// 机型配置（Phase 4 M4：平滑参数派生输入）。
     profile: crate::config::VehicleProfile,
+    /// 中途必经点（Phase 4 M5：start → mid[0..] → target 分段拼接）。
+    mid_waypoints: Vec<Geo>,
 }
 
 /// 端到端解算。elapsed_ms 为端到端耗时（main 计时传入）。
@@ -86,6 +88,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
             start: input.mission.start.to_geo()?,
             alt_m: input.mission.start.alt_m,
             profile: crate::config::VehicleProfile::default(),
+            mid_waypoints: Vec::new(),
         }]
     } else {
         input
@@ -93,12 +96,21 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
             .vehicles
             .iter()
             .map(|v| {
+                let mid = v
+                    .mid_waypoints
+                    .iter()
+                    .map(|w| {
+                        Geo::new(w.lon, w.lat)
+                            .map_err(|_| AppError::InputInvalid(InputInvalidReason::IllegalCoordinate))
+                    })
+                    .collect::<Result<Vec<_>, AppError>>()?;
                 Ok(VehicleSpec {
                     id: v.id.clone(),
                     start: Geo::new(v.start_pose.lon, v.start_pose.lat)
                         .map_err(|_| AppError::InputInvalid(InputInvalidReason::IllegalCoordinate))?,
                     alt_m: v.start_pose.alt_m,
                     profile: v.profile.clone(),
+                    mid_waypoints: mid,
                 })
             })
             .collect::<Result<Vec<_>, AppError>>()?
@@ -160,17 +172,43 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
         }
     }
 
-    // 6. 每机：FMM → 回溯 → 平滑 → 输出
+    // 6. 每机：分段 FMM（start → mid[0..] → target，共享代价场）→ 拼接 → 平滑 → 输出
     let mut out_vehicles = Vec::new();
     let mut fmm_ms = 0.0f64;
     let mut degradations = Vec::new();
     for v in &specs {
-        let (sr, sc) = lonlat_cell(v.start.lon, v.start.lat, &region, grid);
-        let (dr, dc) = lonlat_cell(target.lon, target.lat, &region, grid);
-        let t0 = Instant::now();
-        let res = fmm_propagate(&field, sr, sc);
-        fmm_ms += t0.elapsed().as_secs_f64() * 1000.0;
-        let Some(mut cells) = backtrack_path(&field, &res, dr, dc, sr, sc) else {
+        // 段序列：起点 + 必经点 + 目标
+        let mut seg_ends: Vec<Geo> = Vec::with_capacity(v.mid_waypoints.len() + 2);
+        seg_ends.push(v.start);
+        seg_ends.extend(v.mid_waypoints.iter().copied());
+        seg_ends.push(target);
+        // 逐段 FMM → 回溯 → 拼接（去重段端点）
+        let mut raw_segs: Vec<Path> = Vec::new();
+        let mut no_solution = false;
+        for seg in seg_ends.windows(2) {
+            let (s, e) = (seg[0], seg[1]);
+            let (sr, sc) = lonlat_cell(s.lon, s.lat, &region, grid);
+            let (dr, dc) = lonlat_cell(e.lon, e.lat, &region, grid);
+            let t0 = Instant::now();
+            let res = fmm_propagate(&field, sr, sc);
+            fmm_ms += t0.elapsed().as_secs_f64() * 1000.0;
+            let Some(mut cells) = backtrack_path(&field, &res, dr, dc, sr, sc) else {
+                no_solution = true;
+                break;
+            };
+            // backtrack 返回 dst→src 顺序 → 反转为 src→dst（路径语义）
+            cells.reverse();
+            raw_segs.push(Path::new(
+                cells
+                    .iter()
+                    .map(|&(r, c)| {
+                        let (lon, lat) = cell_lonlat(r, c, &region, grid);
+                        RouterPoint::new(lon, lat, v.alt_m)
+                    })
+                    .collect(),
+            ));
+        }
+        if no_solution || raw_segs.is_empty() {
             out_vehicles.push(VehicleOutput {
                 id: v.id.clone(),
                 status: "no_solution".into(),
@@ -179,20 +217,15 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                 warnings: vec!["coarse FMM no path".into()],
             });
             continue;
-        };
-        // backtrack 返回 dst→src 顺序 → 反转为 src→dst（路径语义）
-        cells.reverse();
-        let mut pts: Vec<RouterPoint> = cells
-            .iter()
-            .map(|&(r, c)| {
-                let (lon, lat) = cell_lonlat(r, c, &region, grid);
-                RouterPoint::new(lon, lat, v.alt_m)
-            })
-            .collect();
+        }
+        // 段端点（必经点/目标）是硬约束：任何平滑不得移除
+        let raw_joined = join_paths(&raw_segs);
 
         // 平滑链（≥2 点；VerifyContext 接地形净空 + Zone 高度层）
         // Phase 4 M4：SmoothOptions + A6 物理下限由机型配置派生
+        // Phase 4 M5：分段平滑（段端点=必经点保留）→ 拼接 → 全路径终检复验
         let mut warnings = Vec::new();
+        let mut pts = raw_joined.points.clone();
         if pts.len() >= 2 {
             let (opts, phys_min_radius_m) = crate::smooth::smooth_options_for(&v.profile, &params_merged);
             let check = make_segment_check(&all_zones);
@@ -203,23 +236,42 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                 zones: Some(&all_zones),
                 threat: Some(&threat),
             };
-            let result = smooth_path_chain(&Path::new(pts), &chain, &opts, &ctx, Some(phys_min_radius_m));
-            pts = result.path.points;
-            // 合并链级 + 复验级警告；雷达超阈值/平滑失败 → degradations
-            warnings = Vec::new();
-            if let Some(w) = &result.warning {
-                warnings.push(w.clone());
-                if w.contains("smoothing_failed") {
-                    degradations.push(w.clone());
+            // 每段独立平滑（首尾段端点保留——Theta* 截直不得移除必经点）
+            let mut smooth_segs = Vec::new();
+            let mut seg_warnings = Vec::new();
+            for seg in &raw_segs {
+                let result = smooth_path_chain(seg, &chain, &opts, &ctx, Some(phys_min_radius_m));
+                if let Some(w) = &result.warning {
+                    seg_warnings.push(w.clone());
                 }
+                seg_warnings.extend(result.verify.warnings.iter().cloned());
+                smooth_segs.push(result.path);
             }
-            warnings.extend(result.verify.warnings.iter().cloned());
-            for i in &result.verify.issues {
+            // 拼接 + 全路径终检（段间转角/整路径威胁在拼接后才可见）
+            let joined = join_paths(&smooth_segs);
+            let final_rep = crate::smooth::verify_path(
+                &joined,
+                None,
+                &opts,
+                &ctx,
+                Some(phys_min_radius_m),
+            );
+            if final_rep.ok {
+                pts = joined.points;
+                warnings = seg_warnings.clone();
+            } else {
+                // 终检失败 → 回退未平滑拼接（必经点保留，宁丑勿违）
+                pts = raw_joined.points;
+                let msg = "smoothing_failed: no smoothed stage passed full verification";
+                warnings.push(msg.into());
+                degradations.push(msg.into());
+                warnings.extend(final_rep.warnings.iter().cloned());
+            }
+            for i in final_rep.issues.iter().chain(seg_warnings.iter()) {
                 if i.contains("radar") {
                     degradations.push(i.clone());
                 }
-            }
-        }
+            }        }
         let dist = Path::new(pts.clone()).length_m();
         out_vehicles.push(VehicleOutput {
             id: v.id.clone(),
@@ -321,6 +373,23 @@ fn radar_threat_params(d: &crate::config::DefaultParams) -> ThreatParams {
         suppression_delta: d.suppression_delta,
         base_p: d.p_cross,
     }
+}
+
+/// 拼接多段路径（去重相邻重复点；段端点保留——必经点/目标硬约束）。
+fn join_paths(segs: &[Path]) -> Path {
+    let mut pts: Vec<RouterPoint> = Vec::new();
+    for seg in segs {
+        for p in &seg.points {
+            let dup = pts
+                .last()
+                .map(|q: &RouterPoint| (q.lon - p.lon).abs() < 1e-12 && (q.lat - p.lat).abs() < 1e-12)
+                .unwrap_or(false);
+            if !dup {
+                pts.push(*p);
+            }
+        }
+    }
+    Path::new(pts)
 }
 
 /// Theta* 去锯齿段检查：直连 (a)→(b) 不穿任何 Zone（等距 16 点采样；
@@ -514,6 +583,97 @@ mod tests {
             .any(|s| s.contains("radar"));
         assert!(radar_reported, "应报告雷达探测概率: warnings={:?} degradations={:?}",
             out.vehicles[0].warnings, out.stats.degradations);
+    }
+
+    #[test]
+    fn m5_mid_waypoint_passes_through() {
+        // 单机 mid_waypoints：路径应经过必经点附近（分段 FMM 拼接 + 段端点保留）
+        let s = r#"{
+            "schema_version":"0.20",
+            "mission":{
+                "start":{"lon":115.0,"lat":39.0,"alt_m":3000},
+                "target":{"lon":116.5,"lat":39.9,"alt_m":3000},
+                "terrain":{"source":"none"},
+                "vehicles":[
+                    {"id":"uav1","profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":250},
+                     "start_pose":{"lon":115.0,"lat":39.0,"alt_m":3000,"heading_deg":45},
+                     "mid_waypoints":[{"lon":115.3,"lat":39.8,"alt_m":3000}]}
+                ]
+            }
+        }"#;
+        let out = solve(&parse(s), &SolveParams::default(), 0).unwrap();
+        assert_eq!(out.vehicles[0].status, "planned");
+        // 经过必经点（格距内 < 0.05°≈5km）
+        let near_mid = out.vehicles[0].path.iter().any(|p| {
+            (p.x - 115.3).abs() < 0.05 && (p.y - 39.8).abs() < 0.05
+        });
+        assert!(near_mid, "应经过必经点 (115.3,39.8): {:?}",
+            out.vehicles[0].path.iter().map(|p| format!("({:.2},{:.2})", p.x, p.y)).take(6).collect::<Vec<_>>());
+        // 北侧绕行 → 距离显著大于直线 164km
+        assert!(out.vehicles[0].distance_m > 200_000.0, "dist {}", out.vehicles[0].distance_m);
+    }
+
+    #[test]
+    fn m5_per_vehicle_independent_waypoints() {
+        // 多机各自 mid_waypoints（主管拍板：每机独立序列）
+        let s = r#"{
+            "schema_version":"0.20",
+            "mission":{
+                "start":{"lon":115.0,"lat":39.0,"alt_m":3000},
+                "target":{"lon":116.5,"lat":39.9,"alt_m":3000},
+                "terrain":{"source":"none"},
+                "vehicles":[
+                    {"id":"uav1","profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":250},
+                     "start_pose":{"lon":115.0,"lat":39.0,"alt_m":3000,"heading_deg":45},
+                     "mid_waypoints":[{"lon":115.3,"lat":39.8,"alt_m":3000}]},
+                    {"id":"uav2","profile":{"aircraft_type":"ROTORCRAFT","cruise_speed_mps":60},
+                     "start_pose":{"lon":115.2,"lat":39.1,"alt_m":2000,"heading_deg":90},
+                     "mid_waypoints":[{"lon":116.1,"lat":39.2,"alt_m":2000}]}
+                ]
+            }
+        }"#;
+        let out = solve(&parse(s), &SolveParams::default(), 0).unwrap();
+        assert_eq!(out.vehicles.len(), 2);
+        for v in &out.vehicles {
+            assert_eq!(v.status, "planned");
+        }
+        // uav1 经 (115.3,39.8)；uav2 经 (116.1,39.2)（各自必经点独立）
+        let u1_near = out.vehicles[0].path.iter().any(|p| (p.x - 115.3).abs() < 0.05 && (p.y - 39.8).abs() < 0.05);
+        let u2_near = out.vehicles[1].path.iter().any(|p| (p.x - 116.1).abs() < 0.05 && (p.y - 39.2).abs() < 0.05);
+        assert!(u1_near, "uav1 应经过 (115.3,39.8)");
+        assert!(u2_near, "uav2 应经过 (116.1,39.2)");
+        // 旋翼机无 smoothing 告警
+        assert!(out.vehicles[1].warnings.is_empty(), "{:?}", out.vehicles[1].warnings);
+    }
+
+    #[test]
+    fn m5_multiple_mid_waypoints_sequence() {
+        // 多个必经点顺序经过（三段时间拼接）
+        let s = r#"{
+            "schema_version":"0.20",
+            "mission":{
+                "start":{"lon":115.0,"lat":39.0,"alt_m":3000},
+                "target":{"lon":116.5,"lat":39.9,"alt_m":3000},
+                "terrain":{"source":"none"},
+                "vehicles":[
+                    {"id":"uav1","profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":250},
+                     "start_pose":{"lon":115.0,"lat":39.0,"alt_m":3000,"heading_deg":45},
+                     "mid_waypoints":[
+                        {"lon":115.3,"lat":39.8,"alt_m":3000},
+                        {"lon":116.0,"lat":39.7,"alt_m":3000}
+                     ]}
+                ]
+            }
+        }"#;
+        let out = solve(&parse(s), &SolveParams::default(), 0).unwrap();
+        assert_eq!(out.vehicles[0].status, "planned");
+        let p = &out.vehicles[0].path;
+        // 两个必经点都经过（格距内）
+        let m1 = p.iter().position(|q| (q.x - 115.3).abs() < 0.05 && (q.y - 39.8).abs() < 0.05);
+        let m2 = p.iter().position(|q| (q.x - 116.0).abs() < 0.05 && (q.y - 39.7).abs() < 0.05);
+        assert!(m1.is_some() && m2.is_some(), "必经点应都经过: m1={m1:?} m2={m2:?}");
+        // 顺序：m1 在 m2 前
+        assert!(m1.unwrap() < m2.unwrap(), "顺序应 m1 < m2");
     }
 
     #[test]
