@@ -766,6 +766,49 @@ mod tests {
     }
 
     #[test]
+    fn twin_zone_smooth_after_band_penalty() {
+        // 双禁飞区并列（20km 圆 + 6 边形，主管 2026-08-05 真实场景无地形版）：
+        // FMM 贴膨胀墙走 → Theta* 拉直 clearance 差 ~1 格 → 全链失败回退 362 点锯齿。
+        // 5c2 过渡带软罚后必须平滑（≤10 点且无 smoothing_failed）。
+        let s = r#"{
+            "schema_version":"0.20",
+            "mission":{
+                "start":{"lon":116.7188493150615,"lat":40.20313810412108,"alt_m":3000},
+                "target":{"lon":115.44547741980215,"lat":38.63800678240428,"alt_m":3000},
+                "terrain":{"source":"none"},
+                "no_fly_zones":[
+                    {"id":"c1","zone_type":"no_fly","shape":"circle",
+                     "geometry":{"center":[115.90510756361434,39.1546051011457],"radius_km":20},
+                     "alt_min_m":0,"alt_max_m":20000},
+                    {"id":"p1","zone_type":"no_fly","shape":"polygon",
+                     "geometry":{"vertices":[
+                         [116.10919779988855,39.40629934778061],
+                         [116.66748158411933,39.2812425371292],
+                         [116.63856029155627,39.72638339128002],
+                         [116.21277919960414,39.78606996932337],
+                         [115.82845032806537,39.89839427431206],
+                         [115.56298632103817,39.63798773661437]]},
+                     "alt_min_m":0,"alt_max_m":20000}
+                ]
+            }
+        }"#;
+        let input = parse(s);
+        let out = solve(&input, &SolveParams::default(), 42).unwrap();
+        let v = &out.vehicles[0];
+        assert_eq!(v.status, "planned");
+        assert!(
+            v.path.len() <= 10,
+            "双禁飞区并列应平滑（过渡带软罚），实际 {} 点（锯齿回退）",
+            v.path.len()
+        );
+        assert!(
+            v.warnings.iter().all(|w| !w.contains("smoothing_failed")),
+            "不应有 smoothing_failed，实际 {:?}",
+            v.warnings
+        );
+    }
+
+    #[test]
     fn segment_check_geometry_catches_diagonal_polygon_crossing() {
         // 梯形禁飞区（主管 2026-08-06 场景）：直线斜切穿内部（16 点采样会漏——
         // 几何判定必须拒绝）；绕行折线（先下后右）必须放行。
