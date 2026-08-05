@@ -100,8 +100,9 @@ class GeoTiffReader:
 class Jp2Reader:
     """opj_decompress 分 tile 解码 JP2（1024x1024 tiled，int16 有符号）。"""
 
-    def __init__(self, path: str, no_data: int, tmpdir: str, opj: str = "opj_decompress"):
+    def __init__(self, path: str, no_data: int, tmpdir: str, opj: str = "opj_decompress", gdal: str = "gdal_translate"):
         self._opj = opj
+        self._gdal = gdal
         # 头部解析（尺寸/原点/像元）
         import struct as st
 
@@ -196,14 +197,20 @@ class Jp2Reader:
     def _decode_tile(self, ty: int, tx: int):
         tile_no = ty * self._xtiles() + tx
         out = os.path.join(self.tmpdir, f"t{tile_no}.tif")
+        # gdal_translate 按像素窗口解码（JP2OpenJPEG 驱动；比 opj -t 稳定，无 tile 编号偏移问题）
+        col = tx * 1024
+        row = ty * 1024
         r = subprocess.run(
-            [self._opj, "-i", self.path, "-o", out, "-t", str(tile_no), "-threads", "ALL_CPUS"],
-            capture_output=True, text=True,
+            [self._gdal, "-of", "GTiff", "-srcwin", str(col), str(row), "1024", "1024", self.path, out],
+            capture_output=True, text=True, timeout=90,
         )
         if r.returncode != 0:
-            raise RuntimeError(f"opj_decompress tile {tile_no} failed: {r.stderr[-300:]}")
+            raise RuntimeError(f"gdal_translate win ({col},{row}) failed: {r.stderr[-300:]}")
         a = tifffile.imread(out)
-        a = (a.astype(np.int32) - 32768).astype(np.int16)  # openjpeg 无符号偏置还原
+        if a.dtype == np.uint16:  # opj_decompress 输出无符号偏置
+            a = (a.astype(np.int32) - 32768).astype(np.int16)
+        else:  # gdal_translate JP2OpenJPEG 输出有符号真实值
+            a = a.astype(np.int16)
         h = min(1024, self.height - ty * 1024)
         w = min(1024, self.width - tx * 1024)
         return a[:h, :w]
@@ -297,10 +304,13 @@ def main() -> None:
     opj = "opj_decompress"
     if "--opj" in sys.argv:
         opj = sys.argv[sys.argv.index("--opj") + 1]
+    gdal = "gdal_translate"
+    if "--gdal" in sys.argv:
+        gdal = sys.argv[sys.argv.index("--gdal") + 1]
 
     if src.lower().endswith((".jp2", ".j2k")):
         with tempfile.TemporaryDirectory() as td:
-            reader = Jp2Reader(src, no_data, td, opj=opj)
+            reader = Jp2Reader(src, no_data, td, opj=opj, gdal=gdal)
             write_arpk1(reader, dst, zstd_level, "GMTED2010 7.5arcsec median (USGS, JP2 lossy)", True)
             reader.close()
     else:

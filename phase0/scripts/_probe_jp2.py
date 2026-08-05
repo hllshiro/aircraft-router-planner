@@ -5,11 +5,12 @@ sys.path.insert(0, r"D:\workspace\code_engineer\coding_projects\AircraftRouterPl
 from convert_to_arpk1 import Jp2Reader
 
 OPJ = r"D:\workspace\code_engineer\3rd_party\gdal-3-12-1-mapserver-8-6-0\bin\opj_decompress.exe"
+GDAL = r"D:\workspace\code_engineer\3rd_party\gdal-3-12-1-mapserver-8-6-0\bin\gdal_translate.exe"
 JP2 = r"D:\workspace\code_engineer\3rd_party\GMTED2010\GMTED2010.jp2"
 import tempfile
 
 with tempfile.TemporaryDirectory() as td:
-    r = Jp2Reader(JP2, -32768, td, opj=OPJ)
+    r = Jp2Reader(JP2, -32768, td, opj=OPJ, gdal=GDAL)
     print("rows,cols:", r.height, r.width)
     print("origin_lon, origin_lat:", r.origin_lon, r.origin_lat)
     print("cell:", r.cell_lon, r.cell_lat)
