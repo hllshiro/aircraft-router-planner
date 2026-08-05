@@ -41,6 +41,7 @@ html, body, #root { height: 100%; overflow: hidden; }
 .canvas {
   flex: 1;
   background: #0a0a1a;
+  position: relative;
 }
 
 button {
@@ -78,6 +79,32 @@ label { font-size: 12px; color: #888; }
 .field-row > * { flex: 1; }
 
 .result { font-size: 11px; white-space: pre-wrap; background: #0f0f23; padding: 8px; border-radius: 4px; }
+
+.canvas-overlay-error {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 10;
+  background: rgba(120, 20, 20, 0.85);
+  color: #ffb0b0;
+  padding: 6px 14px;
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+.canvas-overlay-loading {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 10;
+  background: rgba(20, 40, 80, 0.85);
+  color: #b0d0ff;
+  padding: 6px 14px;
+  border-radius: 4px;
+  font-size: 12px;
+}
 
 .vehicle-result {
   border-top: 1px solid #2a2a4a;
@@ -131,4 +158,17 @@ label { font-size: 12px; color: #888; }
   background: #00d4ff;
   color: #1a1a2e;
   border-color: #00d4ff;
+}
+
+.polygon-edit {
+  border: 1px dashed #ffaa44;
+  padding: 6px;
+  border-radius: 4px;
+  margin-bottom: 4px;
+}
+
+.polygon-edit .btn-small.active {
+  background: #ffaa44;
+  color: #1a1a2e;
+  border-color: #ffaa44;
 }

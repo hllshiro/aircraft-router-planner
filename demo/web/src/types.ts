@@ -141,6 +141,19 @@ export interface PlanResult {
   stats: OutputStats;
 }
 
+// === 地形网格（POST /api/terrain 响应） ===
+export interface TerrainInfo {
+  nx: number;
+  ny: number;
+  min_lon: number;
+  min_lat: number;
+  max_lon: number;
+  max_lat: number;
+  resolution: string;
+  source_bounds: [number, number, number, number] | null;
+  heights: (number | null)[];
+}
+
 // === 坐标工具：经纬高 → 局部平面（等距投影，场景以 ref 为原点） ===
 export interface GeoRef {
   lon: number;
@@ -189,7 +202,9 @@ export function defaultInputConfig(): InputConfig {
       no_fly_zones: [],
       restricted_zones: [],
       obstacles: [],
-      terrain: { source: 'none' },
+      // 默认真实地形：China_Dem_L12 ARPK1（76MB，中国区 73.5-135.1E, 3.6-53.6N）
+      // 路径相对 workspace 根（demo-server 与 CLI 的 cwd）
+      terrain: { source: 'path', path: 'phase0/data/pending/china_dem_l12.arpack' },
       parameters: {},
     },
   };

@@ -17,7 +17,8 @@ export function NFZPrism({
 }: NFZPrismProps) {
   const shape = useMemo(() => {
     const s = new THREE.Shape();
-    if (boundaryPoints.length === 0) return s;
+    // THREE.Shape.closePath 需要 ≥2 点；少于 2 点时留空（渲染层另有 <3 保护）
+    if (boundaryPoints.length < 2) return s;
     s.moveTo(boundaryPoints[0][0], boundaryPoints[0][1]);
     for (let i = 1; i < boundaryPoints.length; i++) {
       s.lineTo(boundaryPoints[i][0], boundaryPoints[i][1]);

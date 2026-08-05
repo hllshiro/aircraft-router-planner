@@ -3,24 +3,26 @@ import { Canvas, useThree } from '@react-three/fiber';
 import { OrbitControls, Grid } from '@react-three/drei';
 import * as THREE from 'three';
 import type { ThreeEvent } from '@react-three/fiber';
-import type { Waypoint, GeoRef, VehicleInput, Radar, Zone, VehicleOutput, Vec2 } from '../types';
+import type { Waypoint, GeoRef, VehicleInput, Radar, Zone, VehicleOutput, Vec2, TerrainInfo } from '../types';
 import { geoToLocal, geoPointToLocal, localToGeo } from '../types';
 import { StartMarker } from './StartMarker';
 import { TargetZone } from './TargetZone';
 import { RadarSphere } from './RadarSphere';
 import { NFZPrism } from './NFZPrism';
 import { PathLine } from './PathLine';
+import { TerrainMesh } from './TerrainMesh';
 
 interface Scene3DProps {
-  ref: GeoRef;
+  geoRef: GeoRef;
   start: Waypoint;
   target: Waypoint;
   vehicles: VehicleInput[];
   radars: Radar[];
   zones: Zone[];
   results: VehicleOutput[] | null;
+  terrainData: TerrainInfo | null;
   onGroundClick: (wp: Waypoint) => void;
-  activeClickMode: 'start' | 'target' | null;
+  activeClickMode: 'start' | 'target' | 'polygon' | null;
 }
 
 /** 圆形 zone → 局部平面多边形（24 边近似） */
@@ -52,11 +54,11 @@ function zoneBoundaryLocal(zone: Zone, ref: GeoRef): Vec2[] {
 function GroundClickPlane({
   active,
   onClick,
-  ref,
+  geoRef,
 }: {
   active: boolean;
   onClick: (wp: Waypoint) => void;
-  ref: GeoRef;
+  geoRef: GeoRef;
 }) {
   const { camera, pointer, raycaster } = useThree();
 
@@ -70,10 +72,10 @@ function GroundClickPlane({
       raycaster.ray.intersectPlane(plane, intersection);
       if (intersection) {
         // Three.js [x, y, z] → 局部平面 [x, z]（东, 北）→ 经纬度
-        onClick(localToGeo([intersection.x, intersection.z, 0], ref));
+        onClick(localToGeo([intersection.x, intersection.z, 0], geoRef));
       }
     },
-    [active, onClick, ref, camera, pointer, raycaster],
+    [active, onClick, geoRef, camera, pointer, raycaster],
   );
 
   return (
@@ -91,32 +93,48 @@ const ZONE_COLORS: Record<string, string> = {
 };
 
 export function Scene3D({
-  ref,
+  geoRef,
   start,
   target,
   vehicles,
   radars,
   zones,
   results,
+  terrainData,
   onGroundClick,
   activeClickMode,
 }: Scene3DProps) {
-  const startPos = useMemo(() => geoToLocal(start, ref), [start, ref]);
-  const targetPos = useMemo(() => geoToLocal(target, ref), [target, ref]);
+  const startPos = useMemo(() => geoToLocal(start, geoRef), [start, geoRef]);
+  const targetPos = useMemo(() => geoToLocal(target, geoRef), [target, geoRef]);
 
   const radarMeshes = radars.map((r) => ({
     id: r.id,
-    center: geoPointToLocal(r.lon, r.lat, r.alt_m ?? 10, ref),
+    center: geoPointToLocal(r.lon, r.lat, r.alt_m ?? 10, geoRef),
     radiusM: r.radius_km * 1000,
   }));
 
   const zoneMeshes = zones.map((z) => ({
     id: z.id,
     color: ZONE_COLORS[z.zone_type] ?? '#ff8800',
-    boundary: zoneBoundaryLocal(z, ref),
+    boundary: zoneBoundaryLocal(z, geoRef),
     altMin: z.alt_min_m,
     altMax: z.alt_max_m,
   }));
+
+  // 多边形 zone 顶点（可视化编辑锚点）
+  const polygonVerts = useMemo(
+    () =>
+      zones.flatMap((z) => {
+        if (z.shape !== 'polygon') return [];
+        return (z.geometry as { vertices: [number, number][] }).vertices.map(
+          ([lon, lat]) => {
+            const p = geoPointToLocal(lon, lat, z.alt_min_m, geoRef);
+            return { id: `${z.id}_${lon}_${lat}`, pos: p, color: z.zone_type };
+          },
+        );
+      }),
+    [zones, geoRef],
+  );
 
   // 车辆路径（输出，经纬高 → 局部平面）
   const vehicleLines = useMemo(() => {
@@ -125,10 +143,10 @@ export function Scene3D({
       id: v.id,
       status: v.status,
       points: v.path.map((p) =>
-        geoPointToLocal(p.x, p.y, p.alt_m, ref),
+        geoPointToLocal(p.x, p.y, p.alt_m, geoRef),
       ),
     }));
-  }, [results, ref]);
+  }, [results, geoRef]);
 
   // 必经点（输入）
   const midPoints = useMemo(
@@ -136,10 +154,10 @@ export function Scene3D({
       vehicles.flatMap((v) =>
         (v.mid_waypoints ?? []).map((m) => ({
           id: v.id,
-          pos: geoToLocal(m, ref),
+          pos: geoToLocal(m, geoRef),
         })),
       ),
-    [vehicles, ref],
+    [vehicles, geoRef],
   );
 
   return (
@@ -156,6 +174,8 @@ export function Scene3D({
       <directionalLight position={[20000, 30000, 10000]} intensity={0.6} />
 
       <OrbitControls makeDefault maxPolarAngle={Math.PI / 2.1} />
+
+      {terrainData && <TerrainMesh data={terrainData} geoRef={geoRef} />}
 
       <Grid
         args={[100000, 100000, 20, 20]}
@@ -186,6 +206,14 @@ export function Scene3D({
         />
       ))}
 
+      {/* 多边形顶点锚点（底部高亮球） */}
+      {polygonVerts.map((p, i) => (
+        <mesh key={`pv_${i}`} position={[p.pos[0], p.pos[2] + 20, p.pos[1]]}>
+          <sphereGeometry args={[120, 16, 8]} />
+          <meshBasicMaterial color="#ffcc00" />
+        </mesh>
+      ))}
+
       {/* 必经点（黄色小球） */}
       {midPoints.map((m, i) => (
         <mesh key={`mid_${i}`} position={[m.pos[0], m.pos[2], m.pos[1]]}>
@@ -203,7 +231,7 @@ export function Scene3D({
         />
       ))}
 
-      <GroundClickPlane active={activeClickMode !== null} onClick={onGroundClick} ref={ref} />
+      <GroundClickPlane active={activeClickMode !== null} onClick={onGroundClick} geoRef={geoRef} />
     </Canvas>
   );
 }

@@ -15,8 +15,10 @@ interface ControlPanelProps {
   onPlan: () => void;
   result: PlanResult | null;
   loading: boolean;
-  activeClickMode: 'start' | 'target' | null;
-  onSetClickMode: (mode: 'start' | 'target' | null) => void;
+  activeClickMode: 'start' | 'target' | 'polygon' | null;
+  onSetClickMode: (mode: 'start' | 'target' | 'polygon' | null) => void;
+  editingZoneId: string | null;
+  onEditingZoneId: (id: string | null) => void;
 }
 
 export function ControlPanel({
@@ -27,6 +29,8 @@ export function ControlPanel({
   loading,
   activeClickMode,
   onSetClickMode,
+  editingZoneId,
+  onEditingZoneId,
 }: ControlPanelProps) {
   const mission = config.mission;
   const update = (patch: Partial<InputConfig>) =>
@@ -437,6 +441,26 @@ export function ControlPanel({
         <div key={z.id} className="obstacle-item">
           <div className="obstacle-header">
             <span>{z.id}</span>
+            <select
+              value={z.shape}
+              onChange={(e) => {
+                const shape = e.target.value as 'circle' | 'polygon';
+                if (shape === 'circle') {
+                  updateZone(z.id, {
+                    shape: 'circle',
+                    geometry: { center: [z.zone_type === 'no_fly' ? (mission.start.lon + mission.target.lon) / 2 : (z.geometry as { center?: [number, number] }).center?.[0] ?? (mission.start.lon + mission.target.lon) / 2, (z.geometry as { center?: [number, number] }).center?.[1] ?? (mission.start.lat + mission.target.lat) / 2], radius_km: 20 },
+                  });
+                } else {
+                  updateZone(z.id, {
+                    shape: 'polygon',
+                    geometry: { vertices: (z.geometry as { vertices?: [number, number][] }).vertices ?? [] },
+                  });
+                }
+              }}
+            >
+              <option value="circle">圆形</option>
+              <option value="polygon">多边形</option>
+            </select>
             <button
               className="btn-small btn-danger"
               onClick={() => removeZone(z.id)}
@@ -501,47 +525,111 @@ export function ControlPanel({
                   />
                 </div>
               </div>
-              <div className="field-row">
-                <div>
-                  <label>最低高 (m)</label>
-                  <input
-                    type="number"
-                    value={z.alt_min_m}
-                    onChange={(e) =>
-                      updateZone(z.id, { alt_min_m: +e.target.value })
-                    }
-                  />
-                </div>
-                <div>
-                  <label>最高高 (m)</label>
-                  <input
-                    type="number"
-                    value={z.alt_max_m}
-                    onChange={(e) =>
-                      updateZone(z.id, { alt_max_m: +e.target.value })
-                    }
-                  />
-                </div>
-                <div>
-                  <label>类型</label>
-                  <select
-                    value={z.zone_type}
-                    onChange={(e) =>
-                      updateZone(z.id, {
-                        zone_type: e.target.value as Zone['zone_type'],
-                      })
-                    }
-                  >
-                    <option value="no_fly">禁飞</option>
-                    <option value="restricted">限飞</option>
-                    <option value="obstacle">障碍</option>
-                  </select>
-                </div>
-              </div>
             </>
           ) : (
-            <div>多边形区（仅预览，编辑后置）</div>
+            <>
+              <div className="polygon-edit">
+                <div className="list-title">顶点（{ (z.geometry as { vertices: [number, number][] }).vertices.length }）</div>
+                {(z.geometry as { vertices: [number, number][] }).vertices.map((v, i) => (
+                  <div key={i} className="field-row" style={{ marginTop: 4 }}>
+                    <input
+                      type="number"
+                      step="0.0001"
+                      value={v[0]}
+                      onChange={(e) => {
+                        const vs = [...(z.geometry as { vertices: [number, number][] }).vertices];
+                        vs[i] = [+e.target.value, vs[i][1]];
+                        updateZone(z.id, { geometry: { vertices: vs } });
+                      }}
+                    />
+                    <input
+                      type="number"
+                      step="0.0001"
+                      value={v[1]}
+                      onChange={(e) => {
+                        const vs = [...(z.geometry as { vertices: [number, number][] }).vertices];
+                        vs[i] = [vs[i][0], +e.target.value];
+                        updateZone(z.id, { geometry: { vertices: vs } });
+                      }}
+                    />
+                    <button
+                      className="btn-small btn-danger"
+                      onClick={() =>
+                        updateZone(z.id, {
+                          geometry: {
+                            vertices: (z.geometry as { vertices: [number, number][] }).vertices.filter(
+                              (_, j) => j !== i,
+                            ),
+                          },
+                        })
+                      }
+                    >
+                      ✕
+                    </button>
+                  </div>
+                ))}
+                <button
+                  className={`btn-small ${editingZoneId === z.id && activeClickMode === 'polygon' ? 'active' : ''}`}
+                  style={{ marginTop: 4 }}
+                  onClick={() => {
+                    if (editingZoneId === z.id && activeClickMode === 'polygon') {
+                      onEditingZoneId(null);
+                      onSetClickMode(null);
+                    } else {
+                      onEditingZoneId(z.id);
+                      onSetClickMode('polygon');
+                    }
+                  }}
+                >
+                  {editingZoneId === z.id && activeClickMode === 'polygon'
+                    ? '✓ 完成拾取'
+                    : '🗺 在场景拾取顶点'}
+                </button>
+                {(z.geometry as { vertices: [number, number][] }).vertices.length < 3 && (
+                  <div style={{ color: '#ffaa44', fontSize: 10, marginTop: 2 }}>
+                    至少 3 个顶点（场景点击地面添加）
+                  </div>
+                )}
+              </div>
+            </>
           )}
+          <div className="field-row" style={{ marginTop: 4 }}>
+            <div>
+              <label>最低高 (m)</label>
+              <input
+                type="number"
+                value={z.alt_min_m}
+                onChange={(e) =>
+                  updateZone(z.id, { alt_min_m: +e.target.value })
+                }
+              />
+            </div>
+            <div>
+              <label>最高高 (m)</label>
+              <input
+                type="number"
+                value={z.alt_max_m}
+                onChange={(e) =>
+                  updateZone(z.id, { alt_max_m: +e.target.value })
+                }
+              />
+            </div>
+            <div>
+              <label>类型</label>
+              <select
+                value={z.zone_type}
+                onChange={(e) =>
+                  updateZone(z.id, {
+                    zone_type: e.target.value as Zone['zone_type'],
+                  })
+                }
+              >
+                <option value="no_fly">禁飞</option>
+                <option value="restricted">限飞</option>
+                <option value="obstacle">障碍</option>
+              </select>
+            </div>
+          </div>
         </div>
       ))}
       <button

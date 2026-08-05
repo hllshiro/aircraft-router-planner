@@ -447,6 +447,7 @@ dependencies = [
 name = "demo-server"
 version = "0.1.0"
 dependencies = [
+ "aircraft-router-planner-cli",
  "axum",
  "serde",
  "serde_json",
