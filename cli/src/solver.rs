@@ -174,8 +174,9 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
         }
     }, 5.0);
 
-    // 5b. 雷达静态代价（Phase 4 M3）：膨胀半径内 cost ×(1+几何并集概率)——FMM 倾向绕行；
+    // 5b. 雷达静态代价（Phase 4 M3）：膨胀半径内 cost ×(1+coef·几何并集概率)——FMM 倾向绕行；
     //     LOS 动态遮挡由 verify 威胁评估判定（不进静态代价场）。
+    //     coef = radar_cost_coef（默认 10，主管 2026-08-05：探测概率应明显影响航路规划）。
     let mut degradations = Vec::new();
     let params_merged = crate::config::DefaultParams::default().merge(&input.mission.parameters);
     radar_param_degradations(input, &mut degradations);
@@ -189,7 +190,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                 if p > 0.0 {
                     let idx = r * grid + c;
                     if field.cost[idx].is_finite() {
-                        field.cost[idx] *= (1.0 + p) as f32;
+                        field.cost[idx] *= (1.0 + params_merged.radar_cost_coef * p) as f32;
                     }
                 }
             }
@@ -307,14 +308,15 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
             // → 用分段直线直穿（必经点保留，最短暴露时长）。直线需过几何复验（防穿山/超机动）。
             if let Some(tm) = ctx.threat {
                 let rep_now = tm.evaluate(&Path::new(pts.clone()), ctx.terrain);
-                // 直穿判定：路径某点深入任一雷达有效半径 50% 以内（穿中心）才视为
-                // "避不开的直穿"；贴边绕行（最近点 ≥ 0.5×半径）保持绕行，不替代。
+                // 直穿判定：路径某点深入任一雷达有效半径 70% 以内（与 Theta* 深探测
+                // DEEP_RATIO 一致）才视为"避不开的直穿"；完全绕出（最近点 ≥ 0.7×半径）
+                // 保持绕行，不替代。放宽自 0.5（k=50 后 FMM 贴边不穿中心 → 原 0.5 漏判）。
                 let mut penetrates = false;
                 for p in &pts {
                     for r in &input.mission.red_forces.radars {
                         let eff = r.radius_km * 1000.0 * params_merged.radar_inflation;
                         let d = crate::path::haversine_m(r.lon, r.lat, p.lon, p.lat);
-                        if d < eff * 0.5 {
+                        if d < eff * 0.7 {
                             penetrates = true;
                         }
                     }
@@ -483,6 +485,11 @@ fn radar_param_degradations(input: &Input, out: &mut Vec<String>) {
     {
         out.push(format!("parameter suppression_delta={v} invalid -> default 0.5"));
     }
+    if let Some(v) = p.radar_cost_coef
+        && !(v.is_finite() && v > 0.0)
+    {
+        out.push(format!("parameter radar_cost_coef={v} invalid -> default 10"));
+    }
     if let Some(v) = p.los_mask_coef
         && !(v.is_finite() && v >= 0.0 && v <= 1.0)
     {
@@ -514,13 +521,15 @@ fn join_paths(segs: &[Path]) -> Path {
 
 /// Theta* 去锯齿段检查：直连 (a)→(b) 不穿任何 Zone（等距 16 点采样；
 /// 水平 + 高度区间，高度沿线段线性插值——M2 高度层）。
-/// 雷达威胁：直连穿过任一雷达有效半径 → 拒绝拉直（保住 FMM 绕行决策）。
+/// 雷达威胁：直连"深穿"任一雷达（归一化深度 < 0.7，即深入有效半径 70% 以内）
+/// → 拒绝拉直（保住 FMM 绕行决策）；低概率边缘（≥0.7）允许拉直 → 绕行路径可平滑。
 fn make_segment_check<'a>(
     zones: &'a [Zone],
     threat: Option<&'a dyn crate::threat::ThreatModel>,
 ) -> impl Fn(f64, f64, f64, f64, f64, f64) -> bool + 'a {
     move |lon1, lat1, alt1, lon2, lat2, alt2| {
         const N: usize = 16;
+        const DEEP_RATIO: f64 = 0.7;
         for i in 0..=N {
             let t = i as f64 / N as f64;
             let lon = lon1 + (lon2 - lon1) * t;
@@ -532,7 +541,7 @@ fn make_segment_check<'a>(
                 }
             }
             if let Some(tm) = threat
-                && tm.static_detected(lon, lat, alt)
+                && tm.static_penetration(lon, lat, alt) < DEEP_RATIO
             {
                 return false;
             }
@@ -662,9 +671,9 @@ mod tests {
 
     #[test]
     fn m3_radar_threat_detour_and_warning() {
-        // 场景 A：大雷达（40km）挡在中点。A2 参数未标定（base_p=0.1 → 代价 ×1.1 不足），
-        // FMM 无法承担绕行代价 → 直穿 → 平滑直穿 + 超阈值降级。
-        // 绕行语义待 A2 真实参数标定后生效（见 docs/phase0_baseline.md Open Work）。
+        // 场景 A：大雷达（40km）挡在中点。radar_cost_coef=50（占位）→ 高概率区代价显著
+        // （中心 ×6）→ FMM 明确绕行躲避（主管 2026-08-05：探测概率应明显影响航路规划）。
+        // 绕行后最近点应完全绕出有效半径（48km），累计探测概率应低于阈值。
         let big = r#"{
             "schema_version":"0.20",
             "mission":{
@@ -676,16 +685,18 @@ mod tests {
         }"#;
         let out = solve(&parse(big), &SolveParams::default(), 0).unwrap();
         assert_eq!(out.vehicles[0].status, "planned");
-        // 直穿 ≈ 直线 164km（锯齿被直线替代消除，不得 >170km）
+        // 绕行：显著大于直线 164km（不得回到直穿 <170km）
         let d = out.vehicles[0].distance_m;
-        assert!(d < 170_000.0, "直穿距离应接近直线，距离 {}", d);
-        // 直穿 → 累计探测概率超阈值 → 必须报告（warnings 或 degradations）
-        let radar_reported = out.vehicles[0]
+        assert!(d > 170_000.0, "40km 雷达应绕行躲避，距离 {}", d);
+        // 绕行平滑（Theta* 转角受限 + Catmull-Rom）：不得交付网格锯齿（>50 点）
+        assert!(out.vehicles[0].path.len() <= 50, "绕行应平滑，点数 {}", out.vehicles[0].path.len());
+        // 绕行成功 → 累计探测概率低于阈值（不超 P_cross=0.1）
+        let over = out.vehicles[0]
             .warnings
             .iter()
             .chain(out.stats.degradations.iter())
-            .any(|s| s.contains("radar"));
-        assert!(radar_reported, "直穿应报告雷达概率: warnings={:?} degradations={:?}",
+            .any(|s| s.contains("radar: cumulative detection p") && s.contains("> threshold"));
+        assert!(!over, "绕行后探测概率应 <0.1: warnings={:?} degradations={:?}",
             out.vehicles[0].warnings, out.stats.degradations);
     }
 

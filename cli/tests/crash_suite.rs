@@ -366,7 +366,7 @@ fn always_true() -> impl Fn(f64, f64, f64, f64, f64, f64) -> bool {
 fn smooth_empty_path_no_panic() {
     let p = Path::new(vec![]);
     let check = always_true();
-    assert_eq!(theta_star_smooth(&p, &check).len(), 0);
+    assert_eq!(theta_star_smooth(&p, &check, None).len(), 0);
     assert_eq!(greedy_simplify(&p, 100.0).len(), 0);
     assert_eq!(chaikin_smooth(&p, 2).len(), 0);
     assert_eq!(catmull_rom_spline(&p, 4).len(), 0);
@@ -377,7 +377,7 @@ fn smooth_empty_path_no_panic() {
 fn smooth_single_point_no_panic() {
     let p = Path::new(vec![PathPoint::new(0.0, 0.0, 100.0)]);
     let check = always_true();
-    assert_eq!(theta_star_smooth(&p, &check).len(), 1);
+    assert_eq!(theta_star_smooth(&p, &check, None).len(), 1);
     assert_eq!(greedy_simplify(&p, 100.0).len(), 1);
     assert_eq!(chaikin_smooth(&p, 2).len(), 1);
     assert_eq!(catmull_rom_spline(&p, 4).len(), 1);
@@ -392,7 +392,7 @@ fn smooth_nan_inf_no_panic() {
         PathPoint::new(2.0, 0.0, -f64::INFINITY),
     ]);
     let check = always_true();
-    let _ = theta_star_smooth(&bad, &check);
+    let _ = theta_star_smooth(&bad, &check, None);
     let _ = greedy_simplify(&bad, 100.0);
     let _ = chaikin_smooth(&bad, 2);
     let _ = catmull_rom_spline(&bad, 4);
@@ -430,7 +430,7 @@ fn smooth_extreme_geometry_no_panic() {
         PathPoint::new(0.0, 0.0, 0.0),
     ]);
     let check = always_true();
-    let _ = theta_star_smooth(&p, &check);
+    let _ = theta_star_smooth(&p, &check, None);
     let _ = greedy_simplify(&p, 1e-9);
     let _ = chaikin_smooth(&p, 10);
     let _ = catmull_rom_spline(&p, 100);
@@ -462,7 +462,7 @@ fn smooth_chain_degenerate_no_panic() {
     // NaN 输入走链
     let bad = Path::new(vec![PathPoint::new(f64::NAN, 0.0, 100.0)]);
     let check = always_true();
-    let chain: Vec<Box<dyn Smoother>> = vec![Box::new(ThetaStarSmoother { check: &check })];
+    let chain: Vec<Box<dyn Smoother>> = vec![Box::new(ThetaStarSmoother { check: &check, max_turn_deg: None })];
     let _ = smooth_path_chain(&bad, &chain, &opts, &ctx, None);
     // 退化的 verify 参数（零采样/负容差）不 panic
     let opts2 = SmoothOptions {

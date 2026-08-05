@@ -398,6 +398,9 @@ pub struct ParamsOverride {
     pub p_cross: Option<f64>,
     #[serde(default)]
     pub suppression_delta: Option<f64>,
+    /// 雷达探测概率代价系数（FMM 代价 ×(1+coef×p)；越大航路越倾向绕行躲避）
+    #[serde(default)]
+    pub radar_cost_coef: Option<f64>,
     #[serde(default)]
     pub los_mask_coef: Option<f64>,
     #[serde(default)]
@@ -437,6 +440,9 @@ pub struct DefaultParams {
     pub p_cross: f64,
     /// 压制修正因子 δ（探测距离 × (1−δ)，占位）
     pub suppression_delta: f64,
+    /// 雷达探测概率代价系数（FMM 代价 ×(1+coef×p)；>0，默认 50：
+    /// 40km 雷达中心 ×6、0.6R 处 ×1.5——探测概率显著影响航路，高概率区 FMM 明确绕行躲避）
+    pub radar_cost_coef: f64,
     /// LOS mask 系数（默认 0.05–0.1 区间内取 0.08；守保守口径不取 0，十二轮共识）
     pub los_mask_coef: f64,
     /// 主算法预算（ms，5.1 建议初始分配）
@@ -474,6 +480,7 @@ impl Default for DefaultParams {
             detection_curve: DetectionCurve::Exponential,
             p_cross: 0.1,
             suppression_delta: 0.5,
+            radar_cost_coef: 50.0,
             los_mask_coef: 0.08,
             main_budget_ms: 2_500,
             degrade_budget_ms: 500,
@@ -535,6 +542,9 @@ impl DefaultParams {
         }
         if let Some(v) = o.suppression_delta.filter(|v| v.is_finite() && *v >= 0.0 && *v < 1.0) {
             d.suppression_delta = v;
+        }
+        if let Some(v) = o.radar_cost_coef.filter(|v| v.is_finite() && *v > 0.0) {
+            d.radar_cost_coef = v;
         }
         if let Some(v) = o.los_mask_coef.filter(|v| v.is_finite() && *v >= 0.0 && *v <= 1.0) {
             d.los_mask_coef = v;

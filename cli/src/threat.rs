@@ -68,6 +68,14 @@ pub trait ThreatModel {
         let _ = (lon, lat, alt_m);
         false
     }
+    /// 静态几何穿透深度（无 LOS）：到最近威胁中心的归一化距离 d/R_eff ∈ [0,1]；
+    /// 0 = 中心，1 = 有效半径边缘，>1 = 有效半径外（无探测）。
+    /// Theta* 去锯齿用：仅"深穿"（< deep_ratio，默认 0.7）拒绝拉直；
+    /// 低概率边缘（≥0.7）允许拉直，绕行路径才能平滑。
+    fn static_penetration(&self, lon: f64, lat: f64, alt_m: f64) -> f64 {
+        let _ = (lon, lat, alt_m);
+        1.0
+    }
     /// 穿越阈值 P_cross（复验软告警线）。
     fn p_cross(&self) -> f64 {
         0.1
@@ -141,6 +149,18 @@ impl ThreatModel for SphericalRadarThreat<'_> {
 
     fn static_detected(&self, lon: f64, lat: f64, alt_m: f64) -> bool {
         self.point_probability(lon, lat, alt_m, None) > 0.0
+    }
+
+    fn static_penetration(&self, lon: f64, lat: f64, _alt_m: f64) -> f64 {
+        let mut best: f64 = 1.0;
+        for r in self.radars {
+            let d = haversine_m(r.lon, r.lat, lon, lat);
+            let eff = self.effective_radius_m(r);
+            if eff > 0.0 {
+                best = best.min(d / eff);
+            }
+        }
+        best
     }
 
     fn evaluate(&self, path: &Path, terrain: Option<&dyn TerrainSource>) -> ThreatReport {

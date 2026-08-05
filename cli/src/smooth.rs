@@ -99,8 +99,14 @@ pub type SegmentCheck<'a> = dyn Fn(f64, f64, f64, f64, f64, f64) -> bool + 'a;
 
 /// Theta* 去锯齿（LOS 捷径简化）：贪心跳点——锚点 i 起，从路径末尾向前找
 /// 第一个 `check` 通过的跳跃点 j（i,j 之间直连合法），保 i、j，删中间点。
+/// `max_turn_deg`：跳点额外受航向连续性约束（相邻航段转角 ≤ max，
+/// 防"弧线拉直成 61°+ 折线"导致运动学复验失败；None = 不限制）。
 /// 复杂度 O(n²)（点列短，粗层走廊点数百级可接受）。
-pub fn theta_star_smooth(path: &Path, check: &SegmentCheck) -> Path {
+pub fn theta_star_smooth(
+    path: &Path,
+    check: &SegmentCheck,
+    max_turn_deg: Option<f64>,
+) -> Path {
     if path.len() < 3 {
         return path.clone();
     }
@@ -115,10 +121,23 @@ pub fn theta_star_smooth(path: &Path, check: &SegmentCheck) -> Path {
             }
             let a = path.points[i];
             let b = path.points[j];
-            if check(a.lon, a.lat, a.alt_m, b.lon, b.lat, b.alt_m) {
-                break;
+            if !check(a.lon, a.lat, a.alt_m, b.lon, b.lat, b.alt_m) {
+                j -= 1;
+                continue;
             }
-            j -= 1;
+            if let Some(max_turn) = max_turn_deg
+                && out.len() >= 2
+            {
+                let p_prev = out[out.len() - 2];
+                let p_cur = out[out.len() - 1];
+                let h0 = heading_deg_pts(&p_prev, &p_cur);
+                let h1 = heading_deg_pts(&p_cur, &b);
+                if crate::path::angle_diff_deg(h0, h1).abs() > max_turn {
+                    j -= 1;
+                    continue;
+                }
+            }
+            break;
         }
         // 保 i、j；若 j 直接是下一邻点则普通前进一步
         if j > i {
@@ -130,6 +149,14 @@ pub fn theta_star_smooth(path: &Path, check: &SegmentCheck) -> Path {
         }
     }
     Path::new(out)
+}
+
+/// 两点航向（度，0=东，逆时针，局部等距投影）。
+fn heading_deg_pts(a: &crate::path::PathPoint, b: &crate::path::PathPoint) -> f64 {
+    let proj = LocalProjection::new(a.lon, a.lat);
+    let (ax, ay) = proj.to_xy(a.lon, a.lat);
+    let (bx, by) = proj.to_xy(b.lon, b.lat);
+    (by - ay).atan2(bx - ax).to_degrees().rem_euclid(360.0)
 }
 
 /// Chaikin 角切割平滑：每段取 1/4、3/4 插值点，保持端点。
@@ -344,7 +371,7 @@ mod base_tests {
     fn theta_star_removes_collinear() {
         // 全共线点：check 恒 true → 应压缩为两点
         let p = straight_path(20);
-        let out = theta_star_smooth(&p, &|_, _, _, _, _, _| true);
+        let out = theta_star_smooth(&p, &|_, _, _, _, _, _| true, None);
         assert_eq!(out.len(), 2, "got {}", out.len());
     }
 
@@ -353,7 +380,7 @@ mod base_tests {
         // 中间点直连被 check 拒绝：保留分段
         let p = straight_path(10);
         // 只允许相邻直连（j=i+1 总是允许）
-        let out = theta_star_smooth(&p, &|_, _, _, _, _, _| false);
+        let out = theta_star_smooth(&p, &|_, _, _, _, _, _| false, None);
         assert_eq!(out.len(), p.len(), "got {}", out.len());
     }
 
@@ -734,13 +761,15 @@ pub trait Smoother {
 /// Theta* 去锯齿策略。
 pub struct ThetaStarSmoother<'a> {
     pub check: &'a SegmentCheck<'a>,
+    /// 航向连续性约束（相邻航段转角上限；None = 不限制）
+    pub max_turn_deg: Option<f64>,
 }
 impl Smoother for ThetaStarSmoother<'_> {
     fn name(&self) -> &str {
         "theta_star"
     }
     fn smooth(&self, path: &Path) -> Option<Path> {
-        Some(theta_star_smooth(path, self.check))
+        Some(theta_star_smooth(path, self.check, self.max_turn_deg))
     }
 }
 
@@ -785,12 +814,19 @@ impl Smoother for GreedySimplifySmoother {
 }
 
 /// 默认策略链（九轮链序修正 + 旋翼机分支）：
-/// - 固定翼：Theta* 去锯齿 → Dubins 拟合 → 贪心抽稀；
+/// - 固定翼：Theta* 去锯齿 → Catmull-Rom 样条（绕行弧线平滑）→ Dubins 拟合 → 贪心抽稀；
 /// - 旋翼机：Theta* 去锯齿 → 贪心抽稀（**不含 Dubins 全局拟合**——悬停原地转向
 ///   是合法机动，圆弧拟合会拉直/破坏转向点；尖角由机型感知复验放行）。
 pub fn default_chain<'a>(opts: &SmoothOptions, check: &'a SegmentCheck<'a>) -> Vec<Box<dyn Smoother + 'a>> {
-    let mut chain: Vec<Box<dyn Smoother + 'a>> = vec![Box::new(ThetaStarSmoother { check })];
+    let mut chain: Vec<Box<dyn Smoother + 'a>> = vec![Box::new(ThetaStarSmoother {
+        check,
+        max_turn_deg: Some(opts.max_turn_deg),
+    })];
     if opts.aircraft_type == AircraftType::FixedWing {
+        // Catmull-Rom 过点样条：对"绕行弧线"（Theta* 拉直受深探测 check 限制只能折线逼近）
+        // 输出曲率≈绕行半径的平滑样条，复验（转角/半径/弦高）自然通过；
+        // 对"锯齿直穿"则样条曲率小 → 半径复验失败 → 回退 Dubins/直线替代（正确语义）。
+        chain.push(Box::new(CatmullRomSmoother { samples_per_seg: 16 }));
         chain.push(Box::new(DubinsSmoother {
             r_m: opts.turn_radius_m,
             sample_n: opts.dubins_sample_n,
