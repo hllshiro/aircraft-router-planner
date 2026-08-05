@@ -804,6 +804,7 @@ impl Smoother for CatmullRomSmoother {
 pub struct GreedySimplifySmoother {
     pub tol_m: f64,
 }
+
 impl Smoother for GreedySimplifySmoother {
     fn name(&self) -> &str {
         "greedy_simplify"
