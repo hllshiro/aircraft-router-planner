@@ -765,7 +765,7 @@ pub(crate) fn zone_contains(z: &Zone, p: &Geo) -> bool {
 }
 
 /// 射线法点在多边形内（经纬度平面近似，Phase 1 足够——区域校验用途）。
-fn point_in_polygon(p: &Geo, vertices: &[[f64; 2]]) -> bool {
+pub(crate) fn point_in_polygon(p: &Geo, vertices: &[[f64; 2]]) -> bool {
     if vertices.len() < 3 {
         return false;
     }

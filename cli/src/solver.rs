@@ -522,8 +522,13 @@ fn join_paths(segs: &[Path]) -> Path {
     Path::new(pts)
 }
 
-/// Theta* 去锯齿段检查：直连 (a)→(b) 不穿任何 Zone（等距 16 点采样；
-/// 水平 + 高度区间，高度沿线段线性插值——M2 高度层）。
+/// Theta* 去锯齿段检查：直连 (a)→(b) 不穿任何 Zone（几何精确判定——
+/// 多边形：线段与任一边相交或端点在内；圆形：段到圆心最近距离 ≤ 半径。
+/// 含边界接触（保守拒绝）。此前为等距 16 点采样，斜切多边形的线段采样点
+/// 可能恰好全部落在外部 → 拉直穿过禁飞区内部（主管 2026-08-06 梯形禁飞区
+/// 航路从边缘穿过）；几何判定无采样漏判。
+/// 高度层（M2）：NoFly/Obstacle 全高度水平墙（相交即拒）；Restricted 相交后
+/// 按段高度采样判定（高度沿线段线性插值，区间外可穿越）。
 /// 雷达威胁：直连"深穿"任一雷达（归一化深度 < 0.7，即深入有效半径 70% 以内）
 /// → 拒绝拉直（保住 FMM 绕行决策——P_cross 只是验收阈值，不得因调高 P_cross
 /// 而把绕行弧拉直成穿雷达区的直线；主管 2026-08-06：航路必须绕开雷达探测区域）；
@@ -535,24 +540,155 @@ fn make_segment_check<'a>(
     move |lon1, lat1, alt1, lon2, lat2, alt2| {
         const N: usize = 16;
         const DEEP_RATIO: f64 = 0.7;
-        for i in 0..=N {
-            let t = i as f64 / N as f64;
-            let lon = lon1 + (lon2 - lon1) * t;
-            let lat = lat1 + (lat2 - lat1) * t;
-            let alt = alt1 + (alt2 - alt1) * t;
-            if let Ok(g) = Geo::new(lon, lat) {
-                if zones.iter().any(|z| zone_contains_at(z, &g, alt, None)) {
+        for z in zones {
+            let hit = match &z.shape {
+                crate::config::ZoneShape::Circle { center, radius_km } => {
+                    match Geo::new(center[0], center[1]) {
+                        Ok(c) => dist_pt_seg_km(lon1, lat1, lon2, lat2, &c) <= *radius_km,
+                        Err(_) => false,
+                    }
+                }
+                crate::config::ZoneShape::Polygon { vertices } => {
+                    segment_hits_polygon(lon1, lat1, lon2, lat2, vertices)
+                }
+            };
+            if hit {
+                if z.is_wall() {
                     return false;
                 }
+                // restricted：高度层采样（水平相交后，高度沿线段插值判定）
+                for i in 0..=N {
+                    let t = i as f64 / N as f64;
+                    let lon = lon1 + (lon2 - lon1) * t;
+                    let lat = lat1 + (lat2 - lat1) * t;
+                    let alt = alt1 + (alt2 - alt1) * t;
+                    if let Ok(g) = Geo::new(lon, lat) {
+                        if zone_contains_at(z, &g, alt, None) {
+                            return false;
+                        }
+                    }
+                }
             }
-            if let Some(tm) = threat
-                && tm.static_penetration(lon, lat, alt) < DEEP_RATIO
-            {
-                return false;
+        }
+        if let Some(tm) = threat {
+            for i in 0..=N {
+                let t = i as f64 / N as f64;
+                let lon = lon1 + (lon2 - lon1) * t;
+                let lat = lat1 + (lat2 - lat1) * t;
+                let alt = alt1 + (alt2 - alt1) * t;
+                if tm.static_penetration(lon, lat, alt) < DEEP_RATIO {
+                    return false;
+                }
             }
         }
         true
     }
+}
+
+/// 线段 vs 多边形水平相交（经纬度平面近似；端点在内或任一边相交 → true，含边界接触）
+fn segment_hits_polygon(
+    lon1: f64,
+    lat1: f64,
+    lon2: f64,
+    lat2: f64,
+    vertices: &[[f64; 2]],
+) -> bool {
+    if vertices.len() < 3 {
+        return false;
+    }
+    let p1 = Geo::new(lon1, lat1).ok();
+    let p2 = Geo::new(lon2, lat2).ok();
+    if p1
+        .as_ref()
+        .map_or(false, |g| crate::config::point_in_polygon(g, vertices))
+        || p2
+            .as_ref()
+            .map_or(false, |g| crate::config::point_in_polygon(g, vertices))
+    {
+        return true;
+    }
+    let mut j = vertices.len() - 1;
+    for i in 0..vertices.len() {
+        let (xi, yi) = (vertices[i][0], vertices[i][1]);
+        let (xj, yj) = (vertices[j][0], vertices[j][1]);
+        if segments_intersect(lon1, lat1, lon2, lat2, xi, yi, xj, yj) {
+            return true;
+        }
+        j = i;
+    }
+    false
+}
+
+/// 标准线段相交（含端点/共线接触——保守，接触即相交）
+fn segments_intersect(
+    x1: f64,
+    y1: f64,
+    x2: f64,
+    y2: f64,
+    x3: f64,
+    y3: f64,
+    x4: f64,
+    y4: f64,
+) -> bool {
+    let d1 = cross(x3 - x1, y3 - y1, x2 - x1, y2 - y1);
+    let d2 = cross(x4 - x1, y4 - y1, x2 - x1, y2 - y1);
+    let d3 = cross(x1 - x3, y1 - y3, x4 - x3, y4 - y3);
+    let d4 = cross(x2 - x3, y2 - y3, x4 - x3, y4 - y3);
+    if ((d1 > 0.0 && d2 < 0.0) || (d1 < 0.0 && d2 > 0.0))
+        && ((d3 > 0.0 && d4 < 0.0) || (d3 < 0.0 && d4 > 0.0))
+    {
+        return true;
+    }
+    if d1 == 0.0 && on_segment(x3, y3, x1, y1, x2, y2) {
+        return true;
+    }
+    if d2 == 0.0 && on_segment(x4, y4, x1, y1, x2, y2) {
+        return true;
+    }
+    if d3 == 0.0 && on_segment(x1, y1, x3, y3, x4, y4) {
+        return true;
+    }
+    if d4 == 0.0 && on_segment(x2, y2, x3, y3, x4, y4) {
+        return true;
+    }
+    false
+}
+
+fn cross(ax: f64, ay: f64, bx: f64, by: f64) -> f64 {
+    ax * by - ay * bx
+}
+
+fn on_segment(px: f64, py: f64, ax: f64, ay: f64, bx: f64, by: f64) -> bool {
+    const EPS: f64 = 1e-12;
+    px >= ax.min(bx) - EPS
+        && px <= ax.max(bx) + EPS
+        && py >= ay.min(by) - EPS
+        && py <= ay.max(by) + EPS
+}
+
+/// 点到线段最近距离（km；经纬度平面近似——与 point_in_polygon 同口径）
+fn dist_pt_seg_km(lon1: f64, lat1: f64, lon2: f64, lat2: f64, p: &Geo) -> f64 {
+    let lat0 = lat1.to_radians();
+    let kx = 111.320 * lat0.cos();
+    let ax = lon1 * kx;
+    let ay = lat1 * 111.0;
+    let bx = lon2 * kx;
+    let by = lat2 * 111.0;
+    let px = p.lon * kx;
+    let py = p.lat * 111.0;
+    let vx = bx - ax;
+    let vy = by - ay;
+    let wx = px - ax;
+    let wy = py - ay;
+    let l2 = vx * vx + vy * vy;
+    let t = if l2 > 0.0 {
+        ((wx * vx + wy * vy) / l2).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let qx = ax + t * vx;
+    let qy = ay + t * vy;
+    ((px - qx).powi(2) + (py - qy).powi(2)).sqrt() / 1000.0
 }
 
 #[cfg(test)]
@@ -610,8 +746,36 @@ mod tests {
     }
 
     #[test]
-    fn m1_detours_around_zone() {
-        // 挡路禁飞区（圆心在中点）→ 路径绕行（折线长度 > 直线）
+    fn segment_check_geometry_catches_diagonal_polygon_crossing() {
+        // 梯形禁飞区（主管 2026-08-06 场景）：直线斜切穿内部（16 点采样会漏——
+        // 几何判定必须拒绝）；绕行折线（先下后右）必须放行。
+        use crate::config::{HeightSemantics, ZoneShape, ZoneType};
+        let z = Zone {
+            id: "trap".into(),
+            zone_type: ZoneType::NoFly,
+            shape: ZoneShape::Polygon {
+                vertices: vec![
+                    [116.2, 39.9],
+                    [116.5, 39.9],
+                    [116.5, 40.2],
+                    [116.35, 40.2],
+                ],
+            },
+            alt_min_m: 0.0,
+            alt_max_m: 12000.0,
+            height_semantics: HeightSemantics::Msl,
+        };
+        let zones = vec![z];
+        let check = make_segment_check(&zones, None);
+        // 斜切直线：start → 接近 target 的直线，穿过梯形内部 → 拒绝拉直
+        assert!(!check(115.9, 39.8, 3000.0, 116.48, 40.3, 3000.0));
+        // 绕行折线两段：先向下绕过梯形下边（y<39.9），再从右侧上行（x>116.5）→ 放行
+        assert!(check(115.9, 39.8, 3000.0, 116.55, 39.85, 3000.0));
+        assert!(check(116.55, 39.85, 3000.0, 116.8, 40.3, 3000.0));
+    }
+
+    #[test]
+    fn m1_detours_around_zone() {        // 挡路禁飞区（圆心在中点）→ 路径绕行（折线长度 > 直线）
         let s = r#"{
             "schema_version":"0.20",
             "mission":{
