@@ -447,13 +447,15 @@ pub struct VerifyReport {
     pub warnings: Vec<String>,
 }
 
-/// 复验上下文：地形净空 + 禁飞/限飞包含（接口化；Phase 2 细层/Phase 4 机型接入后扩展）。
+/// 复验上下文：地形净空 + 禁飞/限飞包含 + 雷达威胁（接口化；Phase 4 机型接入后扩展）。
 pub struct VerifyContext<'a> {
     pub terrain: Option<&'a dyn crate::terrain::TerrainSource>,
     pub nofly: Option<&'a crate::spatial::CircleIndex>,
     /// Phase 4 M2 高度层：完整 Zone 语义（水平 + [alt_min, alt_max] + AGL 换算）。
     /// 提供时优先于 nofly（nofly 仅水平圆快查）；None 时回退 nofly。
     pub zones: Option<&'a [crate::config::Zone]>,
+    /// Phase 4 M3 雷达威胁模型：累计探测概率超 P_cross → 复验不通过。
+    pub threat: Option<&'a dyn crate::threat::ThreatModel>,
 }
 
 /// 全链复验（十轮复验清单）：
@@ -641,6 +643,22 @@ pub fn verify_path(
             "A6: r_min {:.0}m < phys min {:.0}m",
             opts.turn_radius_m, r_phys
         ));
+    }
+
+    // 5) 雷达威胁（Phase 4 M3）：累计探测概率超 P_cross → 不通过
+    if let Some(thr) = ctx.threat {
+        let tr = thr.evaluate(path, ctx.terrain);
+        if tr.over_threshold {
+            rep.issues.push(format!(
+                "radar: cumulative detection p {:.4} > threshold {:.4}",
+                tr.cumulative_p, thr.p_cross()
+            ));
+        } else if tr.cumulative_p > 0.0 {
+            rep.warnings.push(format!(
+                "radar: cumulative detection p {:.4} (peak {:.4})",
+                tr.cumulative_p, tr.peak_p
+            ));
+        }
     }
 
     rep.ok = rep.issues.is_empty();
@@ -843,6 +861,7 @@ mod chain_tests {
             terrain: Some(&FlatTerrain),
             nofly: None,
             zones: None,
+            threat: None,
         };
         let rep = verify_path(&p, None, &opts, &ctx, None);
         assert!(rep.ok, "issues: {:?}", rep.issues);
@@ -860,6 +879,7 @@ mod chain_tests {
             terrain: Some(&FlatTerrain),
             nofly: None,
             zones: None,
+            threat: None,
         };
         let rep = verify_path(&p, None, &opts, &ctx, None);
         assert!(!rep.ok);
@@ -891,6 +911,7 @@ mod chain_tests {
             terrain: Some(&FlatTerrain),
             nofly: None,
             zones: Some(&zones),
+            threat: None,
         };
         let rep = verify_path(&p_in, None, &opts, &ctx, None);
         assert!(!rep.ok);
@@ -921,6 +942,7 @@ mod chain_tests {
             terrain: Some(&FlatTerrain),
             nofly: Some(&idx),
             zones: None,
+            threat: None,
         };
         let rep = verify_path(&p, None, &opts, &ctx, None);
         assert!(!rep.ok);
@@ -944,6 +966,7 @@ mod chain_tests {
             terrain: Some(&FlatTerrain),
             nofly: None,
             zones: None,
+            threat: None,
         };
         let rep = verify_path(&p, None, &opts, &ctx, None);
         assert!(!rep.ok);
@@ -957,6 +980,7 @@ mod chain_tests {
             terrain: Some(&FlatTerrain),
             nofly: None,
             zones: None,
+            threat: None,
         };
         // 带锯齿的折线（共线 + 轻微偏转），高度 500 满足净空
         let pts: Vec<PathPoint> = (0..20)
@@ -1002,6 +1026,7 @@ mod chain_tests {
             terrain: Some(&NoDataTerrain),
             nofly: None,
             zones: None,
+            threat: None,
         };
         let input = Path::new(vec![
             PathPoint::new(0.0, 0.0, 500.0),
@@ -1023,6 +1048,7 @@ mod chain_tests {
             terrain: Some(&FlatTerrain),
             nofly: None,
             zones: None,
+            threat: None,
         };
         let input = Path::new(vec![
             PathPoint::new(f64::NAN, 0.0, 500.0),
@@ -1060,6 +1086,7 @@ mod chain_tests {
             terrain: Some(&FlatTerrain),
             nofly: None,
             zones: None,
+            threat: None,
         };
         let wave = square_wave(4, 0.02);
         let check = |lon1: f64, lat1: f64, _: f64, lon2: f64, lat2: f64, _: f64| {
@@ -1083,6 +1110,7 @@ mod chain_tests {
             terrain: Some(&FlatTerrain),
             nofly: None,
             zones: None,
+            threat: None,
         };
         let wave = square_wave(4, 0.02);
         let check = |_: f64, _: f64, _: f64, _: f64, _: f64, _: f64| true;
@@ -1105,6 +1133,7 @@ mod chain_tests {
             terrain: Some(&FlatTerrain),
             nofly: None,
             zones: None,
+            threat: None,
         };
         let wave = square_wave(4, 0.02);
         let rep = verify_path(&wave, None, &opts, &ctx, None);
@@ -1123,6 +1152,7 @@ mod chain_tests {
             terrain: Some(&FlatTerrain),
             nofly: None,
             zones: None,
+            threat: None,
         };
         // check 拒绝斜穿（模拟绕障方波）→ theta_star 截不了 → 保持
         let wave = square_wave(4, 0.02);

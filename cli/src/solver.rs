@@ -23,6 +23,7 @@ use crate::smooth::{default_chain, smooth_path_chain, SmoothOptions, VerifyConte
 use crate::spatial::{CircleEntry, CircleIndex};
 use crate::terrain::builtin::BuiltinSource;
 use crate::terrain::{Sample, TerrainSource};
+use crate::threat::{SphericalRadarThreat, ThreatParams};
 
 /// 解算参数（M1：地形路径 CLI/输入指定；grid 粗网格分辨率）。
 #[derive(Debug, Clone)]
@@ -122,7 +123,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
 
     // 5. 语义代价场（Land=1 / Water=1 / Lake=1 / NoData=5 / OOB=INF；NoFly/Obstacle 墙）
     let grid = params.grid.max(8);
-    let field = build_semantic_cost_field(grid, grid, |r, c| {
+    let mut field = build_semantic_cost_field(grid, grid, |r, c| {
         let (lon, lat) = cell_lonlat(r, c, &region, grid);
         if let Ok(g) = Geo::new(lon, lat) {
             if all_zones
@@ -137,6 +138,25 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
             None => Sample::Land(0.0),
         }
     }, 5.0);
+
+    // 5b. 雷达静态代价（Phase 4 M3）：膨胀半径内 cost ×(1+几何并集概率)——FMM 倾向绕行；
+    //     LOS 动态遮挡由 verify 威胁评估判定（不进静态代价场）。
+    let threat_params = radar_threat_params(input);
+    let threat = SphericalRadarThreat::new(&input.mission.red_forces.radars, threat_params.clone());
+    if !input.mission.red_forces.radars.is_empty() {
+        for r in 0..grid {
+            for c in 0..grid {
+                let (lon, lat) = cell_lonlat(r, c, &region, grid);
+                let p = threat.static_union_probability(lon, lat);
+                if p > 0.0 {
+                    let idx = r * grid + c;
+                    if field.cost[idx].is_finite() {
+                        field.cost[idx] *= (1.0 + p) as f32;
+                    }
+                }
+            }
+        }
+    }
 
     // 6. 每机：FMM → 回溯 → 平滑 → 输出
     let mut out_vehicles = Vec::new();
@@ -181,14 +201,22 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                 terrain: terrain.as_deref(),
                 nofly: Some(&nofly),
                 zones: Some(&all_zones),
+                threat: Some(&threat),
             };
             let result = smooth_path_chain(&Path::new(pts), &chain, &opts, &ctx, None);
             pts = result.path.points;
-            let vw = result.verify.warnings.clone();
-            warnings = vw;
-            for w in &result.verify.warnings {
+            // 合并链级 + 复验级警告；雷达超阈值/平滑失败 → degradations
+            warnings = Vec::new();
+            if let Some(w) = &result.warning {
+                warnings.push(w.clone());
                 if w.contains("smoothing_failed") {
                     degradations.push(w.clone());
+                }
+            }
+            warnings.extend(result.verify.warnings.iter().cloned());
+            for i in &result.verify.issues {
+                if i.contains("radar") {
+                    degradations.push(i.clone());
                 }
             }
         }
@@ -282,6 +310,18 @@ fn circle_index(zones: &[&Zone]) -> CircleIndex {
         })
         .collect();
     CircleIndex::build(entries)
+}
+
+/// 雷达威胁参数（默认参数表落默认值；输入覆盖合并）。
+fn radar_threat_params(input: &Input) -> ThreatParams {
+    let d = crate::config::DefaultParams::default().merge(&input.mission.parameters);
+    ThreatParams {
+        radar_inflation: d.radar_inflation,
+        detection_curve: d.detection_curve,
+        p_cross: d.p_cross,
+        suppression_delta: d.suppression_delta,
+        base_p: d.p_cross,
+    }
 }
 
 /// Theta* 去锯齿段检查：直连 (a)→(b) 不穿任何 Zone（等距 16 点采样；
@@ -423,6 +463,58 @@ mod tests {
         assert_eq!(out.vehicles[0].status, "planned");
         let d = out.vehicles[0].distance_m;
         assert!(d > 160_000.0, "NoFly 应绕行，距离 {}", d);
+    }
+
+    #[test]
+    fn m3_radar_threat_detour_and_warning() {
+        // 场景 A：大雷达（40km）挡在中点 → FMM 代价放大 → 绕行，探测概率≈0
+        let big = r#"{
+            "schema_version":"0.20",
+            "mission":{
+                "start":{"lon":115.0,"lat":39.0,"alt_m":3000},
+                "target":{"lon":116.5,"lat":39.9,"alt_m":3000},
+                "terrain":{"source":"none"},
+                "red_forces":{"radars":[{"id":"r1","lon":115.75,"lat":39.45,"radar_type":"tracking","radius_km":40}]}
+            }
+        }"#;
+        let out = solve(&parse(big), &SolveParams::default(), 0).unwrap();
+        assert_eq!(out.vehicles[0].status, "planned");
+        // 直线 ≈ 164km；雷达代价应导致绕行
+        let d = out.vehicles[0].distance_m;
+        assert!(d > 166_000.0, "大雷达应绕行，距离 {}", d);
+        // 绕行成功 → 探测概率低 → 不应有超阈值警告
+        assert!(
+            !out.vehicles[0].warnings.iter().any(|s| s.contains("over threshold")),
+            "绕行后不应超阈值: {:?}", out.vehicles[0].warnings
+        );
+    }
+
+    #[test]
+    fn m3_small_radar_crossing_reports_probability() {
+        // 场景 B：小雷达（5km）代价不足 → FMM 直穿 → 复验累计探测概率超 P_cross →
+        // 平滑链回退 + 雷达降级（degradations）
+        let small = r#"{
+            "schema_version":"0.20",
+            "mission":{
+                "start":{"lon":115.0,"lat":39.0,"alt_m":3000},
+                "target":{"lon":116.5,"lat":39.9,"alt_m":3000},
+                "terrain":{"source":"none"},
+                "red_forces":{"radars":[{"id":"r1","lon":115.75,"lat":39.45,"radar_type":"tracking","radius_km":5}]}
+            }
+        }"#;
+        let out = solve(&parse(small), &SolveParams::default(), 0).unwrap();
+        assert_eq!(out.vehicles[0].status, "planned");
+        // FMM 直穿（5km 雷达代价太小不值得绕）→ 距离 ≈ 直线（<170km）
+        let d = out.vehicles[0].distance_m;
+        assert!(d < 170_000.0, "小雷达应直穿，距离 {}", d);
+        // 复验应报告雷达探测概率（软告警 warnings 或硬降级 degradations）
+        let radar_reported = out.vehicles[0]
+            .warnings
+            .iter()
+            .chain(out.stats.degradations.iter())
+            .any(|s| s.contains("radar"));
+        assert!(radar_reported, "应报告雷达探测概率: warnings={:?} degradations={:?}",
+            out.vehicles[0].warnings, out.stats.degradations);
     }
 
     #[test]

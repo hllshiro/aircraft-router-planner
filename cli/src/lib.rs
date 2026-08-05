@@ -14,3 +14,4 @@ pub mod smooth;
 pub mod solver;
 pub mod spatial;
 pub mod terrain;
+pub mod threat;

@@ -1,0 +1,9 @@
+{
+  "schema_version": "0.20",
+  "mission": {
+    "start": {"lon": 115.0, "lat": 39.0, "alt_m": 3000},
+    "target": {"lon": 116.5, "lat": 39.9, "alt_m": 3000},
+    "terrain": {"source": "none"},
+    "red_forces": {"radars": [{"id": "r1", "lon": 115.75, "lat": 39.45, "radar_type": "tracking", "radius_km": 20}]}
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "schema_version": "0.20",
+  "mission": {
+    "start": {"lon": 115.0, "lat": 39.0, "alt_m": 3000},
+    "target": {"lon": 116.5, "lat": 39.9, "alt_m": 3000},
+    "terrain": {"source": "path", "path": "D:\\workspace\\code_engineer\\coding_projects\\AircraftRouterPlanner\\phase0\\data\\pending\\gmted2010_7p5as_global.arpack"},
+    "red_forces": {"radars": [
+      {"id": "r1", "lon": 115.75, "lat": 39.45, "radar_type": "tracking", "radius_km": 25},
+      {"id": "r2", "lon": 116.2, "lat": 39.7, "radar_type": "early_warning", "radius_km": 20, "suppression_post_range_km": 10}
+    ]}
+  }
+}
