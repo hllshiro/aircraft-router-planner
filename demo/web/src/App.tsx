@@ -73,6 +73,21 @@ export default function App() {
     }
   };
 
+  const handleRadarMove = useCallback((id: string, lon: number, lat: number) => {
+    setConfig((prev) => ({
+      ...prev,
+      mission: {
+        ...prev.mission,
+        red_forces: {
+          ...prev.mission.red_forces,
+          radars: prev.mission.red_forces.radars.map((r) =>
+            r.id === id ? { ...r, lon, lat } : r,
+          ),
+        },
+      },
+    }));
+  }, []);
+
   const handleGroundClick = useCallback(
     (wp: Waypoint) => {
       if (clickMode === 'start') {
@@ -157,6 +172,7 @@ export default function App() {
           results={result?.vehicles ?? null}
           terrainData={terrainData}
           onGroundClick={handleGroundClick}
+          onRadarMove={handleRadarMove}
           activeClickMode={clickMode}
         />
         {terrainError && (

@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef } from 'react';
+import { useCallback, useMemo, useRef, useState } from 'react';
 import { Canvas } from '@react-three/fiber';
 import { OrbitControls, Grid } from '@react-three/drei';
 import type { ThreeEvent } from '@react-three/fiber';
@@ -21,6 +21,7 @@ interface Scene3DProps {
   results: VehicleOutput[] | null;
   terrainData: TerrainInfo | null;
   onGroundClick: (wp: Waypoint) => void;
+  onRadarMove: (id: string, lon: number, lat: number) => void;
   activeClickMode: 'start' | 'target' | 'polygon' | null;
 }
 
@@ -54,10 +55,12 @@ function GroundClickPlane({
   active,
   onClick,
   geoRef,
+  suppressUntil,
 }: {
   active: boolean;
   onClick: (wp: Waypoint) => void;
   geoRef: GeoRef;
+  suppressUntil: number;
 }) {
   // 同位置防抖：r3f 事件重复触发/StrictMode 重绑定时，同一位置 400ms 内只生效一次
   const last = useRef<{ x: number; y: number; t: number } | null>(null);
@@ -66,10 +69,12 @@ function GroundClickPlane({
     (e: ThreeEvent<MouseEvent>) => {
       if (!active) return;
       e.stopPropagation();
+      // 雷达拖动刚结束（400ms 内）→ 抑制，避免误设起点/目标/顶点
+      const now = Date.now();
+      if (now < suppressUntil) return;
       // 用事件自带的 world 交点（e.point），不依赖全局 pointer state
       const px = e.point.x;
       const pz = e.point.z;
-      const now = Date.now();
       if (
         last.current &&
         now - last.current.t < 400 &&
@@ -81,7 +86,7 @@ function GroundClickPlane({
       last.current = { x: px, y: pz, t: now };
       onClick(localToGeo([px, pz, 0], geoRef));
     },
-    [active, onClick, geoRef],
+    [active, onClick, geoRef, suppressUntil],
   );
 
   return (
@@ -108,10 +113,19 @@ export function Scene3D({
   results,
   terrainData,
   onGroundClick,
+  onRadarMove,
   activeClickMode,
 }: Scene3DProps) {
   const startPos = useMemo(() => geoToLocal(start, geoRef), [start, geoRef]);
   const targetPos = useMemo(() => geoToLocal(target, geoRef), [target, geoRef]);
+
+  // 雷达拖动状态：拖动期间禁用 OrbitControls，结束 400ms 内抑制地面点击
+  const [radarDragging, setRadarDragging] = useState(false);
+  const [dragSuppressUntil, setDragSuppressUntil] = useState(0);
+  const handleRadarDragState = useCallback((dragging: boolean) => {
+    setRadarDragging(dragging);
+    if (!dragging) setDragSuppressUntil(Date.now() + 400);
+  }, []);
 
   const radarMeshes = radars.map((r) => ({
     id: r.id,
@@ -180,7 +194,11 @@ export function Scene3D({
       <hemisphereLight args={['#b8c8f0', '#4a5a78', 0.7]} />
       <directionalLight position={[20000, 30000, 10000]} intensity={1.1} />
 
-      <OrbitControls makeDefault maxPolarAngle={Math.PI / 2.1} />
+      <OrbitControls
+        makeDefault
+        maxPolarAngle={Math.PI / 2.1}
+        enabled={!radarDragging}
+      />
 
       {terrainData && <TerrainMesh data={terrainData} geoRef={geoRef} />}
 
@@ -201,7 +219,15 @@ export function Scene3D({
       <TargetZone center={targetPos} />
 
       {radarMeshes.map((r) => (
-        <RadarSphere key={r.id} center={r.center} radiusM={r.radiusM} />
+        <RadarSphere
+          key={r.id}
+          id={r.id}
+          center={r.center}
+          radiusM={r.radiusM}
+          geoRef={geoRef}
+          onRadarMove={onRadarMove}
+          onDragStateChange={handleRadarDragState}
+        />
       ))}
       {zoneMeshes.map((z) => (
         <NFZPrism
@@ -238,7 +264,12 @@ export function Scene3D({
         />
       ))}
 
-      <GroundClickPlane active={activeClickMode !== null} onClick={onGroundClick} geoRef={geoRef} />
+      <GroundClickPlane
+        active={activeClickMode !== null}
+        onClick={onGroundClick}
+        geoRef={geoRef}
+        suppressUntil={dragSuppressUntil}
+      />
     </Canvas>
   );
 }

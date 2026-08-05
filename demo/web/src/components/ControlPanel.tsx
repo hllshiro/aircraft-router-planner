@@ -122,6 +122,40 @@ export function ControlPanel({
       no_fly_zones: mission.no_fly_zones.filter((z) => z.id !== id),
     });
 
+  // 限飞区（restricted_zones 独立数组，schema 0.20）
+  const addRestrictedZone = useCallback(() => {
+    const id = `rz_${Date.now()}`;
+    const zone: Zone = {
+      id,
+      zone_type: 'restricted',
+      shape: 'circle',
+      geometry: {
+        center: [
+          (mission.start.lon + mission.target.lon) / 2,
+          (mission.start.lat + mission.target.lat) / 2,
+        ],
+        radius_km: 20,
+      },
+      alt_min_m: 0,
+      alt_max_m: 12000,
+      height_semantics: 'msl',
+    };
+    updateMission({
+      restricted_zones: [...mission.restricted_zones, zone],
+    });
+  }, [mission]);
+
+  const updateRestrictedZone = (id: string, patch: Partial<Zone>) =>
+    updateMission({
+      restricted_zones: mission.restricted_zones.map((z) =>
+        z.id === id ? { ...z, ...patch } : z,
+      ),
+    });
+  const removeRestrictedZone = (id: string) =>
+    updateMission({
+      restricted_zones: mission.restricted_zones.filter((z) => z.id !== id),
+    });
+
   const v = mission.vehicles[0];
 
   return (
@@ -436,7 +470,7 @@ export function ControlPanel({
       </button>
 
       {/* Zones */}
-      <h3>禁飞区 ({mission.no_fly_zones.length})</h3>
+      <h3>禁飞区·no_fly ({mission.no_fly_zones.length})</h3>
       {mission.no_fly_zones.map((z) => (
         <div key={z.id} className="obstacle-item">
           <div className="obstacle-header">
@@ -638,6 +672,174 @@ export function ControlPanel({
         style={{ width: '100%', background: '#333', color: '#e0e0e0' }}
       >
         + 添加禁飞区
+      </button>
+
+      {/* Restricted zones */}
+      <h3>限飞区 ({mission.restricted_zones.length})</h3>
+      {mission.restricted_zones.map((z) => {
+        const g = z.geometry as { center?: [number, number]; radius_km?: number; vertices?: [number, number][] };
+        return (
+          <div key={z.id} className="obstacle-item">
+            <div className="obstacle-header">
+              <span>{z.id}</span>
+              <select
+                value={z.shape}
+                onChange={(e) => {
+                  const shape = e.target.value as 'circle' | 'polygon';
+                  if (shape === 'circle') {
+                    updateRestrictedZone(z.id, {
+                      shape: 'circle',
+                      geometry: {
+                        center: g.center ?? [
+                          (mission.start.lon + mission.target.lon) / 2,
+                          (mission.start.lat + mission.target.lat) / 2,
+                        ],
+                        radius_km: g.radius_km ?? 20,
+                      },
+                    });
+                  } else {
+                    updateRestrictedZone(z.id, {
+                      shape: 'polygon',
+                      geometry: { vertices: g.vertices ?? [] },
+                    });
+                  }
+                }}
+              >
+                <option value="circle">圆形</option>
+                <option value="polygon">多边形</option>
+              </select>
+              <button
+                className="btn-small btn-danger"
+                onClick={() => removeRestrictedZone(z.id)}
+              >
+                ✕
+              </button>
+            </div>
+            {z.shape === 'circle' ? (
+              <div className="field-row">
+                <div>
+                  <label>经度</label>
+                  <input
+                    type="number"
+                    step="0.0001"
+                    value={g.center?.[0] ?? 0}
+                    onChange={(e) =>
+                      updateRestrictedZone(z.id, {
+                        geometry: {
+                          ...(z.geometry as { center: [number, number]; radius_km: number }),
+                          center: [+e.target.value, g.center?.[1] ?? 0],
+                        },
+                      })
+                    }
+                  />
+                </div>
+                <div>
+                  <label>纬度</label>
+                  <input
+                    type="number"
+                    step="0.0001"
+                    value={g.center?.[1] ?? 0}
+                    onChange={(e) =>
+                      updateRestrictedZone(z.id, {
+                        geometry: {
+                          ...(z.geometry as { center: [number, number]; radius_km: number }),
+                          center: [g.center?.[0] ?? 0, +e.target.value],
+                        },
+                      })
+                    }
+                  />
+                </div>
+                <div>
+                  <label>半径 (km)</label>
+                  <input
+                    type="number"
+                    value={g.radius_km ?? 0}
+                    onChange={(e) =>
+                      updateRestrictedZone(z.id, {
+                        geometry: {
+                          ...(z.geometry as { center: [number, number]; radius_km: number }),
+                          radius_km: +e.target.value,
+                        },
+                      })
+                    }
+                  />
+                </div>
+              </div>
+            ) : (
+              <div className="polygon-edit">
+                <div className="list-title">顶点（{g.vertices?.length ?? 0}）</div>
+                {(g.vertices ?? []).map((v, i) => (
+                  <div key={i} className="field-row" style={{ marginTop: 4 }}>
+                    <input
+                      type="number"
+                      step="0.0001"
+                      value={v[0]}
+                      onChange={(e) => {
+                        const vs = [...(g.vertices ?? [])];
+                        vs[i] = [+e.target.value, vs[i][1]];
+                        updateRestrictedZone(z.id, { geometry: { vertices: vs } });
+                      }}
+                    />
+                    <input
+                      type="number"
+                      step="0.0001"
+                      value={v[1]}
+                      onChange={(e) => {
+                        const vs = [...(g.vertices ?? [])];
+                        vs[i] = [vs[i][0], +e.target.value];
+                        updateRestrictedZone(z.id, { geometry: { vertices: vs } });
+                      }}
+                    />
+                    <button
+                      className="btn-small btn-danger"
+                      onClick={() =>
+                        updateRestrictedZone(z.id, {
+                          geometry: {
+                            vertices: (g.vertices ?? []).filter((_, j) => j !== i),
+                          },
+                        })
+                      }
+                    >
+                      ✕
+                    </button>
+                  </div>
+                ))}
+                <div style={{ color: '#88aacc', fontSize: 10, marginTop: 2 }}>
+                  顶点用经纬度表格编辑（至少 3 个形成多边形）
+                </div>
+              </div>
+            )}
+            <div className="field-row" style={{ marginTop: 4 }}>
+              <div>
+                <label>最低高 (m)</label>
+                <input
+                  type="number"
+                  value={z.alt_min_m}
+                  onChange={(e) =>
+                    updateRestrictedZone(z.id, { alt_min_m: +e.target.value })
+                  }
+                />
+              </div>
+              <div>
+                <label>最高高 (m)</label>
+                <input
+                  type="number"
+                  value={z.alt_max_m}
+                  onChange={(e) =>
+                    updateRestrictedZone(z.id, { alt_max_m: +e.target.value })
+                  }
+                />
+              </div>
+            </div>
+          </div>
+        );
+      })}
+      <button
+        className="btn-small"
+        onClick={addRestrictedZone}
+        style={{ width: '100%', background: '#333', color: '#e0e0e0' }}
+      >
+        + 添加限飞区
       </button>
 
       {/* Params */}
