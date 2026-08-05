@@ -440,8 +440,11 @@ pub struct DefaultParams {
     pub p_cross: f64,
     /// 压制修正因子 δ（探测距离 × (1−δ)，占位）
     pub suppression_delta: f64,
-    /// 雷达探测概率代价系数（FMM 代价 ×(1+coef×p)；>0，默认 50：
-    /// 40km 雷达中心 ×6、0.6R 处 ×1.5——探测概率显著影响航路，高概率区 FMM 明确绕行躲避）
+    /// 雷达探测概率代价系数（FMM 代价 ×(1+coef×(p+geom))；>0，默认 200：
+    /// p = 几何并集探测概率，geom = 有效半径内归一化深穿惩罚 (1−u)。
+    /// 中心 ×(1+200×(0.1+1))≈×221、0.8R 处 ×(1+200×0.15)≈×31——
+    /// 穿探测区（含并排双雷达重叠/间隙边缘）明确绕行，探测区外无几何项。
+    /// 主管 2026-08-06：并排双雷达不得直穿探测区（即使 P_cross 调高）。
     pub radar_cost_coef: f64,
     /// LOS mask 系数（默认 0.05–0.1 区间内取 0.08；守保守口径不取 0，十二轮共识）
     pub los_mask_coef: f64,
@@ -480,7 +483,7 @@ impl Default for DefaultParams {
             detection_curve: DetectionCurve::Exponential,
             p_cross: 0.1,
             suppression_delta: 0.5,
-            radar_cost_coef: 50.0,
+            radar_cost_coef: 200.0,
             los_mask_coef: 0.08,
             main_budget_ms: 2_500,
             degrade_budget_ms: 500,

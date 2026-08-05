@@ -12,6 +12,11 @@ use crate::config::{AircraftType, DefaultParams, VehicleProfile};
 use crate::dubins::dubins_path;
 use crate::path::{Path, PathPoint, angle_diff_deg, point_seg_distance_m};
 
+/// Dubins 拟合阶段的弦高放宽值（米）：Dubins 输出是"物理修正"圆角
+/// （转弯半径 r_m），绕行 L 形/多雷达弧线的圆角相对 raw 折线可达数百米，
+/// 100m 逼近容差会误杀合法绕行；运动学/地形/禁飞仍严格复验。
+const DUBINS_CHORD_TOL_M: f64 = 1000.0;
+
 /// 平滑器参数（Phase 0 标定前用保守初值，参数化可调；标定项见 docs/phase0_baseline.md）。
 #[derive(Debug, Clone)]
 pub struct SmoothOptions {
@@ -872,8 +877,17 @@ pub fn smooth_path_chain<'a>(
         }
     }
     // 从链末向前回退（包含 input 阶段）
+    // Dubins 拟合阶段：输出是"物理修正"圆角（转弯半径 r_m），相对 raw 折线的
+    // 弦高可达数百米（绕行 L 形圆角 ~0.7km）——100m 逼近容差会误杀合法绕行，
+    // 对该阶段放宽弦高（DUBINS_CHORD_TOL_M），运动学/地形/禁飞仍严格复验。
     for (idx, (_name, stage)) in stages.iter().enumerate().rev() {
-        let rep = verify_path(stage, Some(input), opts, ctx, phys_min_radius_m);
+        let rep = if _name == "dubins" {
+            let mut o = opts.clone();
+            o.chord_tol_m = DUBINS_CHORD_TOL_M;
+            verify_path(stage, Some(input), &o, ctx, phys_min_radius_m)
+        } else {
+            verify_path(stage, Some(input), opts, ctx, phys_min_radius_m)
+        };
         if rep.ok {
             let applied: Vec<String> = stages[1..=idx].iter().map(|(n, _)| n.clone()).collect();
             return SmoothResult {

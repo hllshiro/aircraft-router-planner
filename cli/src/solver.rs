@@ -174,9 +174,11 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
         }
     }, 5.0);
 
-    // 5b. 雷达静态代价（Phase 4 M3）：膨胀半径内 cost ×(1+coef·几何并集概率)——FMM 倾向绕行；
-    //     LOS 动态遮挡由 verify 威胁评估判定（不进静态代价场）。
-    //     coef = radar_cost_coef（默认 10，主管 2026-08-05：探测概率应明显影响航路规划）。
+    // 5b. 雷达静态代价（Phase 4 M3）：膨胀半径内 cost ×(1+coef·(几何并集概率 + 深穿惩罚))
+    //     ——FMM 倾向绕行；LOS 动态遮挡由 verify 威胁评估判定（不进静态代价场）。
+    //     coef = radar_cost_coef（默认 200）。几何深穿惩罚（u<1 时 ×(1+coef·(1-u))，
+    //     探测区外 u≥1 无几何项）：确保穿探测区明确绕行——主管 2026-08-06：
+    //     并排双雷达不得直穿探测区（即使 P_cross 调高，几何绕行与验收阈值解耦）。
     let mut degradations = Vec::new();
     let params_merged = crate::config::DefaultParams::default().merge(&input.mission.parameters);
     radar_param_degradations(input, &mut degradations);
@@ -190,7 +192,9 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                 if p > 0.0 {
                     let idx = r * grid + c;
                     if field.cost[idx].is_finite() {
-                        field.cost[idx] *= (1.0 + params_merged.radar_cost_coef * p) as f32;
+                        let u = threat.static_penetration(lon, lat, 0.0);
+                        let geom = if u < 1.0 { 1.0 - u } else { 0.0 };
+                        field.cost[idx] *= (1.0 + params_merged.radar_cost_coef * (p + geom)) as f32;
                     }
                 }
             }
@@ -487,7 +491,7 @@ fn radar_param_degradations(input: &Input, out: &mut Vec<String>) {
     if let Some(v) = p.radar_cost_coef
         && !(v.is_finite() && v > 0.0)
     {
-        out.push(format!("parameter radar_cost_coef={v} invalid -> default 10"));
+        out.push(format!("parameter radar_cost_coef={v} invalid -> default 200"));
     }
     if let Some(v) = p.los_mask_coef
         && !(v.is_finite() && v >= 0.0 && v <= 1.0)
