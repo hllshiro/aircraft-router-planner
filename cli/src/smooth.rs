@@ -522,6 +522,7 @@ pub struct VerifyReport {
 }
 
 /// 复验上下文：地形净空 + 禁飞/限飞包含 + 雷达威胁（接口化；Phase 4 机型接入后扩展）。
+#[derive(Default)]
 pub struct VerifyContext<'a> {
     pub terrain: Option<&'a dyn crate::terrain::TerrainSource>,
     pub nofly: Option<&'a crate::spatial::CircleIndex>,
@@ -530,6 +531,9 @@ pub struct VerifyContext<'a> {
     pub zones: Option<&'a [crate::config::Zone]>,
     /// Phase 4 M3 雷达威胁模型：累计探测概率超 P_cross → 软性告警（degradation，不阻断平滑）。
     pub threat: Option<&'a dyn crate::threat::ThreatModel>,
+    /// Zone 硬墙（NoFly/Obstacle）水平膨胀距离（m；主管 2026-08-06：绕飞贴边→考虑
+    /// 飞机机动——绕行需留物理转弯空间）。段到墙净距 < 该值即判定不合法；0 = 不膨胀。
+    pub zone_inflation_m: f64,
 }
 
 /// 全链复验（十轮复验清单）：
@@ -624,9 +628,27 @@ pub fn verify_path(
 
     // 2) 地形净空 + 禁飞包含（每段等距采样）
     let segs = opts.verify_seg_samples.max(2);
+    let infl_km = ctx.zone_inflation_m / 1000.0;
     for i in 1..n {
         let a = path.points[i - 1];
         let b = path.points[i];
+        // Zone 硬墙（NoFly/Obstacle）：段到墙水平净距 ≥ zone_inflation_m
+        // （几何精确，无采样漏判；主管 2026-08-06：绕飞贴边→考虑飞机机动留转弯空间。
+        //  inflation=0 时仍拒绝穿入（clr≤0）——与原 zone_contains_at 采样语义一致）
+        if let Some(zs) = ctx.zones {
+            for z in zs {
+                if z.is_wall() {
+                    let clr = crate::config::zone_segment_clearance_km(
+                        a.lon, a.lat, b.lon, b.lat, z,
+                    );
+                    if clr <= 1e-9 || clr < infl_km {
+                        rep.issues.push(format!(
+                            "segment {i}: clearance {clr:.2}km < inflation {infl_km:.2}km (zone wall)"
+                        ));
+                    }
+                }
+            }
+        }
         for k in 0..=segs {
             let t = k as f64 / segs as f64;
             let (lon, lat, alt) = (
@@ -637,9 +659,13 @@ pub fn verify_path(
             if let Some(zs) = ctx.zones {
                 let geo_ok = crate::coord::Geo::new(lon, lat).ok();
                 if let Some(g) = geo_ok {
-                    // 完整 Zone 语义：水平 + 高度区间（AGL 需地面高度）
+                    // 完整 Zone 语义：水平 + 高度区间（AGL 需地面高度）；硬墙已在上面
+                    // 净距检查覆盖（全高度墙），这里只查 Restricted（高度层语义）。
                     let ground = ctx.terrain.and_then(|t| t.height_at(lon, lat));
-                    if zs.iter().any(|z| crate::config::zone_contains_at(z, &g, alt, ground)) {
+                    if zs
+                        .iter()
+                        .any(|z| !z.is_wall() && crate::config::zone_contains_at(z, &g, alt, ground))
+                    {
                         rep.issues.push(format!(
                             "sample (lon={lon:.4},lat={lat:.4},alt={alt:.0}) inside zone (alt band)"
                         ));
@@ -957,6 +983,7 @@ mod chain_tests {
             nofly: None,
             zones: None,
             threat: None,
+              zone_inflation_m: 0.0,
         };
         let rep = verify_path(&p, None, &opts, &ctx, None);
         assert!(rep.ok, "issues: {:?}", rep.issues);
@@ -975,6 +1002,7 @@ mod chain_tests {
             nofly: None,
             zones: None,
             threat: None,
+              zone_inflation_m: 0.0,
         };
         let rep = verify_path(&p, None, &opts, &ctx, None);
         assert!(!rep.ok);
@@ -1007,6 +1035,7 @@ mod chain_tests {
             nofly: None,
             zones: Some(&zones),
             threat: None,
+              zone_inflation_m: 0.0,
         };
         let rep = verify_path(&p_in, None, &opts, &ctx, None);
         assert!(!rep.ok);
@@ -1038,6 +1067,7 @@ mod chain_tests {
             nofly: Some(&idx),
             zones: None,
             threat: None,
+              zone_inflation_m: 0.0,
         };
         let rep = verify_path(&p, None, &opts, &ctx, None);
         assert!(!rep.ok);
@@ -1062,6 +1092,7 @@ mod chain_tests {
             nofly: None,
             zones: None,
             threat: None,
+              zone_inflation_m: 0.0,
         };
         let rep = verify_path(&p, None, &opts, &ctx, None);
         assert!(!rep.ok);
@@ -1076,6 +1107,7 @@ mod chain_tests {
             nofly: None,
             zones: None,
             threat: None,
+              zone_inflation_m: 0.0,
         };
         // 带锯齿的折线（共线 + 轻微偏转），高度 500 满足净空
         let pts: Vec<PathPoint> = (0..20)
@@ -1122,6 +1154,7 @@ mod chain_tests {
             nofly: None,
             zones: None,
             threat: None,
+              zone_inflation_m: 0.0,
         };
         let input = Path::new(vec![
             PathPoint::new(0.0, 0.0, 500.0),
@@ -1144,6 +1177,7 @@ mod chain_tests {
             nofly: None,
             zones: None,
             threat: None,
+              zone_inflation_m: 0.0,
         };
         let input = Path::new(vec![
             PathPoint::new(f64::NAN, 0.0, 500.0),
@@ -1182,6 +1216,7 @@ mod chain_tests {
             nofly: None,
             zones: None,
             threat: None,
+              zone_inflation_m: 0.0,
         };
         let wave = square_wave(4, 0.02);
         let check = |lon1: f64, lat1: f64, _: f64, lon2: f64, lat2: f64, _: f64| {
@@ -1206,6 +1241,7 @@ mod chain_tests {
             nofly: None,
             zones: None,
             threat: None,
+              zone_inflation_m: 0.0,
         };
         let wave = square_wave(4, 0.02);
         let check = |_: f64, _: f64, _: f64, _: f64, _: f64, _: f64| true;
@@ -1229,6 +1265,7 @@ mod chain_tests {
             nofly: None,
             zones: None,
             threat: None,
+              zone_inflation_m: 0.0,
         };
         let wave = square_wave(4, 0.02);
         let rep = verify_path(&wave, None, &opts, &ctx, None);
@@ -1248,6 +1285,7 @@ mod chain_tests {
             nofly: None,
             zones: None,
             threat: None,
+              zone_inflation_m: 0.0,
         };
         // check 拒绝斜穿（模拟绕障方波）→ theta_star 截不了 → 保持
         let wave = square_wave(4, 0.02);

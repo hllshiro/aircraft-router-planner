@@ -442,6 +442,7 @@ fn smooth_extreme_geometry_no_panic() {
         nofly: None,
         zones: None,
         threat: None,
+        zone_inflation_m: 0.0,
     };
     let _ = verify_path(&p, None, &opts, &ctx, None);
 }
@@ -454,6 +455,7 @@ fn smooth_chain_degenerate_no_panic() {
         nofly: None,
         zones: None,
         threat: None,
+        zone_inflation_m: 0.0,
     };
     // 空链 + 空路径
     let p = Path::new(vec![]);

@@ -156,6 +156,21 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
         .collect();
     let nofly = circle_index(&all_zones.iter().collect::<Vec<_>>());
 
+    // 4b. 参数合并 + 禁飞区膨胀距离（主管 2026-08-06：绕飞太贴边→考虑飞机机动）。
+    //     物理转弯半径 r = v²/(g·tanφ)（与 smooth_options_for 同式）；绕行弧需要 ≥r 的
+    //     转弯空间，把 NoFly/Obstacle 硬墙向外膨胀 max(0.5×r)（clamp [2km, 10km]）——
+    //     FMM 绕行自然远离边界，Dubins 转弯弧留足空间（不再因贴边急弯被物理复验拒绝）。
+    let params_merged = crate::config::DefaultParams::default().merge(&input.mission.parameters);
+    let mut degradations = Vec::new();
+    radar_param_degradations(input, &mut degradations);
+    let inflation_m = specs
+        .iter()
+        .map(|v| {
+            let (_opts, phys) = crate::smooth::smooth_options_for(&v.profile, &params_merged);
+            (phys * 0.5).clamp(2_000.0, 10_000.0)
+        })
+        .fold(0.0f64, f64::max);
+
     // 5. 语义代价场（Land=1 / Water=1 / Lake=1 / NoData=5 / OOB=INF；NoFly/Obstacle 墙）
     let grid = params.grid.max(8);
     let mut field = build_semantic_cost_field(grid, grid, |r, c| {
@@ -174,14 +189,61 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
         }
     }, 5.0);
 
+    // 5c. 禁飞区墙向外膨胀（栅格级多轮 8 邻域扩散，考虑飞机机动留转弯空间）
+    let cell_m = region.span_deg * 111_320.0 / grid as f64;
+    let inflation_cells = (inflation_m / cell_m.max(1.0)).ceil() as usize;
+    if inflation_cells > 0 {
+        let mut expanded: Vec<bool> = (0..grid * grid)
+            .map(|i| !field.cost[i].is_finite())
+            .collect();
+        for _ in 0..inflation_cells {
+            let cur = expanded.clone();
+            for r in 0..grid {
+                for c in 0..grid {
+                    let idx = r * grid + c;
+                    if cur[idx] {
+                        continue;
+                    }
+                    let mut near = false;
+                    for dr in -1i32..=1 {
+                        for dc in -1i32..=1 {
+                            if dr == 0 && dc == 0 {
+                                continue;
+                            }
+                            let nr = r as i32 + dr;
+                            let nc = c as i32 + dc;
+                            if nr >= 0
+                                && nr < grid as i32
+                                && nc >= 0
+                                && nc < grid as i32
+                                && cur[nr as usize * grid + nc as usize]
+                            {
+                                near = true;
+                                break;
+                            }
+                        }
+                        if near {
+                            break;
+                        }
+                    }
+                    if near {
+                        expanded[idx] = true;
+                    }
+                }
+            }
+        }
+        for i in 0..grid * grid {
+            if expanded[i] {
+                field.cost[i] = f32::INFINITY;
+            }
+        }
+    }
+
     // 5b. 雷达静态代价（Phase 4 M3）：膨胀半径内 cost ×(1+coef·(几何并集概率 + 深穿惩罚))
     //     ——FMM 倾向绕行；LOS 动态遮挡由 verify 威胁评估判定（不进静态代价场）。
     //     coef = radar_cost_coef（默认 200）。几何深穿惩罚（u<1 时 ×(1+coef·(1-u))，
     //     探测区外 u≥1 无几何项）：确保穿探测区明确绕行——主管 2026-08-06：
     //     并排双雷达不得直穿探测区（即使 P_cross 调高，几何绕行与验收阈值解耦）。
-    let mut degradations = Vec::new();
-    let params_merged = crate::config::DefaultParams::default().merge(&input.mission.parameters);
-    radar_param_degradations(input, &mut degradations);
     let threat_params = radar_threat_params(&params_merged);
     let threat = SphericalRadarThreat::new(&input.mission.red_forces.radars, threat_params.clone());
     if !input.mission.red_forces.radars.is_empty() {
@@ -256,13 +318,19 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
         let mut pts = raw_joined.points.clone();
         if pts.len() >= 2 {
             let (opts, phys_min_radius_m) = crate::smooth::smooth_options_for(&v.profile, &params_merged);
-            let check = make_segment_check(&all_zones, Some(&threat as &dyn crate::threat::ThreatModel));
+            let inflation_km = inflation_m / 1000.0;
+            let check = make_segment_check(
+                &all_zones,
+                Some(&threat as &dyn crate::threat::ThreatModel),
+                inflation_km,
+            );
             let chain = default_chain(&opts, &check);
             let ctx = VerifyContext {
                 terrain: terrain.as_deref(),
                 nofly: Some(&nofly),
                 zones: Some(&all_zones),
                 threat: Some(&threat),
+                zone_inflation_m: inflation_m,
             };
             // 每段独立平滑（首尾段端点保留——Theta* 截直不得移除必经点）
             let mut smooth_segs = Vec::new();
@@ -533,29 +601,30 @@ fn join_paths(segs: &[Path]) -> Path {
 /// → 拒绝拉直（保住 FMM 绕行决策——P_cross 只是验收阈值，不得因调高 P_cross
 /// 而把绕行弧拉直成穿雷达区的直线；主管 2026-08-06：航路必须绕开雷达探测区域）；
 /// 低概率边缘（≥0.7，即有效半径外）允许拉直 → 绕行路径可平滑。
+/// 线段合法性检查（Theta* 去锯齿拉直用）。
+/// Zone 水平判定：NoFly/Obstacle 全高度墙——段到 Zone 水平净距 < inflation_km 即拒绝
+/// （主管 2026-08-06：绕飞太贴边→考虑飞机机动；膨胀距离按物理转弯半径 v²/(g·tanφ)
+/// 的 0.5 倍（clamp [2,10]km），拉直不得贴进膨胀带，FMM 绕行留转弯空间）；
+/// Restricted 保持"水平相交 + 段高度采样"（M2 高度层语义，不膨胀）。
+/// 雷达威胁：直连"深穿"任一雷达（归一化深度 < 0.7，即深入有效半径 70% 以内）
+/// → 拒绝拉直（保住 FMM 绕行决策——P_cross 只是验收阈值，不得因调高 P_cross
+/// 而把绕行弧拉直成穿雷达区的直线；主管 2026-08-06：航路必须绕开雷达探测区域）；
+/// 低概率边缘（≥0.7，即有效半径外）允许拉直 → 绕行路径可平滑。
 fn make_segment_check<'a>(
     zones: &'a [Zone],
     threat: Option<&'a dyn crate::threat::ThreatModel>,
+    inflation_km: f64,
 ) -> impl Fn(f64, f64, f64, f64, f64, f64) -> bool + 'a {
     move |lon1, lat1, alt1, lon2, lat2, alt2| {
         const N: usize = 16;
         const DEEP_RATIO: f64 = 0.7;
         for z in zones {
-            let hit = match &z.shape {
-                crate::config::ZoneShape::Circle { center, radius_km } => {
-                    match Geo::new(center[0], center[1]) {
-                        Ok(c) => dist_pt_seg_km(lon1, lat1, lon2, lat2, &c) <= *radius_km,
-                        Err(_) => false,
-                    }
-                }
-                crate::config::ZoneShape::Polygon { vertices } => {
-                    segment_hits_polygon(lon1, lat1, lon2, lat2, vertices)
-                }
-            };
-            if hit {
-                if z.is_wall() {
+            let clr = crate::config::zone_segment_clearance_km(lon1, lat1, lon2, lat2, z);
+            if z.is_wall() {
+                if clr <= 1e-9 || clr < inflation_km {
                     return false;
                 }
+            } else if clr <= 1e-9 {
                 // restricted：高度层采样（水平相交后，高度沿线段插值判定）
                 for i in 0..=N {
                     let t = i as f64 / N as f64;
@@ -583,112 +652,6 @@ fn make_segment_check<'a>(
         }
         true
     }
-}
-
-/// 线段 vs 多边形水平相交（经纬度平面近似；端点在内或任一边相交 → true，含边界接触）
-fn segment_hits_polygon(
-    lon1: f64,
-    lat1: f64,
-    lon2: f64,
-    lat2: f64,
-    vertices: &[[f64; 2]],
-) -> bool {
-    if vertices.len() < 3 {
-        return false;
-    }
-    let p1 = Geo::new(lon1, lat1).ok();
-    let p2 = Geo::new(lon2, lat2).ok();
-    if p1
-        .as_ref()
-        .map_or(false, |g| crate::config::point_in_polygon(g, vertices))
-        || p2
-            .as_ref()
-            .map_or(false, |g| crate::config::point_in_polygon(g, vertices))
-    {
-        return true;
-    }
-    let mut j = vertices.len() - 1;
-    for i in 0..vertices.len() {
-        let (xi, yi) = (vertices[i][0], vertices[i][1]);
-        let (xj, yj) = (vertices[j][0], vertices[j][1]);
-        if segments_intersect(lon1, lat1, lon2, lat2, xi, yi, xj, yj) {
-            return true;
-        }
-        j = i;
-    }
-    false
-}
-
-/// 标准线段相交（含端点/共线接触——保守，接触即相交）
-fn segments_intersect(
-    x1: f64,
-    y1: f64,
-    x2: f64,
-    y2: f64,
-    x3: f64,
-    y3: f64,
-    x4: f64,
-    y4: f64,
-) -> bool {
-    let d1 = cross(x3 - x1, y3 - y1, x2 - x1, y2 - y1);
-    let d2 = cross(x4 - x1, y4 - y1, x2 - x1, y2 - y1);
-    let d3 = cross(x1 - x3, y1 - y3, x4 - x3, y4 - y3);
-    let d4 = cross(x2 - x3, y2 - y3, x4 - x3, y4 - y3);
-    if ((d1 > 0.0 && d2 < 0.0) || (d1 < 0.0 && d2 > 0.0))
-        && ((d3 > 0.0 && d4 < 0.0) || (d3 < 0.0 && d4 > 0.0))
-    {
-        return true;
-    }
-    if d1 == 0.0 && on_segment(x3, y3, x1, y1, x2, y2) {
-        return true;
-    }
-    if d2 == 0.0 && on_segment(x4, y4, x1, y1, x2, y2) {
-        return true;
-    }
-    if d3 == 0.0 && on_segment(x1, y1, x3, y3, x4, y4) {
-        return true;
-    }
-    if d4 == 0.0 && on_segment(x2, y2, x3, y3, x4, y4) {
-        return true;
-    }
-    false
-}
-
-fn cross(ax: f64, ay: f64, bx: f64, by: f64) -> f64 {
-    ax * by - ay * bx
-}
-
-fn on_segment(px: f64, py: f64, ax: f64, ay: f64, bx: f64, by: f64) -> bool {
-    const EPS: f64 = 1e-12;
-    px >= ax.min(bx) - EPS
-        && px <= ax.max(bx) + EPS
-        && py >= ay.min(by) - EPS
-        && py <= ay.max(by) + EPS
-}
-
-/// 点到线段最近距离（km；经纬度平面近似——与 point_in_polygon 同口径）
-fn dist_pt_seg_km(lon1: f64, lat1: f64, lon2: f64, lat2: f64, p: &Geo) -> f64 {
-    let lat0 = lat1.to_radians();
-    let kx = 111.320 * lat0.cos();
-    let ax = lon1 * kx;
-    let ay = lat1 * 111.0;
-    let bx = lon2 * kx;
-    let by = lat2 * 111.0;
-    let px = p.lon * kx;
-    let py = p.lat * 111.0;
-    let vx = bx - ax;
-    let vy = by - ay;
-    let wx = px - ax;
-    let wy = py - ay;
-    let l2 = vx * vx + vy * vy;
-    let t = if l2 > 0.0 {
-        ((wx * vx + wy * vy) / l2).clamp(0.0, 1.0)
-    } else {
-        0.0
-    };
-    let qx = ax + t * vx;
-    let qy = ay + t * vy;
-    ((px - qx).powi(2) + (py - qy).powi(2)).sqrt() / 1000.0
 }
 
 #[cfg(test)]
@@ -766,12 +729,23 @@ mod tests {
             height_semantics: HeightSemantics::Msl,
         };
         let zones = vec![z];
-        let check = make_segment_check(&zones, None);
+        let check = make_segment_check(&zones, None, 0.0);
         // 斜切直线：start → 接近 target 的直线，穿过梯形内部 → 拒绝拉直
         assert!(!check(115.9, 39.8, 3000.0, 116.48, 40.3, 3000.0));
         // 绕行折线两段：先向下绕过梯形下边（y<39.9），再从右侧上行（x>116.5）→ 放行
         assert!(check(115.9, 39.8, 3000.0, 116.55, 39.85, 3000.0));
         assert!(check(116.55, 39.85, 3000.0, 116.8, 40.3, 3000.0));
+        // 机动膨胀（主管 2026-08-06：绕飞太贴边→考虑飞机机动）：贴边绕行段
+        // （距下边 ~5.5km < 膨胀 6km）被拒；远离段放行。
+        let check_infl = make_segment_check(&zones, None, 6.0);
+        assert!(
+            !check_infl(115.9, 39.8, 3000.0, 116.55, 39.85, 3000.0),
+            "绕行段距梯形下边 < 膨胀 6km 应被拒绝（留转弯空间）"
+        );
+        assert!(
+            check_infl(115.0, 39.0, 3000.0, 117.0, 39.5, 3000.0),
+            "远离段应放行"
+        );
     }
 
     #[test]

@@ -784,6 +784,169 @@ pub(crate) fn point_in_polygon(p: &Geo, vertices: &[[f64; 2]]) -> bool {
     inside
 }
 
+// ---- 线段-多边形几何净距（主管 2026-08-06：绕飞太贴边→考虑飞机机动，绕行需留转弯空间）----
+
+/// 线段到 Zone 的水平最小净距（km）。0 = 段穿入或贴边界。
+/// 多边形：端点在内为 0，否则取段到每条边的两线段最近距离的最小值；
+/// 圆形：段到圆心最近距离 − 半径（≤0 为穿/贴）。经纬度平面近似（与 point_in_polygon 同口径）。
+pub(crate) fn zone_segment_clearance_km(
+    lon1: f64,
+    lat1: f64,
+    lon2: f64,
+    lat2: f64,
+    z: &Zone,
+) -> f64 {
+    match &z.shape {
+        ZoneShape::Circle { center, radius_km } => match Geo::new(center[0], center[1]) {
+            Ok(c) => (pt_seg_dist_km(lon1, lat1, lon2, lat2, c.lon, c.lat) - *radius_km).max(0.0),
+            Err(_) => f64::MAX,
+        },
+        ZoneShape::Polygon { vertices } => {
+            if vertices.len() < 3 {
+                return f64::MAX;
+            }
+            let p1 = Geo::new(lon1, lat1).ok();
+            let p2 = Geo::new(lon2, lat2).ok();
+            if p1
+                .as_ref()
+                .map_or(false, |g| point_in_polygon(g, vertices))
+                || p2
+                    .as_ref()
+                    .map_or(false, |g| point_in_polygon(g, vertices))
+            {
+                return 0.0;
+            }
+            let mut best = f64::MAX;
+            let mut j = vertices.len() - 1;
+            for i in 0..vertices.len() {
+                let d = seg_seg_dist_km(
+                    lon1,
+                    lat1,
+                    lon2,
+                    lat2,
+                    vertices[j][0],
+                    vertices[j][1],
+                    vertices[i][0],
+                    vertices[i][1],
+                );
+                best = best.min(d);
+                j = i;
+            }
+            best.max(0.0)
+        }
+    }
+}
+
+/// 点到线段最近距离（km；经纬度平面近似，经度按 lat0 余弦缩放）。
+fn pt_seg_dist_km(lon1: f64, lat1: f64, lon2: f64, lat2: f64, plon: f64, plat: f64) -> f64 {
+    let lat0 = lat1.to_radians();
+    let kx = 111.320 * lat0.cos();
+    let ky = 111.0;
+    let (ax, ay) = (lon1 * kx, lat1 * ky);
+    let (bx, by) = (lon2 * kx, lat2 * ky);
+    let (px, py) = (plon * kx, plat * ky);
+    let (vx, vy) = (bx - ax, by - ay);
+    let (wx, wy) = (px - ax, py - ay);
+    let l2 = vx * vx + vy * vy;
+    let t = if l2 > 0.0 {
+        ((wx * vx + wy * vy) / l2).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let (qx, qy) = (ax + t * vx, ay + t * vy);
+    ((px - qx).powi(2) + (py - qy).powi(2)).sqrt()
+}
+
+/// 两线段最近距离（km；平面近似）。相交（含端点/共线接触）→ 0；
+/// 不相交时最近点在 4 个"端点到对段"垂足或端点之一，取四者最小。
+fn seg_seg_dist_km(
+    ax1: f64,
+    ay1: f64,
+    ax2: f64,
+    ay2: f64,
+    bx1: f64,
+    by1: f64,
+    bx2: f64,
+    by2: f64,
+) -> f64 {
+    let lat0 = ((ay1 + by1) / 2.0).to_radians();
+    let kx = 111.320 * lat0.cos();
+    let ky = 111.0;
+    let (ax1, ay1) = (ax1 * kx, ay1 * ky);
+    let (ax2, ay2) = (ax2 * kx, ay2 * ky);
+    let (bx1, by1) = (bx1 * kx, by1 * ky);
+    let (bx2, by2) = (bx2 * kx, by2 * ky);
+    if segs_intersect_plane(ax1, ay1, ax2, ay2, bx1, by1, bx2, by2) {
+        return 0.0;
+    }
+    let d1 = pt_seg_plane(ax1, ay1, bx1, by1, bx2, by2);
+    let d2 = pt_seg_plane(ax2, ay2, bx1, by1, bx2, by2);
+    let d3 = pt_seg_plane(bx1, by1, ax1, ay1, ax2, ay2);
+    let d4 = pt_seg_plane(bx2, by2, ax1, ay1, ax2, ay2);
+    d1.min(d2).min(d3).min(d4)
+}
+
+/// 平面点到线段距离（米，已投影）。
+fn pt_seg_plane(px: f64, py: f64, ax: f64, ay: f64, bx: f64, by: f64) -> f64 {
+    let (vx, vy) = (bx - ax, by - ay);
+    let (wx, wy) = (px - ax, py - ay);
+    let l2 = vx * vx + vy * vy;
+    let t = if l2 > 0.0 {
+        ((wx * vx + wy * vy) / l2).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let (qx, qy) = (ax + t * vx, ay + t * vy);
+    ((px - qx).powi(2) + (py - qy).powi(2)).sqrt()
+}
+
+/// 平面线段相交（含端点/共线接触——保守，接触即相交）。
+fn segs_intersect_plane(
+    ax: f64,
+    ay: f64,
+    bx: f64,
+    by: f64,
+    cx: f64,
+    cy: f64,
+    dx: f64,
+    dy: f64,
+) -> bool {
+    let d1 = cross2(cx - ax, cy - ay, bx - ax, by - ay);
+    let d2 = cross2(dx - ax, dy - ay, bx - ax, by - ay);
+    let d3 = cross2(ax - cx, ay - cy, dx - cx, dy - cy);
+    let d4 = cross2(bx - cx, by - cy, dx - cx, dy - cy);
+    if ((d1 > 0.0 && d2 < 0.0) || (d1 < 0.0 && d2 > 0.0))
+        && ((d3 > 0.0 && d4 < 0.0) || (d3 < 0.0 && d4 > 0.0))
+    {
+        return true;
+    }
+    if d1 == 0.0 && on_seg2(cx, cy, ax, ay, bx, by) {
+        return true;
+    }
+    if d2 == 0.0 && on_seg2(dx, dy, ax, ay, bx, by) {
+        return true;
+    }
+    if d3 == 0.0 && on_seg2(ax, ay, cx, cy, dx, dy) {
+        return true;
+    }
+    if d4 == 0.0 && on_seg2(bx, by, cx, cy, dx, dy) {
+        return true;
+    }
+    false
+}
+
+fn cross2(ax: f64, ay: f64, bx: f64, by: f64) -> f64 {
+    ax * by - ay * bx
+}
+
+fn on_seg2(px: f64, py: f64, ax: f64, ay: f64, bx: f64, by: f64) -> bool {
+    const EPS: f64 = 1e-9;
+    px >= ax.min(bx) - EPS
+        && px <= ax.max(bx) + EPS
+        && py >= ay.min(by) - EPS
+        && py <= ay.max(by) + EPS
+}
+
 /// 点是否在 Zone 内且高度落入禁入区间 [alt_min, alt_max]（Phase 4 M2 高度层）。
 /// - MSL：alt_m 直接比较区间；
 /// - AGL：地面高度 ground_m 提供时换算 MSL（alt_min+ground .. alt_max+ground）；
@@ -828,6 +991,42 @@ mod tests {
         let s = r#"{"schema_version":"0.20","mission":{"start":{"lon":1,"lat":2,"alt_m":0},"target":{"lon":3,"lat":4,"alt_m":0}},"bogus":1}"#;
         let err = Input::from_json_str(s).unwrap_err();
         assert!(matches!(err, AppError::Json(_)));
+    }
+
+    #[test]
+    fn zone_segment_clearance_km_basic() {
+        // 多边形：段穿内部 → 0；段平行于边外 0.1°≈11.1km；
+        // 圆：段过圆心 → 0；段距圆心 20km（半径 10km）→ 净距 10km。
+        let poly = Zone {
+            id: "p".into(),
+            zone_type: ZoneType::NoFly,
+            shape: ZoneShape::Polygon {
+                vertices: vec![[116.0, 39.5], [116.5, 39.5], [116.5, 40.0], [116.0, 40.0]],
+            },
+            alt_min_m: 0.0,
+            alt_max_m: 10000.0,
+            height_semantics: HeightSemantics::Msl,
+        };
+        let c = zone_segment_clearance_km(116.2, 39.6, 116.3, 39.9, &poly);
+        assert_eq!(c, 0.0, "段穿内部 → 净距 0, got {c}");
+        let c = zone_segment_clearance_km(116.1, 40.1, 116.4, 40.1, &poly);
+        assert!((c - 11.1).abs() < 1.0, "平行净距 ~11.1km, got {c}");
+        let circ = Zone {
+            id: "c".into(),
+            zone_type: ZoneType::NoFly,
+            shape: ZoneShape::Circle {
+                center: [116.25, 39.75],
+                radius_km: 10.0,
+            },
+            alt_min_m: 0.0,
+            alt_max_m: 10000.0,
+            height_semantics: HeightSemantics::Msl,
+        };
+        let c = zone_segment_clearance_km(116.25, 39.70, 116.25, 39.80, &circ);
+        assert!(c < 0.01, "段过圆心 → 净距 0, got {c}");
+        let c = zone_segment_clearance_km(116.25, 39.30, 116.25, 39.40, &circ);
+        // 段距圆心最近 0.35°≈38.85km − 半径 10km = 28.85km
+        assert!((c - 28.85).abs() < 1.5, "净距 ~28.85km, got {c}");
     }
 
     #[test]
