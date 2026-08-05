@@ -447,10 +447,13 @@ pub struct VerifyReport {
     pub warnings: Vec<String>,
 }
 
-/// 复验上下文：地形净空 + 禁飞包含（接口化；Phase 2 细层/Phase 4 机型接入后扩展）。
+/// 复验上下文：地形净空 + 禁飞/限飞包含（接口化；Phase 2 细层/Phase 4 机型接入后扩展）。
 pub struct VerifyContext<'a> {
     pub terrain: Option<&'a dyn crate::terrain::TerrainSource>,
     pub nofly: Option<&'a crate::spatial::CircleIndex>,
+    /// Phase 4 M2 高度层：完整 Zone 语义（水平 + [alt_min, alt_max] + AGL 换算）。
+    /// 提供时优先于 nofly（nofly 仅水平圆快查）；None 时回退 nofly。
+    pub zones: Option<&'a [crate::config::Zone]>,
 }
 
 /// 全链复验（十轮复验清单）：
@@ -555,7 +558,18 @@ pub fn verify_path(
                 a.lat + (b.lat - a.lat) * t,
                 a.alt_m + (b.alt_m - a.alt_m) * t,
             );
-            if let Some(circ) = ctx.nofly
+            if let Some(zs) = ctx.zones {
+                let geo_ok = crate::coord::Geo::new(lon, lat).ok();
+                if let Some(g) = geo_ok {
+                    // 完整 Zone 语义：水平 + 高度区间（AGL 需地面高度）
+                    let ground = ctx.terrain.and_then(|t| t.height_at(lon, lat));
+                    if zs.iter().any(|z| crate::config::zone_contains_at(z, &g, alt, ground)) {
+                        rep.issues.push(format!(
+                            "sample (lon={lon:.4},lat={lat:.4},alt={alt:.0}) inside zone (alt band)"
+                        ));
+                    }
+                }
+            } else if let Some(circ) = ctx.nofly
                 && !circ.containing(lon, lat).is_empty()
             {
                 rep.issues.push(format!(
@@ -828,6 +842,7 @@ mod chain_tests {
         let ctx = VerifyContext {
             terrain: Some(&FlatTerrain),
             nofly: None,
+            zones: None,
         };
         let rep = verify_path(&p, None, &opts, &ctx, None);
         assert!(rep.ok, "issues: {:?}", rep.issues);
@@ -844,10 +859,49 @@ mod chain_tests {
         let ctx = VerifyContext {
             terrain: Some(&FlatTerrain),
             nofly: None,
+            zones: None,
         };
         let rep = verify_path(&p, None, &opts, &ctx, None);
         assert!(!rep.ok);
         assert!(rep.issues.iter().any(|s| s.contains("clearance")));
+    }
+
+    #[test]
+    fn verify_zones_altitude_band() {
+        // M2：同水平面不同高度——区间内违禁、区间外放行
+        let z = crate::config::Zone {
+            id: "R1".into(),
+            zone_type: crate::config::ZoneType::Restricted,
+            shape: crate::config::ZoneShape::Circle {
+                center: [0.5, 0.0],
+                radius_km: 10.0,
+            },
+            alt_min_m: 0.0,
+            alt_max_m: 1000.0,
+            height_semantics: crate::config::HeightSemantics::Msl,
+        };
+        let zones = [z];
+        let opts = SmoothOptions::default();
+        // 高度 500 在 [0,1000] 内 → 违禁
+        let p_in = Path::new(vec![
+            PathPoint::new(0.0, 0.0, 500.0),
+            PathPoint::new(1.0, 0.0, 500.0),
+        ]);
+        let ctx = VerifyContext {
+            terrain: Some(&FlatTerrain),
+            nofly: None,
+            zones: Some(&zones),
+        };
+        let rep = verify_path(&p_in, None, &opts, &ctx, None);
+        assert!(!rep.ok);
+        assert!(rep.issues.iter().any(|s| s.contains("zone")), "{:?}", rep.issues);
+        // 高度 3000 在区间外 → 放行（水平位置相同）
+        let p_out = Path::new(vec![
+            PathPoint::new(0.0, 0.0, 3000.0),
+            PathPoint::new(1.0, 0.0, 3000.0),
+        ]);
+        let rep = verify_path(&p_out, None, &opts, &ctx, None);
+        assert!(rep.ok, "高度区间外应放行: {:?}", rep.issues);
     }
 
     #[test]
@@ -866,6 +920,7 @@ mod chain_tests {
         let ctx = VerifyContext {
             terrain: Some(&FlatTerrain),
             nofly: Some(&idx),
+            zones: None,
         };
         let rep = verify_path(&p, None, &opts, &ctx, None);
         assert!(!rep.ok);
@@ -888,6 +943,7 @@ mod chain_tests {
         let ctx = VerifyContext {
             terrain: Some(&FlatTerrain),
             nofly: None,
+            zones: None,
         };
         let rep = verify_path(&p, None, &opts, &ctx, None);
         assert!(!rep.ok);
@@ -900,6 +956,7 @@ mod chain_tests {
         let ctx = VerifyContext {
             terrain: Some(&FlatTerrain),
             nofly: None,
+            zones: None,
         };
         // 带锯齿的折线（共线 + 轻微偏转），高度 500 满足净空
         let pts: Vec<PathPoint> = (0..20)
@@ -944,6 +1001,7 @@ mod chain_tests {
         let ctx = VerifyContext {
             terrain: Some(&NoDataTerrain),
             nofly: None,
+            zones: None,
         };
         let input = Path::new(vec![
             PathPoint::new(0.0, 0.0, 500.0),
@@ -964,6 +1022,7 @@ mod chain_tests {
         let ctx = VerifyContext {
             terrain: Some(&FlatTerrain),
             nofly: None,
+            zones: None,
         };
         let input = Path::new(vec![
             PathPoint::new(f64::NAN, 0.0, 500.0),
@@ -1000,6 +1059,7 @@ mod chain_tests {
         let ctx = VerifyContext {
             terrain: Some(&FlatTerrain),
             nofly: None,
+            zones: None,
         };
         let wave = square_wave(4, 0.02);
         let check = |lon1: f64, lat1: f64, _: f64, lon2: f64, lat2: f64, _: f64| {
@@ -1022,6 +1082,7 @@ mod chain_tests {
         let ctx = VerifyContext {
             terrain: Some(&FlatTerrain),
             nofly: None,
+            zones: None,
         };
         let wave = square_wave(4, 0.02);
         let check = |_: f64, _: f64, _: f64, _: f64, _: f64, _: f64| true;
@@ -1043,6 +1104,7 @@ mod chain_tests {
         let ctx = VerifyContext {
             terrain: Some(&FlatTerrain),
             nofly: None,
+            zones: None,
         };
         let wave = square_wave(4, 0.02);
         let rep = verify_path(&wave, None, &opts, &ctx, None);
@@ -1060,6 +1122,7 @@ mod chain_tests {
         let ctx = VerifyContext {
             terrain: Some(&FlatTerrain),
             nofly: None,
+            zones: None,
         };
         // check 拒绝斜穿（模拟绕障方波）→ theta_star 截不了 → 保持
         let wave = square_wave(4, 0.02);

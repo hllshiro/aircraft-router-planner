@@ -12,8 +12,8 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use crate::config::{
-    zone_contains, Input, Output, PathPoint, Stats, TerrainSourceType, VehicleOutput, Zone,
-    ZoneShape,
+    zone_contains, zone_contains_at, Input, Output, PathPoint, Stats, TerrainSourceType,
+    VehicleOutput, Zone, ZoneShape,
 };
 use crate::coord::Geo;
 use crate::costfield::{backtrack_path, build_semantic_cost_field, fmm_propagate};
@@ -106,22 +106,29 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
     let target = input.mission.target.to_geo()?;
     let region = region_of(&specs, &target);
 
-    // 4. Zone 集合（no_fly + restricted + obstacles；M1 全部禁入，水平几何）
-    let zones: Vec<&Zone> = input
+    // 4. Zone 集合（no_fly + restricted + obstacles）
+    //    代价场墙策略（M2 高度层）：
+    //    - NoFly/Obstacle → 全高度水平墙（代价场 INF）——保守禁入；
+    //    - Restricted → 不画墙（高度区间外可穿越），由 Theta* check + verify 高度判定。
+    let all_zones: Vec<Zone> = input
         .mission
         .no_fly_zones
         .iter()
         .chain(input.mission.restricted_zones.iter())
         .chain(input.mission.obstacles.iter())
+        .cloned()
         .collect();
-    let nofly = circle_index(&zones);
+    let nofly = circle_index(&all_zones.iter().collect::<Vec<_>>());
 
-    // 5. 语义代价场（Land=1 / Water=1 / Lake=1 / NoData=5 / OOB=INF；Zone 覆盖 → OOB 墙）
+    // 5. 语义代价场（Land=1 / Water=1 / Lake=1 / NoData=5 / OOB=INF；NoFly/Obstacle 墙）
     let grid = params.grid.max(8);
     let field = build_semantic_cost_field(grid, grid, |r, c| {
         let (lon, lat) = cell_lonlat(r, c, &region, grid);
         if let Ok(g) = Geo::new(lon, lat) {
-            if zones.iter().any(|z| zone_contains(z, &g)) {
+            if all_zones
+                .iter()
+                .any(|z| z.is_wall() && zone_contains(z, &g))
+            {
                 return Sample::OutOfBounds;
             }
         }
@@ -161,18 +168,19 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
             })
             .collect();
 
-        // 平滑链（≥2 点；VerifyContext 接地形净空 + 禁飞圆）
+        // 平滑链（≥2 点；VerifyContext 接地形净空 + Zone 高度层）
         let mut warnings = Vec::new();
         if pts.len() >= 2 {
             let opts = SmoothOptions {
                 aircraft_type: v.aircraft_type,
                 ..Default::default()
             };
-            let check = make_segment_check(&nofly, &zones);
+            let check = make_segment_check(&all_zones);
             let chain = default_chain(&opts, &check);
             let ctx = VerifyContext {
                 terrain: terrain.as_deref(),
                 nofly: Some(&nofly),
+                zones: Some(&all_zones),
             };
             let result = smooth_path_chain(&Path::new(pts), &chain, &opts, &ctx, None);
             pts = result.path.points;
@@ -259,7 +267,7 @@ fn lonlat_cell(lon: f64, lat: f64, region: &Region, grid: usize) -> (usize, usiz
     (r.min(grid - 1), c.min(grid - 1))
 }
 
-/// 圆形 zone → CircleIndex（smooth 复验禁飞包含用）。
+/// 圆形 zone → CircleIndex（smooth 复验禁飞包含用；zones 提供时 verify 不再用它）。
 fn circle_index(zones: &[&Zone]) -> CircleIndex {
     let entries: Vec<CircleEntry> = zones
         .iter()
@@ -276,19 +284,20 @@ fn circle_index(zones: &[&Zone]) -> CircleIndex {
     CircleIndex::build(entries)
 }
 
-/// Theta* 去锯齿段检查：直连 (a)→(b) 不穿任何 Zone（等距 16 点采样；水平几何）。
+/// Theta* 去锯齿段检查：直连 (a)→(b) 不穿任何 Zone（等距 16 点采样；
+/// 水平 + 高度区间，高度沿线段线性插值——M2 高度层）。
 fn make_segment_check<'a>(
-    _nofly: &'a CircleIndex,
-    zones: &'a [&'a Zone],
+    zones: &'a [Zone],
 ) -> impl Fn(f64, f64, f64, f64, f64, f64) -> bool + 'a {
-    move |lon1, lat1, _alt1, lon2, lat2, _alt2| {
+    move |lon1, lat1, alt1, lon2, lat2, alt2| {
         const N: usize = 16;
         for i in 0..=N {
             let t = i as f64 / N as f64;
             let lon = lon1 + (lon2 - lon1) * t;
             let lat = lat1 + (lat2 - lat1) * t;
+            let alt = alt1 + (alt2 - alt1) * t;
             if let Ok(g) = Geo::new(lon, lat) {
-                if zones.iter().any(|z| zone_contains(z, &g)) {
+                if zones.iter().any(|z| zone_contains_at(z, &g, alt, None)) {
                     return false;
                 }
             }
@@ -371,6 +380,49 @@ mod tests {
         let v = &out.vehicles[0];
         // 直线 ≈ 153km；绕行应更长（25km 半径圆挡在中点）
         assert!(v.distance_m > 155_000.0, "应绕行，距离 {}", v.distance_m);
+    }
+
+    #[test]
+    fn m2_restricted_band_does_not_wall() {
+        // Restricted 高度层 [0, 2000]m：巡航 3000m 在区间外 → 可穿越（直达，不绕行）
+        let s = r#"{
+            "schema_version":"0.20",
+            "mission":{
+                "start":{"lon":115.0,"lat":39.0,"alt_m":3000},
+                "target":{"lon":116.5,"lat":39.9,"alt_m":3000},
+                "terrain":{"source":"none"},
+                "restricted_zones":[{"id":"band","zone_type":"restricted","shape":"circle",
+                    "geometry":{"center":[115.75,39.45],"radius_km":25},
+                    "alt_min_m":0,"alt_max_m":2000}]
+            }
+        }"#;
+        let input = parse(s);
+        let out = solve(&input, &SolveParams::default(), 0).unwrap();
+        assert_eq!(out.vehicles[0].status, "planned");
+        // 高度区间外 → 路径可直穿（Theta* 截直）→ 距离 ≈ 直线（≈164km），远小于绕行
+        let d = out.vehicles[0].distance_m;
+        assert!(d < 167_000.0, "应直穿 restricted 高度层，距离 {}", d);
+    }
+
+    #[test]
+    fn m2_nofly_wall_blocks_regardless_of_altitude() {
+        // NoFly 同位置：全高度墙 → 绕行（距离显著大于直线）
+        let s = r#"{
+            "schema_version":"0.20",
+            "mission":{
+                "start":{"lon":115.0,"lat":39.0,"alt_m":3000},
+                "target":{"lon":116.5,"lat":39.9,"alt_m":3000},
+                "terrain":{"source":"none"},
+                "no_fly_zones":[{"id":"wall","zone_type":"no_fly","shape":"circle",
+                    "geometry":{"center":[115.75,39.45],"radius_km":25},
+                    "alt_min_m":0,"alt_max_m":2000}]
+            }
+        }"#;
+        let input = parse(s);
+        let out = solve(&input, &SolveParams::default(), 0).unwrap();
+        assert_eq!(out.vehicles[0].status, "planned");
+        let d = out.vehicles[0].distance_m;
+        assert!(d > 160_000.0, "NoFly 应绕行，距离 {}", d);
     }
 
     #[test]

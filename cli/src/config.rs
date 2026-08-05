@@ -272,6 +272,14 @@ pub enum ZoneType {
     Obstacle,
 }
 
+impl Zone {
+    /// 是否代价场硬墙（Phase 4 M2）：NoFly/Obstacle 全高度水平禁入；
+    /// Restricted 为高度层禁入（区间外可穿越），不画墙。
+    pub fn is_wall(&self) -> bool {
+        matches!(self.zone_type, ZoneType::NoFly | ZoneType::Obstacle)
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields, tag = "shape", content = "geometry", rename_all = "snake_case")]
 pub enum ZoneShape {
@@ -745,6 +753,24 @@ fn point_in_polygon(p: &Geo, vertices: &[[f64; 2]]) -> bool {
     inside
 }
 
+/// 点是否在 Zone 内且高度落入禁入区间 [alt_min, alt_max]（Phase 4 M2 高度层）。
+/// - MSL：alt_m 直接比较区间；
+/// - AGL：地面高度 ground_m 提供时换算 MSL（alt_min+ground .. alt_max+ground）；
+///   ground 未知 → 保守视为在区间内（净空不确定，安全优先）。
+pub(crate) fn zone_contains_at(z: &Zone, p: &Geo, alt_m: f64, ground_m: Option<f64>) -> bool {
+    if !zone_contains(z, p) {
+        return false;
+    }
+    let (lo, hi) = match z.height_semantics {
+        HeightSemantics::Msl => (z.alt_min_m, z.alt_max_m),
+        HeightSemantics::Agl => match ground_m {
+            Some(g) => (z.alt_min_m + g, z.alt_max_m + g),
+            None => return true,
+        },
+    };
+    alt_m >= lo && alt_m <= hi
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -887,6 +913,50 @@ mod tests {
             Err(AppError::InputInvalid(InputInvalidReason::VehicleParamsInconsistent)) => {}
             other => panic!("expected A6 reject, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn zone_contains_at_msl_band() {
+        let z = Zone {
+            id: "z1".into(),
+            zone_type: ZoneType::Restricted,
+            shape: ZoneShape::Circle {
+                center: [115.0, 39.0],
+                radius_km: 10.0,
+            },
+            alt_min_m: 0.0,
+            alt_max_m: 2000.0,
+            height_semantics: HeightSemantics::Msl,
+        };
+        let p = Geo::new(115.0, 39.0).unwrap();
+        assert!(zone_contains_at(&z, &p, 500.0, None));
+        assert!(zone_contains_at(&z, &p, 2000.0, None));
+        assert!(!zone_contains_at(&z, &p, 3000.0, None));
+        // 水平外 → false 不论高度
+        let q = Geo::new(116.5, 39.0).unwrap();
+        assert!(!zone_contains_at(&z, &q, 500.0, None));
+    }
+
+    #[test]
+    fn zone_contains_at_agl_conversion() {
+        let z = Zone {
+            id: "z2".into(),
+            zone_type: ZoneType::Restricted,
+            shape: ZoneShape::Circle {
+                center: [115.0, 39.0],
+                radius_km: 10.0,
+            },
+            alt_min_m: 0.0,
+            alt_max_m: 100.0,
+            height_semantics: HeightSemantics::Agl,
+        };
+        let p = Geo::new(115.0, 39.0).unwrap();
+        // 地面 500m：区间换算 [500, 600]
+        assert!(zone_contains_at(&z, &p, 550.0, Some(500.0)));
+        assert!(!zone_contains_at(&z, &p, 700.0, Some(500.0)));
+        assert!(!zone_contains_at(&z, &p, 400.0, Some(500.0)));
+        // ground 未知 → 保守在区间内
+        assert!(zone_contains_at(&z, &p, 9000.0, None));
     }
 
     #[test]

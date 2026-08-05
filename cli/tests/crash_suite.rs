@@ -439,6 +439,7 @@ fn smooth_extreme_geometry_no_panic() {
     let ctx = VerifyContext {
         terrain: None,
         nofly: None,
+        zones: None,
     };
     let _ = verify_path(&p, None, &opts, &ctx, None);
 }
@@ -449,6 +450,7 @@ fn smooth_chain_degenerate_no_panic() {
     let ctx = VerifyContext {
         terrain: None,
         nofly: None,
+        zones: None,
     };
     // 空链 + 空路径
     let p = Path::new(vec![]);
