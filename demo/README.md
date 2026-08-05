@@ -21,20 +21,27 @@ demo/
         └── components/     # Scene3D / ControlPanel / 雷达球 / 禁飞区棱柱 / 路径线
 ```
 
-## 启动（需 Rust + pnpm）
+## 启动
+
+### Windows 一键启动（推荐）
+
+项目根目录双击 **`start_demo.bat`**（或命令行 `start_demo.bat`）：
+
+- 自动检查/构建 CLI 与 demo-server（产物已存在则跳过）
+- 启动后端 :3001 与前端 :5173，并自动打开浏览器 http://localhost:5173
+- 参数 `start_demo.bat rebuild` 强制重新构建两个二进制
+- 停止：关闭 `arp-demo-server` / `arp-demo-web` 两个窗口，或 `taskkill /IM demo-server.exe /F`
+
+### 手动分步（任意平台）
 
 ```bash
-# 方式一：一键（构建 CLI + server，启动 :3001 与 :5173）
-bash demo/start.sh
-
-# 方式二：手动
 cargo build --release -p aircraft-router-planner-cli
 cargo build --release -p demo-server
 cargo run --release -p demo-server &        # :3001
-cd demo/web && pnpm install && pnpm dev     # :5173
+cd demo/web && npm install && npm run dev   # :5173
 ```
 
-浏览器打开 http://localhost:5173 。
+Linux/macOS 可用 `bash demo/start.sh` 一键（脚本按 Git Bash/pnpm 编写）。
 
 ## 功能
 
