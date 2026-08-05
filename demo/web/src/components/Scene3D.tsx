@@ -1,7 +1,6 @@
-import { useCallback, useMemo } from 'react';
-import { Canvas, useThree } from '@react-three/fiber';
+import { useCallback, useMemo, useRef } from 'react';
+import { Canvas } from '@react-three/fiber';
 import { OrbitControls, Grid } from '@react-three/drei';
-import * as THREE from 'three';
 import type { ThreeEvent } from '@react-three/fiber';
 import type { Waypoint, GeoRef, VehicleInput, Radar, Zone, VehicleOutput, Vec2, TerrainInfo } from '../types';
 import { geoToLocal, geoPointToLocal, localToGeo } from '../types';
@@ -60,22 +59,29 @@ function GroundClickPlane({
   onClick: (wp: Waypoint) => void;
   geoRef: GeoRef;
 }) {
-  const { camera, pointer, raycaster } = useThree();
+  // 同位置防抖：r3f 事件重复触发/StrictMode 重绑定时，同一位置 400ms 内只生效一次
+  const last = useRef<{ x: number; y: number; t: number } | null>(null);
 
   const handleClick = useCallback(
     (e: ThreeEvent<MouseEvent>) => {
       if (!active) return;
       e.stopPropagation();
-      raycaster.setFromCamera(pointer, camera);
-      const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
-      const intersection = new THREE.Vector3();
-      raycaster.ray.intersectPlane(plane, intersection);
-      if (intersection) {
-        // Three.js [x, y, z] → 局部平面 [x, z]（东, 北）→ 经纬度
-        onClick(localToGeo([intersection.x, intersection.z, 0], geoRef));
+      // 用事件自带的 world 交点（e.point），不依赖全局 pointer state
+      const px = e.point.x;
+      const pz = e.point.z;
+      const now = Date.now();
+      if (
+        last.current &&
+        now - last.current.t < 400 &&
+        Math.abs(last.current.x - px) < 1 &&
+        Math.abs(last.current.y - pz) < 1
+      ) {
+        return;
       }
+      last.current = { x: px, y: pz, t: now };
+      onClick(localToGeo([px, pz, 0], geoRef));
     },
-    [active, onClick, geoRef, camera, pointer, raycaster],
+    [active, onClick, geoRef],
   );
 
   return (
@@ -168,10 +174,11 @@ export function Scene3D({
         near: 10,
         far: 2000000,
       }}
-      style={{ background: '#0a0a1a' }}
+      style={{ background: '#1c2942' }}
     >
-      <ambientLight intensity={0.4} />
-      <directionalLight position={[20000, 30000, 10000]} intensity={0.6} />
+      <ambientLight intensity={0.85} />
+      <hemisphereLight args={['#b8c8f0', '#4a5a78', 0.7]} />
+      <directionalLight position={[20000, 30000, 10000]} intensity={1.1} />
 
       <OrbitControls makeDefault maxPolarAngle={Math.PI / 2.1} />
 
@@ -182,10 +189,10 @@ export function Scene3D({
         position={[50000, 0, 50000]}
         cellSize={1000}
         cellThickness={0.5}
-        cellColor="#334455"
+        cellColor="#4a5a78"
         sectionSize={5000}
         sectionThickness={1}
-        sectionColor="#556677"
+        sectionColor="#6a7a98"
         fadeDistance={400000}
         infiniteGrid
       />

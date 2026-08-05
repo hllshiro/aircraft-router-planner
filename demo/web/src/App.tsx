@@ -91,6 +91,8 @@ export default function App() {
             })),
           },
         }));
+        // 起点选定后自动退出拾取模式（避免持续拾取重复触发）
+        setClickMode(null);
       } else if (clickMode === 'target') {
         setConfig((prev) => ({
           ...prev,
@@ -99,6 +101,7 @@ export default function App() {
             target: { ...prev.mission.target, lon: wp.lon, lat: wp.lat },
           },
         }));
+        setClickMode(null);
       } else if (clickMode === 'polygon' && editingZoneId) {
         // 向多边形禁飞区追加顶点
         setConfig((prev) => {

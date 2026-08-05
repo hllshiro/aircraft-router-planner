@@ -26,7 +26,7 @@ export async function fetchTerrain(
   return data as TerrainInfo;
 }
 
-/** 场景包围盒：start/target 范围 + 15% 扩展（用于地形采样） */
+/** 场景包围盒：start/target 中心，跨度至少覆盖初始相机视野（~130km），避免地形网格只覆盖路径附近 */
 export function sceneBounds(
   config: InputConfig,
 ): [number, number, number, number] {
@@ -35,12 +35,15 @@ export function sceneBounds(
   const maxLon = Math.max(start.lon, target.lon);
   const minLat = Math.min(start.lat, target.lat);
   const maxLat = Math.max(start.lat, target.lat);
-  const dLon = Math.max(maxLon - minLon, 0.05);
-  const dLat = Math.max(maxLat - minLat, 0.05);
+  // 最小跨度：1.6° 经度（≈ 北纬40° 136km）× 1.4° 纬度（≈ 155km），中心 ±60% 覆盖
+  const spanLon = Math.max(maxLon - minLon, 1.6);
+  const spanLat = Math.max(maxLat - minLat, 1.4);
+  const cLon = (minLon + maxLon) / 2;
+  const cLat = (minLat + maxLat) / 2;
   return [
-    minLon - dLon * 0.15,
-    minLat - dLat * 0.15,
-    maxLon + dLon * 0.15,
-    maxLat + dLat * 0.15,
+    cLon - spanLon * 0.6,
+    cLat - spanLat * 0.6,
+    cLon + spanLon * 0.6,
+    cLat + spanLat * 0.6,
   ];
 }

@@ -84,7 +84,7 @@ export function TerrainMesh({ data, geoRef }: TerrainMeshProps) {
         vertexColors
         side={THREE.DoubleSide}
         transparent
-        opacity={0.92}
+        opacity={0.9}
       />
     </mesh>
   );
