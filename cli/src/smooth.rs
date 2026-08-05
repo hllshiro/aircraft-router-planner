@@ -496,7 +496,7 @@ pub struct VerifyContext<'a> {
     /// Phase 4 M2 高度层：完整 Zone 语义（水平 + [alt_min, alt_max] + AGL 换算）。
     /// 提供时优先于 nofly（nofly 仅水平圆快查）；None 时回退 nofly。
     pub zones: Option<&'a [crate::config::Zone]>,
-    /// Phase 4 M3 雷达威胁模型：累计探测概率超 P_cross → 复验不通过。
+    /// Phase 4 M3 雷达威胁模型：累计探测概率超 P_cross → 软性告警（degradation，不阻断平滑）。
     pub threat: Option<&'a dyn crate::threat::ThreatModel>,
 }
 
@@ -687,11 +687,13 @@ pub fn verify_path(
         ));
     }
 
-    // 5) 雷达威胁（Phase 4 M3）：累计探测概率超 P_cross → 不通过
+    // 5) 雷达威胁（Phase 4 M3）：累计探测概率超 P_cross → 软性告警（不阻断平滑）。
+    //    雷达是软约束：穿雷达区（避不开）时路径仍应平滑交付，概率超标由
+    //    stats.degradations 记录；硬失败会迫使整条平滑链回退 → 网格锯齿暴露。
     if let Some(thr) = ctx.threat {
         let tr = thr.evaluate(path, ctx.terrain);
         if tr.over_threshold {
-            rep.issues.push(format!(
+            rep.warnings.push(format!(
                 "radar: cumulative detection p {:.4} > threshold {:.4}",
                 tr.cumulative_p, thr.p_cross()
             ));

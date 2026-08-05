@@ -62,7 +62,13 @@ pub struct ThreatReport {
 pub trait ThreatModel {
     /// 评估整条路径的探测概率（段内等距采样）。
     fn evaluate(&self, path: &Path, terrain: Option<&dyn TerrainSource>) -> ThreatReport;
-    /// 穿越阈值 P_cross（复验硬拦线）。
+    /// 静态几何探测（无 LOS）：点是否落在任一威胁有效半径内。
+    /// Theta* 去锯齿段检查用：直连穿威胁区则拒绝拉直（保住绕行路径）。
+    fn static_detected(&self, lon: f64, lat: f64, alt_m: f64) -> bool {
+        let _ = (lon, lat, alt_m);
+        false
+    }
+    /// 穿越阈值 P_cross（复验软告警线）。
     fn p_cross(&self) -> f64 {
         0.1
     }
@@ -131,6 +137,10 @@ impl<'a> SphericalRadarThreat<'a> {
 impl ThreatModel for SphericalRadarThreat<'_> {
     fn p_cross(&self) -> f64 {
         self.params.p_cross
+    }
+
+    fn static_detected(&self, lon: f64, lat: f64, alt_m: f64) -> bool {
+        self.point_probability(lon, lat, alt_m, None) > 0.0
     }
 
     fn evaluate(&self, path: &Path, terrain: Option<&dyn TerrainSource>) -> ThreatReport {
