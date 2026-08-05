@@ -39,6 +39,48 @@ const SEMANTICS_EQUIANGULAR: u8 = 0;
 const COMPRESSION_RAW: u8 = 0;
 const COMPRESSION_ZSTD: u8 = 1;
 
+/// 已解压块缓存上限（FIFO 淘汰）。
+/// 256² 块 ≈ 131KB → 2048 块 ≈ 256MB，防止无界缓存在大文件随机访问时膨胀内存
+/// （GMTED2010 全球 17.8 万块，随机采样曾缓存全部 → 13GB+，实测发现）。
+const CACHE_MAX_BLOCKS: usize = 2048;
+
+/// 有界解压缓存（FIFO 淘汰，锁内仅做查表/淘汰，解压在锁外进行）。
+#[derive(Debug)]
+struct BlockCache {
+    map: HashMap<usize, Vec<i16>>,
+    order: std::collections::VecDeque<usize>,
+    max_blocks: usize,
+}
+
+impl Default for BlockCache {
+    fn default() -> Self {
+        Self::with_max(CACHE_MAX_BLOCKS)
+    }
+}
+
+impl BlockCache {
+    fn with_max(max_blocks: usize) -> Self {
+        Self {
+            map: HashMap::new(),
+            order: std::collections::VecDeque::new(),
+            max_blocks: max_blocks.max(1),
+        }
+    }
+
+    fn insert(&mut self, bidx: usize, block: Vec<i16>) {
+        if self.map.contains_key(&bidx) {
+            return;
+        }
+        if self.map.len() >= self.max_blocks {
+            if let Some(old) = self.order.pop_front() {
+                self.map.remove(&old);
+            }
+        }
+        self.map.insert(bidx, block);
+        self.order.push_back(bidx);
+    }
+}
+
 /// 内置格式源。
 #[derive(Debug)]
 pub struct BuiltinSource {
@@ -61,8 +103,8 @@ pub struct BuiltinSource {
     index: Vec<(u64, u32)>,
     /// 文件字节（块数据流；解压缓存按块索引）
     data: Vec<u8>,
-    /// 已解压块缓存（block_idx → i16 展平）；Mutex 满足 TerrainSource: Send+Sync
-    cache: Mutex<HashMap<usize, Vec<i16>>>,
+    /// 已解压块缓存（block_idx → i16 展平，FIFO 有界）；Mutex 满足 TerrainSource: Send+Sync
+    cache: Mutex<BlockCache>,
 }
 
 impl BuiltinSource {
@@ -186,7 +228,7 @@ impl BuiltinSource {
             source,
             index,
             data,
-            cache: Mutex::new(HashMap::new()),
+            cache: Mutex::new(BlockCache::default()),
         })
     }
 
@@ -203,7 +245,7 @@ impl BuiltinSource {
         &self.source
     }
 
-    /// 取原始格值（空洞 → None）。跨块自动加载/缓存。
+    /// 取原始格值（空洞 → None）。跨块自动加载/缓存（FIFO 有界，解压锁外进行）。
     fn cell(&self, r: usize, c: usize) -> Option<i16> {
         if r >= self.rows || c >= self.cols {
             return None;
@@ -213,13 +255,24 @@ impl BuiltinSource {
         let lr = r % BLOCK_SIZE as usize;
         let lc = c % BLOCK_SIZE as usize;
         let bidx = bx * self.blocks_y + by;
-        let mut cache = lock_cache(&self.cache);
-        if !cache.contains_key(&bidx) {
-            let b = self.load_block(bidx)?;
-            cache.insert(bidx, b);
+
+        // 快速路径：缓存命中（锁内仅查表，不解压）
+        let v = {
+            let cache = lock_cache(&self.cache);
+            cache.map.get(&bidx).map(|b| b[lr * BLOCK_SIZE as usize + lc])
+        };
+        if let Some(v) = v {
+            return if v == self.no_data { None } else { Some(v) };
         }
-        let block = cache.get(&bidx).unwrap();
+
+        // 未命中：锁外解压（多线程不互相阻塞）
+        let block = self.load_block(bidx)?;
         let v = block[lr * BLOCK_SIZE as usize + lc];
+        // 双检锁插入（并发下重复解压可接受，但避免重复驻留）
+        let mut cache = lock_cache(&self.cache);
+        if !cache.map.contains_key(&bidx) {
+            cache.insert(bidx, block);
+        }
         if v == self.no_data {
             None
         } else {
@@ -291,7 +344,7 @@ impl BuiltinSource {
 }
 
 /// Mutex 锁（防 poison panic：崩溃套件不允许任何 panic）。
-fn lock_cache(m: &Mutex<HashMap<usize, Vec<i16>>>) -> std::sync::MutexGuard<'_, HashMap<usize, Vec<i16>>> {
+fn lock_cache(m: &Mutex<BlockCache>) -> std::sync::MutexGuard<'_, BlockCache> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
@@ -435,6 +488,31 @@ fn put_f64(b: &mut Vec<u8>, i: usize, v: f64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 缓存 FIFO 淘汰：容量 2，插入 3 块 → 最旧被淘汰。
+    #[test]
+    fn cache_fifo_eviction() {
+        let mut c = BlockCache::with_max(2);
+        c.insert(1, vec![10]);
+        c.insert(2, vec![20]);
+        assert!(c.map.contains_key(&1) && c.map.contains_key(&2));
+        c.insert(3, vec![30]);
+        assert!(!c.map.contains_key(&1), "最旧块 1 应被淘汰");
+        assert!(c.map.contains_key(&2) && c.map.contains_key(&3));
+        assert_eq!(c.map.len(), 2, "缓存容量不得超限");
+        // 重复插入不扩容
+        c.insert(3, vec![99]);
+        assert_eq!(c.map.len(), 2);
+    }
+
+    /// 缓存命中后值保持正确（不因淘汰/重复插入改变）。
+    #[test]
+    fn cache_reinsert_keeps_value() {
+        let mut c = BlockCache::with_max(2);
+        c.insert(1, vec![10]);
+        c.insert(1, vec![11]); // 已存在 → 忽略
+        assert_eq!(c.map[&1], vec![10]);
+    }
 
     /// 构造 300×200 网格（block 覆盖 2x1 块），全 500m，右下角空洞。
     fn pack_fixture() -> (Vec<u8>, Vec<i16>) {
