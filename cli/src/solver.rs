@@ -23,7 +23,7 @@ use crate::smooth::{default_chain, smooth_path_chain, VerifyContext};
 use crate::spatial::{CircleEntry, CircleIndex};
 use crate::terrain::builtin::BuiltinSource;
 use crate::terrain::{Sample, TerrainSource};
-use crate::threat::{SphericalRadarThreat, ThreatParams};
+use crate::threat::{SphericalRadarThreat, ThreatModel, ThreatParams};
 
 /// 解算参数（M1：地形路径 CLI/输入指定；grid 粗网格分辨率）。
 #[derive(Debug, Clone)]
@@ -252,7 +252,12 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
         let mut pts = raw_joined.points.clone();
         if pts.len() >= 2 {
             let (opts, phys_min_radius_m) = crate::smooth::smooth_options_for(&v.profile, &params_merged);
-            let check = make_segment_check(&all_zones, Some(&threat as &dyn crate::threat::ThreatModel));
+            let check = make_segment_check(
+                &all_zones,
+                Some(&threat as &dyn crate::threat::ThreatModel),
+                params_merged.p_cross,
+                threat_params.base_p,
+            );
             let chain = default_chain(&opts, &check);
             let ctx = VerifyContext {
                 terrain: terrain.as_deref(),
@@ -308,17 +313,18 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
             // → 用分段直线直穿（必经点保留，最短暴露时长）。直线需过几何复验（防穿山/超机动）。
             if let Some(tm) = ctx.threat {
                 let rep_now = tm.evaluate(&Path::new(pts.clone()), ctx.terrain);
-                // 直穿判定：路径某点深入任一雷达有效半径 70% 以内（与 Theta* 深探测
-                // DEEP_RATIO 一致）才视为"避不开的直穿"；完全绕出（最近点 ≥ 0.7×半径）
-                // 保持绕行，不替代。放宽自 0.5（k=50 后 FMM 贴边不穿中心 → 原 0.5 漏判）。
+                // 直穿判定：路径某点"深穿（<0.7×半径）"且（默认 p_cross ≤ base_p 时只看
+                // 几何深穿；p_cross > base_p 时概率 ≥ p_cross）才视为"避不开的直穿"
+                // （需直线替代兜底）；概率在主管容忍内（< p_cross）保持 Theta* 概率感知
+                // 拉直（多雷达通道可平滑直穿），不替代。
                 let mut penetrates = false;
                 for p in &pts {
-                    for r in &input.mission.red_forces.radars {
-                        let eff = r.radius_km * 1000.0 * params_merged.radar_inflation;
-                        let d = crate::path::haversine_m(r.lon, r.lat, p.lon, p.lat);
-                        if d < eff * 0.7 {
-                            penetrates = true;
-                        }
+                    if threat.static_penetration(p.lon, p.lat, p.alt_m) < 0.7
+                        && (threat.static_union_probability(p.lon, p.lat) >= params_merged.p_cross
+                            || params_merged.p_cross <= threat_params.base_p)
+                    {
+                        penetrates = true;
+                        break;
                     }
                 }
                 if rep_now.over_threshold && penetrates {
@@ -454,15 +460,16 @@ fn circle_index(zones: &[&Zone]) -> CircleIndex {
 }
 
 /// 雷达威胁参数（默认参数表落默认值；输入覆盖合并）。
-/// base_p 与 p_cross 联动（外部可经 parameters.p_cross 同时调阈值与探测概率基准；
-/// 真实雷达参数标定前两者均为占位，见 threat.rs 文档）。
+/// base_p（中心探测概率）固定 0.1 占位，**与 p_cross 解耦**（主管 2026-08-05 反馈：
+/// P_cross 是验收阈值——调高只放宽"容忍探测"的评估/拉直判定，不应把物理探测概率
+/// 一起抬高导致代价爆炸 + 强绕行 + 锯齿；真实雷达参数标定（A2）后接入独立 base_p）。
 fn radar_threat_params(d: &crate::config::DefaultParams) -> ThreatParams {
     ThreatParams {
         radar_inflation: d.radar_inflation,
         detection_curve: d.detection_curve,
         p_cross: d.p_cross,
         suppression_delta: d.suppression_delta,
-        base_p: d.p_cross,
+        base_p: 0.1, // 解耦：固定占位（A2 标定后接入独立 base_p）
     }
 }
 
@@ -521,11 +528,17 @@ fn join_paths(segs: &[Path]) -> Path {
 
 /// Theta* 去锯齿段检查：直连 (a)→(b) 不穿任何 Zone（等距 16 点采样；
 /// 水平 + 高度区间，高度沿线段线性插值——M2 高度层）。
-/// 雷达威胁：直连"深穿"任一雷达（归一化深度 < 0.7，即深入有效半径 70% 以内）
-/// → 拒绝拉直（保住 FMM 绕行决策）；低概率边缘（≥0.7）允许拉直 → 绕行路径可平滑。
+/// 雷达威胁（拒绝拉直）：
+/// - p_cross ≤ base_p（默认/未调高验收阈值）：保持纯几何深穿判定
+///   （归一化深度 < 0.7 即拒绝）——探测概率高则明确绕行（3b25894 语义），
+///   边缘深穿（概率低但几何深入）也拒绝拉直，绕行弧不会被拉直成近似直线。
+/// - p_cross > base_p（主管调高容忍阈值）：拒绝 = 深穿 **且** 单点概率 ≥ p_cross；
+///   深穿但概率在容忍内（< p_cross）→ 允许拉直 → 多雷达通道/S 形绕行可平滑直穿。
 fn make_segment_check<'a>(
     zones: &'a [Zone],
     threat: Option<&'a dyn crate::threat::ThreatModel>,
+    p_cross: f64,
+    base_p: f64,
 ) -> impl Fn(f64, f64, f64, f64, f64, f64) -> bool + 'a {
     move |lon1, lat1, alt1, lon2, lat2, alt2| {
         const N: usize = 16;
@@ -542,6 +555,7 @@ fn make_segment_check<'a>(
             }
             if let Some(tm) = threat
                 && tm.static_penetration(lon, lat, alt) < DEEP_RATIO
+                && (tm.static_union_probability(lon, lat) >= p_cross || p_cross <= base_p)
             {
                 return false;
             }

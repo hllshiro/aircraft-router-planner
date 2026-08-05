@@ -68,6 +68,13 @@ pub trait ThreatModel {
         let _ = (lon, lat, alt_m);
         false
     }
+    /// 静态几何并集探测概率（无 LOS）：点处 `1−∏(1−pᵢ)`。
+    /// Theta* 去锯齿段检查用：直连概率 > P_cross（验收阈值）则拒绝拉直；
+    /// ≤ P_cross（容忍范围内）允许拉直 → 多雷达通道/S 形绕行可平滑直穿。
+    fn static_union_probability(&self, lon: f64, lat: f64) -> f64 {
+        let _ = (lon, lat);
+        0.0
+    }
     /// 静态几何穿透深度（无 LOS）：到最近威胁中心的归一化距离 d/R_eff ∈ [0,1]；
     /// 0 = 中心，1 = 有效半径边缘，>1 = 有效半径外（无探测）。
     /// Theta* 去锯齿用：仅"深穿"（< deep_ratio，默认 0.7）拒绝拉直；
@@ -149,6 +156,10 @@ impl ThreatModel for SphericalRadarThreat<'_> {
 
     fn static_detected(&self, lon: f64, lat: f64, alt_m: f64) -> bool {
         self.point_probability(lon, lat, alt_m, None) > 0.0
+    }
+
+    fn static_union_probability(&self, lon: f64, lat: f64) -> f64 {
+        self.point_probability(lon, lat, 0.0, None)
     }
 
     fn static_penetration(&self, lon: f64, lat: f64, _alt_m: f64) -> f64 {
