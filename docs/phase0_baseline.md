@@ -64,6 +64,16 @@
 - **掩膜分辨率定案：10 弧秒**（2026-08-04 主管拍板；`phase0/data/mask_10as.mask` V2 3 态：0 海洋/1 陆地/2 内陆湖，含南极内陆补全；掩膜暂不入 git，开发完成后决定）
 - **NODATA 高代价倍数初值：5x**（2026-08-04 主管拍板；正式数据到位后按待数据 10 项标定复核）
 
+## 主管决策 2026-08-05（六项，commit 39c59c4）
+
+1. **默认低精度地形 = 量化中国数据（china_dem_l12.arpack）**：terrain source=path/builtin 且未给路径时，solver 依次尝试 exe 同目录 / exe 上溯 workspace 根 / 工作目录相对路径下的 `china_dem_l12.arpack`；全找不到 → input_invalid（data_error）。发布版 = 单二进制 + 同目录 `china_dem_l12.arpack`。北京场景无 --terrain 默认地形回归 163.06km 与显式路径一致。
+2. **Windows MSVC 静态编译验证通过**：`.cargo/config.toml` 的 `x86_64-pc-windows-msvc` 加 `-C target-feature=+crt-static`；pefile 验证 exe 仅依赖系统 DLL（VCRUNTIME140.dll 消除，无第三方 DLL）；验证脚本 `cli/check_pe_deps.py`（`python check_pe_deps.py <exe>`）。Phase 5 交叉编译暂停。
+3. **雷达参数外部输入，无效回落默认**：`mission.parameters` 支持 radar_inflation / detection_curve / p_cross / suppression_delta / los_mask_coef 外部覆盖；合法域与旧契约一致（radar_inflation>1、p_cross/los_mask_coef∈[0,1]、suppression_delta∈[0,1)、detection_curve∈{exponential,linear} 不区分大小写）；出域/非有限/非法字符串 → 回落默认，事实记入 `stats.degradations`（"parameter X invalid -> default Y"）；validate 不再对参数域 fail-fast。
+4. **压制维持现状**：压制按雷达自身字段（suppression_post_range_km/suppression_factor）配置；独立干扰机（jammer）实体为后续需求，暂不使用（无代码改动）。
+5. **GMTED2010 后台 zstd-19 重压缩**：`phase0/scripts/recompress_arpk1.py`（读头部 blocks_x/y → 逐块解压 → zstd-19 重压 → 重写索引+SHA）验证体积是否减小；结果待回填（预计减 15–25%）。
+6. **坐标点均为经纬高定义**：输入/输出坐标点统一 WGS84 经纬度（度）+ MSL 高度（米）；输出 PathPoint 的 x=经度、y=纬度、alt_m=MSL（注释已更新）；无投影/ENU 混合语义。
+
+
 ## 崩溃测试套件（B9，CI 一票否决）
 - Phase 0：`tests/crash_suite.rs` 13 用例 + 单元 9 = **22 测试全过**；FMM 越界源/空网格、Dubins NaN/零半径/极端坐标、Terrain 出界/NaN、rstar 空树均不 panic
 - Phase 1（cli）：`cli/tests/crash_suite.rs` **20 用例**（config 畸形/非法坐标/退化、coord NaN/极端反算、terrain 垃圾字节/截断/零维度、spatial 空树+NaN 查询、costfield 退化网格/不可达回溯、输出序列化）+ 单元 **42** = **62 测试全过**
