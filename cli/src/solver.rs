@@ -156,10 +156,14 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
         .collect();
     let nofly = circle_index(&all_zones.iter().collect::<Vec<_>>());
 
-    // 4b. 参数合并 + 禁飞区膨胀距离（主管 2026-08-06：绕飞太贴边→考虑飞机机动）。
-    //     物理转弯半径 r = v²/(g·tanφ)（与 smooth_options_for 同式）；绕行弧需要 ≥r 的
-    //     转弯空间，把 NoFly/Obstacle 硬墙向外膨胀 max(0.5×r)（clamp [2km, 10km]）——
-    //     FMM 绕行自然远离边界，Dubins 转弯弧留足空间（不再因贴边急弯被物理复验拒绝）。
+    // 4b. 参数合并 + 禁飞区膨胀/转弯空间（主管 2026-08-06：绕飞太贴边→考虑飞机机动；
+    //     追加：双禁飞区并列穿窄缝出密集锯齿）。
+    //     物理转弯半径 r = v²/(g·tanφ)（与 smooth_options_for 同式）。
+    //     inflation_m = 0.5×r：绕行路径净距（verify clearance 下限，Dubins 弧可过）。
+    //     turn_m     = 2.0×r：转弯空间（5d 腐蚀用）——距墙 < 2×r_min 的栅格堵死。
+    //                 效果：并列双 zone 时"绕 A 左→绕 B 右"的 S 形过渡（转弯间距离
+    //                 ≈ 间隙 < 2R）物理不可飞 → 过渡区被堵死，FMM 被迫绕更远使两个
+    //                 转弯之间距离 ≥ 2R（Dubins S 形可解），不再回退密集锯齿。
     let params_merged = crate::config::DefaultParams::default().merge(&input.mission.parameters);
     let mut degradations = Vec::new();
     radar_param_degradations(input, &mut degradations);
@@ -168,6 +172,13 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
         .map(|v| {
             let (_opts, phys) = crate::smooth::smooth_options_for(&v.profile, &params_merged);
             (phys * 0.5).clamp(2_000.0, 10_000.0)
+        })
+        .fold(0.0f64, f64::max);
+    let turn_m = specs
+        .iter()
+        .map(|v| {
+            let (_opts, phys) = crate::smooth::smooth_options_for(&v.profile, &params_merged);
+            (phys * 1.0).clamp(2_000.0, 20_000.0)
         })
         .fold(0.0f64, f64::max);
 
@@ -234,6 +245,47 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
         }
         for i in 0..grid * grid {
             if expanded[i] {
+                field.cost[i] = f32::INFINITY;
+            }
+        }
+    }
+
+    // 5d. 转弯空间腐蚀（主管 2026-08-06：双禁飞区并列穿窄缝出密集锯齿）。
+    //     多源 BFS 求每个非墙栅格到最近墙的距离（cell 数），距墙 ≤ turn_cells 全部
+    //     堵死 → FMM 只能走距墙 > r_min 的栅格。效果：
+    //       · 缝宽 < 2×r_min 的窄通道物理不可飞 → 被直接堵死，FMM 绕外侧走平滑大弯
+    //         （转弯半径 ≥ r_min，平滑链不会因贴边/急弯被 verify 拒绝而回退锯齿）；
+    //       · 缝宽 ≥ 2×r_min → 缝中心距墙 > r_min，仍可通行，且穿缝转弯半径够。
+    let cell_m = region.span_deg * 111_320.0 / grid as f64;
+    let turn_cells = (turn_m / cell_m.max(1.0)).ceil() as usize;
+    if turn_cells > 0 {
+        use std::collections::VecDeque;
+        let mut dist = vec![i32::MAX; grid * grid];
+        let mut q = VecDeque::new();
+        for i in 0..grid * grid {
+            if !field.cost[i].is_finite() {
+                dist[i] = 0;
+                q.push_back(i);
+            }
+        }
+        while let Some(idx) = q.pop_front() {
+            let r = idx / grid;
+            let c = idx % grid;
+            let nd = dist[idx] + 1;
+            for (dr, dc) in [(0i32, 1i32), (0, -1), (1, 0), (-1, 0)] {
+                let nr = r as i32 + dr;
+                let nc = c as i32 + dc;
+                if nr >= 0 && nr < grid as i32 && nc >= 0 && nc < grid as i32 {
+                    let ni = nr as usize * grid + nc as usize;
+                    if dist[ni] > nd {
+                        dist[ni] = nd;
+                        q.push_back(ni);
+                    }
+                }
+            }
+        }
+        for i in 0..grid * grid {
+            if dist[i] <= turn_cells as i32 {
                 field.cost[i] = f32::INFINITY;
             }
         }
