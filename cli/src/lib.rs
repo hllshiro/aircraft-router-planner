@@ -11,5 +11,6 @@ pub mod dubins;
 pub mod error;
 pub mod path;
 pub mod smooth;
+pub mod solver;
 pub mod spatial;
 pub mod terrain;

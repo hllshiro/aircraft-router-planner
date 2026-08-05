@@ -711,8 +711,8 @@ fn validate_vehicle(v: &VehicleInput) -> Result<(), AppError> {
     Ok(())
 }
 
-/// 点是否在禁飞/限飞区内部（圆 / 多边形）。
-fn zone_contains(z: &Zone, p: &Geo) -> bool {
+/// 点是否在禁飞/限飞区内部（圆 / 多边形；水平几何，高度层判定 Phase 4 M2）。
+pub(crate) fn zone_contains(z: &Zone, p: &Geo) -> bool {
     match &z.shape {
         ZoneShape::Circle { center, radius_km } => {
             let c = Geo::new(center[0], center[1]).ok();

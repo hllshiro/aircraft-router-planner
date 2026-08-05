@@ -10,6 +10,7 @@ use std::path::PathBuf;
 
 use aircraft_router_planner_cli::config::{self, Input, Output};
 use aircraft_router_planner_cli::error::{AppError, ErrorBody, InputInvalidReason};
+use aircraft_router_planner_cli::solver::{self, SolveParams};
 use clap::Parser;
 
 #[derive(Parser, Debug)]
@@ -33,6 +34,12 @@ struct Args {
     /// 默认参数表覆盖文件（JSON）
     #[arg(short, long)]
     config: Option<PathBuf>,
+    /// 地形文件（ARPK1；缺省用输入 terrain.path；none 源不加载）
+    #[arg(long)]
+    terrain: Option<PathBuf>,
+    /// 粗网格分辨率（缺省 256；任务区域自适应）
+    #[arg(long, default_value_t = 256)]
+    grid: usize,
 }
 
 fn main() {
@@ -75,10 +82,19 @@ fn run(args: &Args) -> Result<(), AppError> {
         return Ok(());
     }
 
-    // 4. 解算（Phase 2 接入；Phase 1 输出 success 占位）
-    let _ = args.seed;
-    let _ = args.config;
-    let out = Output::success(started.elapsed().as_millis() as u64);
+    // 4. 解算（Phase 4 M1 接入：代价场 → FMM → 回溯 → 平滑链 → 输出契约）
+    let params = SolveParams {
+        terrain_path: args.terrain.clone(),
+        grid: args.grid,
+    };
+    let out = match solver::solve(&input, &params, started.elapsed().as_millis() as u64) {
+        Ok(out) => out,
+        // 解算层错误（如地形文件缺失）→ input_invalid（可预期输入问题，不 exit 2）
+        Err(e) => {
+            let body: ErrorBody = (&e).into();
+            Output::failure("input_invalid", body, started.elapsed().as_millis() as u64)
+        }
+    };
     write_output(args, &out)?;
     Ok(())
 }
