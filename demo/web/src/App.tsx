@@ -1,7 +1,15 @@
 import { useState, useCallback, useEffect } from 'react';
 import { Scene3D } from './components/Scene3D';
 import { ControlPanel } from './components/ControlPanel';
-import type { InputConfig, PlanResult, TerrainInfo, Waypoint } from './types';
+import type {
+  InputConfig,
+  PlanResult,
+  TerrainInfo,
+  Waypoint,
+  Zone,
+  CircleGeometry,
+  PolygonGeometry,
+} from './types';
 import { defaultInputConfig } from './types';
 import { planRoute, sceneBounds, fetchTerrain } from './api';
 
@@ -86,6 +94,43 @@ export default function App() {
         },
       },
     }));
+  }, []);
+
+  const handleZoneMove = useCallback((id: string, dLon: number, dLat: number) => {
+    setConfig((prev) => {
+      const shift = (z: Zone): Zone => {
+        if (z.id !== id) return z;
+        if (z.shape === 'circle') {
+          const g = z.geometry as CircleGeometry;
+          return {
+            ...z,
+            geometry: {
+              ...g,
+              center: [g.center[0] + dLon, g.center[1] + dLat],
+            },
+          };
+        }
+        const g = z.geometry as PolygonGeometry;
+        return {
+          ...z,
+          geometry: {
+            vertices: g.vertices.map(
+              ([lon, lat]) => [lon + dLon, lat + dLat] as [number, number],
+            ),
+          },
+        };
+      };
+      const m = prev.mission;
+      return {
+        ...prev,
+        mission: {
+          ...m,
+          no_fly_zones: m.no_fly_zones.map(shift),
+          restricted_zones: m.restricted_zones.map(shift),
+          obstacles: m.obstacles.map(shift),
+        },
+      };
+    });
   }, []);
 
   const handleGroundClick = useCallback(
@@ -173,6 +218,7 @@ export default function App() {
           terrainData={terrainData}
           onGroundClick={handleGroundClick}
           onRadarMove={handleRadarMove}
+          onZoneMove={handleZoneMove}
           activeClickMode={clickMode}
         />
         {terrainError && (

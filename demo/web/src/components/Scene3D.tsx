@@ -22,6 +22,7 @@ interface Scene3DProps {
   terrainData: TerrainInfo | null;
   onGroundClick: (wp: Waypoint) => void;
   onRadarMove: (id: string, lon: number, lat: number) => void;
+  onZoneMove: (id: string, dLon: number, dLat: number) => void;
   activeClickMode: 'start' | 'target' | 'polygon' | null;
 }
 
@@ -114,16 +115,17 @@ export function Scene3D({
   terrainData,
   onGroundClick,
   onRadarMove,
+  onZoneMove,
   activeClickMode,
 }: Scene3DProps) {
   const startPos = useMemo(() => geoToLocal(start, geoRef), [start, geoRef]);
   const targetPos = useMemo(() => geoToLocal(target, geoRef), [target, geoRef]);
 
-  // 雷达拖动状态：拖动期间禁用 OrbitControls，结束 400ms 内抑制地面点击
-  const [radarDragging, setRadarDragging] = useState(false);
+  // 拖动物体（雷达/zone）状态：拖动期间禁用 OrbitControls，结束 400ms 内抑制地面点击
+  const [dragActive, setDragActive] = useState(false);
   const [dragSuppressUntil, setDragSuppressUntil] = useState(0);
-  const handleRadarDragState = useCallback((dragging: boolean) => {
-    setRadarDragging(dragging);
+  const handleDragState = useCallback((dragging: boolean) => {
+    setDragActive(dragging);
     if (!dragging) setDragSuppressUntil(Date.now() + 400);
   }, []);
 
@@ -197,7 +199,7 @@ export function Scene3D({
       <OrbitControls
         makeDefault
         maxPolarAngle={Math.PI / 2.1}
-        enabled={!radarDragging}
+        enabled={!dragActive}
       />
 
       {terrainData && <TerrainMesh data={terrainData} geoRef={geoRef} />}
@@ -226,16 +228,20 @@ export function Scene3D({
           radiusM={r.radiusM}
           geoRef={geoRef}
           onRadarMove={onRadarMove}
-          onDragStateChange={handleRadarDragState}
+          onDragStateChange={handleDragState}
         />
       ))}
       {zoneMeshes.map((z) => (
         <NFZPrism
           key={z.id}
+          id={z.id}
           boundaryPoints={z.boundary}
           altMin={z.altMin}
           altMax={z.altMax}
           color={z.color}
+          geoRef={geoRef}
+          onZoneMove={onZoneMove}
+          onDragStateChange={handleDragState}
         />
       ))}
 
