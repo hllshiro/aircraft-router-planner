@@ -170,6 +170,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
             (phys * 0.5).clamp(2_000.0, 10_000.0)
         })
         .fold(0.0f64, f64::max);
+    let inflation_km = inflation_m / 1000.0;
 
     // 5. 语义代价场（Land=1 / Water=1 / Lake=1 / NoData=5 / OOB=INF；NoFly/Obstacle 墙）
     let grid = params.grid.max(8);
@@ -234,8 +235,10 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
         // 则不画墙，FMM 直穿后由 build_restricted_profiles 生成对应剖面；两者都不可行
         // （地形过高且超升限 / 太贴边 / 多边形）→ 画墙水平绕行（fallback 保底）；
         // 高度在区间外（如低于 alt_min_m 的"底部通道"）→ 不画墙直穿（可通行）。
+        // 剖面方案前提 = start→target 直线水平路径避开全部硬墙（NoFly/Obstacle）：
+        // 直线穿硬墙（如直穿 no_fly 圆）时剖面不可用 → 同样画墙水平绕行（2026-08-06 修）。
         let veh_field: Option<crate::costfield::CostField> = if all_zones.iter().any(|z| {
-            restricted_detour_required(
+            restricted_needs_wall(
                 z,
                 v.alt_m,
                 v.profile.ceiling_m,
@@ -243,6 +246,8 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                 &v.start,
                 &target,
                 opts.max_climb_deg,
+                &all_zones,
+                inflation_km,
             )
         }) {
             let mut f = field.clone();
@@ -252,7 +257,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                     let (lon, lat) = cell_lonlat(r, c, &region, g);
                     if let Ok(gg) = Geo::new(lon, lat) {
                         if all_zones.iter().any(|z| {
-                            restricted_detour_required(
+                            restricted_needs_wall(
                                 z,
                                 v.alt_m,
                                 v.profile.ceiling_m,
@@ -260,6 +265,8 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                                 &v.start,
                                 &target,
                                 opts.max_climb_deg,
+                                &all_zones,
+                                inflation_km,
                             ) && zone_contains(z, &gg)
                         }) {
                             f.cost[r * g + c] = f32::INFINITY;
@@ -329,6 +336,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                 terrain.as_deref(),
                 &v.start,
                 &target,
+                inflation_m / 1000.0,
             );
             smooth_src.extend(sub);
             profile_mask.extend(mask);
@@ -336,7 +344,6 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
         let mut warnings = Vec::new();
         let mut pts = raw_joined.points.clone();
         if pts.len() >= 2 {
-            let inflation_km = inflation_m / 1000.0;
             let check = make_segment_check(
                 &all_zones,
                 Some(&threat as &dyn crate::threat::ThreatModel),
@@ -821,6 +828,53 @@ fn restricted_detour_required(
     restricted_pass_alt(z, alt_m, ceiling_m, terrain, start, target, max_climb_deg).is_none()
 }
 
+/// 剖面方案要求 start→target 直线水平路径完全避开硬墙（NoFly/Obstacle，全高度墙）：
+/// 直线与任一硬墙净距 < inflation（或穿入）→ 剖面直线不可用（否则平滑后 verify
+/// 以 zone wall 拒绝 → 回退 raw 非法交付）。与 verify 的墙判定口径一致
+/// （zone_segment_clearance_km ≤ 1e-9 或 < inflation_km）。
+fn line_hits_wall_km(
+    lon1: f64,
+    lat1: f64,
+    lon2: f64,
+    lat2: f64,
+    zones: &[Zone],
+    inflation_km: f64,
+) -> bool {
+    zones.iter().any(|z| {
+        if !z.is_wall() {
+            return false;
+        }
+        let clr = crate::config::zone_segment_clearance_km(lon1, lat1, lon2, lat2, z);
+        clr <= 1e-9 || clr < inflation_km
+    })
+}
+
+/// 该 restricted 是否必须画墙水平绕行（veh_field 墙判定）：
+/// 高度在区间外 → 不拦截直穿；区间内且剖面可行（底部/顶部任一可行，且
+/// start→target 直线不穿任何硬墙）→ 不画墙（FMM 直穿 + build_restricted_profiles
+/// 生成剖面）；剖面不可行（底部/顶部都被地形/升限排除，**或直线穿硬墙**）→ 画墙。
+/// 2026-08-06 修：直线穿 no_fly 圆时剖面方案前提不成立 → 画墙绕行（否则 verify
+/// 拒剖面 → 回退 raw 交付锯齿 + 3000m 直穿 restricted 的非法路径）。
+fn restricted_needs_wall(
+    z: &Zone,
+    alt_m: f64,
+    ceiling_m: Option<f64>,
+    terrain: Option<&dyn TerrainSource>,
+    start: &Geo,
+    target: &Geo,
+    max_climb_deg: f64,
+    all_zones: &[Zone],
+    inflation_km: f64,
+) -> bool {
+    if !restricted_blocks_alt(z, alt_m) {
+        return false;
+    }
+    if restricted_pass_alt(z, alt_m, ceiling_m, terrain, start, target, max_climb_deg).is_none() {
+        return true;
+    }
+    line_hits_wall_km(start.lon, start.lat, target.lon, target.lat, all_zones, inflation_km)
+}
+
 /// 单个 restricted 的剖面参数（沿直线距离 s 定义：过渡/平飞/过渡三段）。
 /// pass_alt = 穿行高度：底部 = alt_min−500m（下降穿行）/ 顶部 = alt_max+500m（爬升绕飞）。
 struct RestrictedProfile {
@@ -876,6 +930,7 @@ fn build_restricted_profiles(
     terrain: Option<&dyn TerrainSource>,
     start: &Geo,
     target: &Geo,
+    inflation_km: f64,
 ) -> (Vec<Path>, Vec<bool>) {
     let n = seg.points.len();
     if n < 2 {
@@ -890,6 +945,13 @@ fn build_restricted_profiles(
         return (vec![seg.clone()], vec![false]);
     }
     let (p0, p1) = (seg.points[0], seg.points[n - 1]);
+    // 剖面方案前提：start→target 直线水平路径避开全部硬墙（NoFly/Obstacle）。
+    // 直线穿硬墙（如直穿 no_fly 圆）时剖面直线不可用 → 放弃剖面，整段走平滑链
+    // （画墙绕行路径由 veh_field 保证：restricted_needs_wall 已画墙，raw 不穿
+    // restricted；此处防御性兜底，防止 FMM 直穿后生成非法剖面直线）。
+    if line_hits_wall_km(p0.lon, p0.lat, p1.lon, p1.lat, zones, inflation_km) {
+        return (vec![seg.clone()], vec![false]);
+    }
     // 平面 km 坐标系（以 p0 为原点，度制近似）
     let mlat = ((p0.lat + p1.lat) / 2.0).to_radians();
     let kx = mlat.cos() * 111.32;
@@ -1335,6 +1397,7 @@ mod tests {
             Some(&terr),
             &start_geo,
             &target_geo,
+            0.0, // 无硬墙（仅 restricted）→ 直线穿墙检查不生效
         );
         assert_eq!(segs.len(), 3, "应切 [首段, 剖面段, 尾段]");
         assert_eq!(mask, vec![false, true, false]);
