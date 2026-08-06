@@ -141,6 +141,20 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
     // 3. 任务区域（所有起点 + target 包围盒 + 缓冲）
     let target = input.mission.target.to_geo()?;
     let region = region_of(&specs, &target);
+    // 3b. 网格自适应（主管 2026-08-06 双大雷达场景）：**仅大区域**（span > 2.5°）时
+    // 固定 256 格 → 格距粗（320km/256 ≈ 1.43km）→ FMM 绕行弧锯齿曲率 < 物理转弯
+    // 半径（实测 15.5km < 15.89km）→ 平滑链转弯半径 verify 拒 → 回退锯齿。
+    // 自适应到格距 ≤ 1.1km（实测 grid 300 即通过）。小区域（≤2.5°）保持默认 grid——
+    // 细网格会让 5c2 软罚带（2 格）物理宽度变窄 → FMM 贴墙更近 → 绕行 clearance
+    // 余量不足 → 平滑内切后 verify 拒（双禁飞区 real_bad 256 成功、301 失败）。
+    // 上限 1024 防 OOM。
+    let span_km = region.span_deg * 111.32;
+    let auto_grid = if region.span_deg > 2.5 {
+        ((span_km * 1000.0) / 1100.0).ceil() as usize
+    } else {
+        0
+    };
+    let grid = params.grid.max(8).max(auto_grid).min(1024);
 
     // 4. Zone 集合（no_fly + restricted + obstacles）
     //    代价场墙策略（M2 高度层）：
@@ -173,7 +187,6 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
     let inflation_km = inflation_m / 1000.0;
 
     // 5. 语义代价场（Land=1 / Water=1 / Lake=1 / NoData=5 / OOB=INF；NoFly/Obstacle 墙）
-    let grid = params.grid.max(8);
     let mut field = build_semantic_cost_field(grid, grid, |r, c| {
         let (lon, lat) = cell_lonlat(r, c, &region, grid);
         if let Ok(g) = Geo::new(lon, lat) {
