@@ -189,112 +189,10 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
         }
     }, 5.0);
 
-    // 5c. 禁飞区墙向外膨胀（栅格级多轮 8 邻域扩散，考虑飞机机动留转弯空间）
+    // 5c. 禁飞区墙向外膨胀 + 过渡带软罚（见 apply_inflation_and_band）
     let cell_m = region.span_deg * 111_320.0 / grid as f64;
     let inflation_cells = (inflation_m / cell_m.max(1.0)).ceil() as usize;
-    if inflation_cells > 0 {
-        let mut expanded: Vec<bool> = (0..grid * grid)
-            .map(|i| !field.cost[i].is_finite())
-            .collect();
-        for _ in 0..inflation_cells {
-            let cur = expanded.clone();
-            for r in 0..grid {
-                for c in 0..grid {
-                    let idx = r * grid + c;
-                    if cur[idx] {
-                        continue;
-                    }
-                    let mut near = false;
-                    for dr in -1i32..=1 {
-                        for dc in -1i32..=1 {
-                            if dr == 0 && dc == 0 {
-                                continue;
-                            }
-                            let nr = r as i32 + dr;
-                            let nc = c as i32 + dc;
-                            if nr >= 0
-                                && nr < grid as i32
-                                && nc >= 0
-                                && nc < grid as i32
-                                && cur[nr as usize * grid + nc as usize]
-                            {
-                                near = true;
-                                break;
-                            }
-                        }
-                        if near {
-                            break;
-                        }
-                    }
-                    if near {
-                        expanded[idx] = true;
-                    }
-                }
-            }
-        }
-        for i in 0..grid * grid {
-            if expanded[i] {
-                field.cost[i] = f32::INFINITY;
-            }
-        }
-    }
-
-    // 5c2. 过渡带软罚（主管 2026-08-05 双禁飞区锯齿场景实测）：FMM 回溯路径总是贴
-    //      膨胀墙内缘走（最近列），Theta* 拉直时该段 clearance 差 ~1 格（~0.9km）被 verify
-    //      拒绝 → 全链失败 → 回退密集锯齿。光加大膨胀无效（FMM 永远贴"新墙"走）。
-    //      本块：膨胀墙外 band_cells 格内代价渐变递增（墙边 ×(1+band_coef)，band 外 ×1），
-    //      FMM 权衡代价后自然走离墙更远的栅格，拉直后 clearance 余量充足。
-    //      参数经实验标定：band=2 格 + coef=0.5——窄缝（双禁飞区间隙 18.9km/7.8km）
-    //      与主管真实场景均平滑；band=3+coef=0.5 会把窄缝中间挤成锯齿（已弃）。
-    //      BFS 距离变换（8 邻域，源 = 当前 INF 墙）。
-    {
-        use std::collections::VecDeque;
-        const BAND_CELLS: u32 = 2;
-        const BAND_COEF: f32 = 0.5;
-        let mut dist = vec![u32::MAX; grid * grid];
-        let mut q = VecDeque::new();
-        for i in 0..grid * grid {
-            if !field.cost[i].is_finite() {
-                dist[i] = 0;
-                q.push_back(i);
-            }
-        }
-        while let Some(idx) = q.pop_front() {
-            let r = idx / grid;
-            let c = idx % grid;
-            let nd = dist[idx] + 1;
-            for (dr, dc) in [
-                (0i32, 1i32),
-                (0, -1),
-                (1, 0),
-                (-1, 0),
-                (1, 1),
-                (1, -1),
-                (-1, 1),
-                (-1, -1),
-            ] {
-                let nr = r as i32 + dr;
-                let nc = c as i32 + dc;
-                if nr >= 0 && nr < grid as i32 && nc >= 0 && nc < grid as i32 {
-                    let ni = nr as usize * grid + nc as usize;
-                    if dist[ni] > nd {
-                        dist[ni] = nd;
-                        q.push_back(ni);
-                    }
-                }
-            }
-        }
-        for i in 0..grid * grid {
-            if !field.cost[i].is_finite() {
-                continue;
-            }
-            let d = dist[i];
-            if d >= 1 && d <= BAND_CELLS {
-                let t = 1.0 - (d as f32 - 1.0) / BAND_CELLS as f32; // d=1 → t=1.0；d=BAND → t≈0.33
-                field.cost[i] *= 1.0 + BAND_COEF * t;
-            }
-        }
-    }
+    apply_inflation_and_band(&mut field, inflation_cells);
 
     // 5b. 雷达静态代价（Phase 4 M3）：膨胀半径内 cost ×(1+coef·(几何并集概率 + 深穿惩罚))
     //     ——FMM 倾向绕行；LOS 动态遮挡由 verify 威胁评估判定（不进静态代价场）。
@@ -329,6 +227,32 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
         seg_ends.push(v.start);
         seg_ends.extend(v.mid_waypoints.iter().copied());
         seg_ends.push(target);
+        // 该机受限区墙（底部可通行语义，主管 2026-08-06）：飞行高度落在 restricted
+        // 高度区间内 → 该机 FMM 画墙绕行（水平避开，3000m 场景不再直穿导致锯齿回退）；
+        // 高度在区间外（如低于 alt_min_m 的"底部通道"）→ 不画墙直穿（可通行）。
+        let veh_field: Option<crate::costfield::CostField> =
+            if all_zones.iter().any(|z| restricted_blocks_alt(z, v.alt_m)) {
+                let mut f = field.clone();
+                let g = f.rows;
+                for r in 0..g {
+                    for c in 0..g {
+                        let (lon, lat) = cell_lonlat(r, c, &region, g);
+                        if let Ok(gg) = Geo::new(lon, lat) {
+                            if all_zones
+                                .iter()
+                                .any(|z| restricted_blocks_alt(z, v.alt_m) && zone_contains(z, &gg))
+                            {
+                                f.cost[r * g + c] = f32::INFINITY;
+                            }
+                        }
+                    }
+                }
+                apply_inflation_and_band(&mut f, inflation_cells);
+                Some(f)
+            } else {
+                None
+            };
+        let field_ref = veh_field.as_ref().unwrap_or(&field);
         // 逐段 FMM → 回溯 → 拼接（去重段端点）
         let mut raw_segs: Vec<Path> = Vec::new();
         let mut no_solution = false;
@@ -337,9 +261,9 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
             let (sr, sc) = lonlat_cell(s.lon, s.lat, &region, grid);
             let (dr, dc) = lonlat_cell(e.lon, e.lat, &region, grid);
             let t0 = Instant::now();
-            let res = fmm_propagate(&field, sr, sc);
+            let res = fmm_propagate(field_ref, sr, sc);
             fmm_ms += t0.elapsed().as_secs_f64() * 1000.0;
-            let Some(mut cells) = backtrack_path(&field, &res, dr, dc, sr, sc) else {
+            let Some(mut cells) = backtrack_path(field_ref, &res, dr, dc, sr, sc) else {
                 no_solution = true;
                 break;
             };
@@ -711,6 +635,121 @@ fn make_segment_check<'a>(
     }
 }
 
+/// Restricted 是否按该飞行高度视为禁行墙（底部可通行语义，主管 2026-08-06）：
+/// 飞行高度落在 restricted 高度区间内 → 该机 FMM 画墙绕行（否则直穿）。
+fn restricted_blocks_alt(z: &Zone, alt_m: f64) -> bool {
+    matches!(z.zone_type, crate::config::ZoneType::Restricted)
+        && alt_m >= z.alt_min_m
+        && alt_m <= z.alt_max_m
+}
+
+/// 禁飞区墙膨胀 + 过渡带软罚（5c + 5c2）：
+/// - 5c：NoFly/Obstacle 硬墙向外膨胀 inflation_cells 格（考虑飞机机动留转弯空间，
+///   主管 2026-08-06：绕飞太贴边→考虑飞机机动——绕行需留物理转弯空间）；
+/// - 5c2：膨胀墙外 2 格内代价渐变递增（墙边 ×1.5，带外 ×1），FMM 权衡代价后自然
+///   走离墙更远的栅格，拉直后 clearance 余量充足（防贴墙锯齿，主管 2026-08-05
+///   双禁飞区场景实测）。参数经实验标定 band=2/coef=0.5：窄缝（间隙 18.9km/7.8km）
+///   与真实场景均平滑；band=3/coef=0.5 会把窄缝中间挤成锯齿（已弃）。
+fn apply_inflation_and_band(field: &mut crate::costfield::CostField, inflation_cells: usize) {
+    let grid = field.rows.max(field.cols);
+    // 5c. 膨胀（栅格级多轮 8 邻域扩散）
+    if inflation_cells > 0 {
+        let mut expanded: Vec<bool> = (0..grid * grid)
+            .map(|i| !field.cost[i].is_finite())
+            .collect();
+        for _ in 0..inflation_cells {
+            let cur = expanded.clone();
+            for r in 0..grid {
+                for c in 0..grid {
+                    let idx = r * grid + c;
+                    if cur[idx] {
+                        continue;
+                    }
+                    let mut near = false;
+                    for dr in -1i32..=1 {
+                        for dc in -1i32..=1 {
+                            if dr == 0 && dc == 0 {
+                                continue;
+                            }
+                            let nr = r as i32 + dr;
+                            let nc = c as i32 + dc;
+                            if nr >= 0
+                                && nr < grid as i32
+                                && nc >= 0
+                                && nc < grid as i32
+                                && cur[nr as usize * grid + nc as usize]
+                            {
+                                near = true;
+                                break;
+                            }
+                        }
+                        if near {
+                            break;
+                        }
+                    }
+                    if near {
+                        expanded[idx] = true;
+                    }
+                }
+            }
+        }
+        for i in 0..grid * grid {
+            if expanded[i] {
+                field.cost[i] = f32::INFINITY;
+            }
+        }
+    }
+    // 5c2. 过渡带软罚（BFS 距离变换，8 邻域，源 = 当前 INF 墙）
+    {
+        use std::collections::VecDeque;
+        const BAND_CELLS: u32 = 2;
+        const BAND_COEF: f32 = 0.5;
+        let mut dist = vec![u32::MAX; grid * grid];
+        let mut q = VecDeque::new();
+        for i in 0..grid * grid {
+            if !field.cost[i].is_finite() {
+                dist[i] = 0;
+                q.push_back(i);
+            }
+        }
+        while let Some(idx) = q.pop_front() {
+            let r = idx / grid;
+            let c = idx % grid;
+            let nd = dist[idx] + 1;
+            for (dr, dc) in [
+                (0i32, 1i32),
+                (0, -1),
+                (1, 0),
+                (-1, 0),
+                (1, 1),
+                (1, -1),
+                (-1, 1),
+                (-1, -1),
+            ] {
+                let nr = r as i32 + dr;
+                let nc = c as i32 + dc;
+                if nr >= 0 && nr < grid as i32 && nc >= 0 && nc < grid as i32 {
+                    let ni = nr as usize * grid + nc as usize;
+                    if dist[ni] > nd {
+                        dist[ni] = nd;
+                        q.push_back(ni);
+                    }
+                }
+            }
+        }
+        for i in 0..grid * grid {
+            if !field.cost[i].is_finite() {
+                continue;
+            }
+            let d = dist[i];
+            if d >= 1 && d <= BAND_CELLS {
+                let t = 1.0 - (d as f32 - 1.0) / BAND_CELLS as f32; // d=1 → t=1.0；d=BAND → t≈0.33
+                field.cost[i] *= 1.0 + BAND_COEF * t;
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -805,6 +844,58 @@ mod tests {
             v.warnings.iter().all(|w| !w.contains("smoothing_failed")),
             "不应有 smoothing_failed，实际 {:?}",
             v.warnings
+        );
+    }
+
+    #[test]
+    fn restricted_zone_height_layer_blocks_or_passes() {
+        // 底部可通行的限飞区（主管 2026-08-06）：restricted 圆 [2000,5000]msl 挡在
+        // start→target 直线上。3000m 飞行高度在区间内 → FMM 画墙绕行（平滑，非锯齿）；
+        // 1500m 在区间外（底部通道）→ 直穿（不绕行）。
+        let mk = |alt: f64| {
+            format!(
+                r#"{{
+                    "schema_version":"0.20",
+                    "mission":{{
+                        "start":{{"lon":116.82168446499925,"lat":40.23810827713887,"alt_m":{alt}}},
+                        "target":{{"lon":115.28680713092322,"lat":39.04668499383146,"alt_m":{alt}}},
+                        "terrain":{{"source":"none"}},
+                        "restricted_zones":[{{"id":"rz","zone_type":"restricted","shape":"circle",
+                            "geometry":{{"center":[116.14959340327005,39.597263409766285],"radius_km":20}},
+                            "alt_min_m":2000,"alt_max_m":5000}}]
+                    }}
+                }}"#
+            )
+        };
+        // 3000m：区间内 → 平滑绕行（不得回退密集锯齿）
+        let input = parse(&mk(3000.0));
+        let out = solve(&input, &SolveParams::default(), 42).unwrap();
+        let v = &out.vehicles[0];
+        assert_eq!(v.status, "planned");
+        assert!(
+            v.path.len() <= 10,
+            "3000m 遇 restricted 应平滑绕行，实际 {} 点（锯齿回退）",
+            v.path.len()
+        );
+        assert!(
+            v.warnings.iter().all(|w| !w.contains("smoothing_failed")),
+            "3000m 不应 smoothing_failed，实际 {:?}",
+            v.warnings
+        );
+        // 1500m：区间外（底部通道）→ 直穿，≤3 点且距离 ≈ 直线
+        let input = parse(&mk(1500.0));
+        let out = solve(&input, &SolveParams::default(), 42).unwrap();
+        let v = &out.vehicles[0];
+        assert_eq!(v.status, "planned");
+        assert!(
+            v.path.len() <= 3,
+            "1500m 底部可通行应直穿，实际 {} 点",
+            v.path.len()
+        );
+        assert!(
+            v.distance_m < 192_000.0,
+            "1500m 直穿距离应 ≈187km，实际 {}km",
+            v.distance_m / 1000.0
         );
     }
 
