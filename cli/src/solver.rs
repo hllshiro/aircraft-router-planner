@@ -732,8 +732,8 @@ fn restricted_pass_alt(
     let fit = |pass: f64| d_in * 1000.0 >= climb_dist(pass) && d_out * 1000.0 >= climb_dist(pass);
     // 顶部绕飞可行性：爬升距离 + 升限（alt_max + 500 ≤ ceiling）
     let top_ok = fit(top) && ceiling_m.map_or(true, |c| top <= c);
-    // 底部穿行可行性：爬升距离 + 穿行区地形 ≤ 底部 − 净空
-    let bottom_ok = fit(bottom) && bottom_terrain_ok(z, terrain, bottom);
+    // 底部穿行可行性：爬升距离 + 穿行带（直线穿圆段）地形 ≤ 底部 − 净空
+    let bottom_ok = fit(bottom) && bottom_terrain_ok(z, terrain, bottom, start, target);
     match (bottom_ok, top_ok) {
         (true, _) => Some(bottom), // 底部垂直机动总量更小 → 恒更优（显式代价比较结论）
         (false, true) => Some(top), // 底部不可行 → 顶部绕飞（优于水平绕行：水平距离不增加）
@@ -741,38 +741,64 @@ fn restricted_pass_alt(
     }
 }
 
-/// 底部通道地形可行性：穿行区（圆内）地形最高点 + 净空(100m) ≤ 底部高度。
+/// 底部通道地形可行性（主管 2026-08-06 三轮纠偏）：判据 = **直线穿行带**，不是整个圆面。
+/// 穿行剖面沿 start→target 直线穿圆，飞机只经过圆内的一条**线**（穿行段），因此地形
+/// 检查只采样该直线在圆内的穿行段沿线（步长 ~2.2km，取最高点）——圆面角落的高山
+/// （飞机不经过）不应把底部判为不可行（圆面判据过度保守，会把"穿行带 46m、圆角落
+/// 685m"的场景错误导向顶部绕飞）。
 /// 无地形（平面 0m）→ 恒可行。顶部绕飞不查地形（高于任何地形）。
-fn bottom_terrain_ok(z: &Zone, terrain: Option<&dyn TerrainSource>, bottom: f64) -> bool {
+fn bottom_terrain_ok(
+    z: &Zone,
+    terrain: Option<&dyn TerrainSource>,
+    bottom: f64,
+    start: &Geo,
+    target: &Geo,
+) -> bool {
     let Some(t) = terrain else {
         return true;
     };
     let ZoneShape::Circle { center, radius_km } = z.shape else {
         return false;
     };
-    let (clon, clat) = (center[0], center[1]);
-    let km_per_deg_lat = 111.32;
-    let km_per_deg_lon = 111.32 * clat.to_radians().cos().max(1e-6);
-    let span_lat = radius_km / km_per_deg_lat;
-    let span_lon = radius_km / km_per_deg_lon;
-    let step = 0.02; // 度 ≈ 2.2km 采样步长（穿行区地形粗判）
+    // 平面近似：start→target 直线与圆交点（同 build_restricted_profiles 的解析二次方程）
+    let mlat = ((start.lat + target.lat) / 2.0).to_radians();
+    let kx = mlat.cos() * 111.32;
+    let ky = 111.32;
+    let dx = (target.lon - start.lon) * kx;
+    let dy = (target.lat - start.lat) * ky;
+    let cx = (center[0] - start.lon) * kx;
+    let cy = (center[1] - start.lat) * ky;
+    let a = dx * dx + dy * dy;
+    if a < 1e-9 {
+        return true; // start/target 重合（调用方已过滤）
+    }
+    let b = -2.0 * (dx * cx + dy * cy);
+    let c = cx * cx + cy * cy - radius_km * radius_km;
+    let disc = b * b - 4.0 * a * c;
+    if disc <= 0.0 {
+        return true; // 直线不穿圆
+    }
+    let sq = disc.sqrt();
+    let (u_in, u_out) = ((-b - sq) / (2.0 * a), (-b + sq) / (2.0 * a));
+    let (u_in, u_out) = (u_in.max(0.0), u_out.min(1.0));
+    if u_out <= u_in {
+        return true; // 圆在线段端点之外（FMM 直穿不经过）
+    }
+    // 沿穿行段采样地形：穿行段长 ≈ 圆直径（40km），步长 ~2.2km → n ≈ 18；clamp [8,64]
+    let seg_km = (u_out - u_in) * (dx * dx + dy * dy).sqrt();
+    let n = ((seg_km / 2.2).round() as usize).clamp(8, 64);
     let mut max_terr: Option<f64> = None;
-    let mut lat = clat - span_lat;
-    while lat <= clat + span_lat {
-        let mut lon = clon - span_lon;
-        while lon <= clon + span_lon {
-            if dist_km(clon, clat, lon, lat) <= radius_km {
-                if let Sample::Land(h) = t.sample_at(lon, lat) {
-                    max_terr = Some(max_terr.map_or(h, |m: f64| m.max(h)));
-                }
-            }
-            lon += step;
+    for k in 0..=n {
+        let u = u_in + (u_out - u_in) * (k as f64 / n as f64);
+        let lon = start.lon + (target.lon - start.lon) * u;
+        let lat = start.lat + (target.lat - start.lat) * u;
+        if let Sample::Land(h) = t.sample_at(lon, lat) {
+            max_terr = Some(max_terr.map_or(h, |m: f64| m.max(h)));
         }
-        lat += step;
     }
     match max_terr {
         Some(h) => h + 100.0 <= bottom, // 净空满足 → 底部可行
-        None => true,                    // 圆内无陆地（水面/无数据）→ 直穿
+        None => true,                    // 穿行段无陆地（水面/无数据）→ 直穿
     }
 }
 
@@ -1170,6 +1196,50 @@ mod tests {
             v.warnings.iter().all(|w| !w.contains("smoothing_failed")),
             "不应有 smoothing_failed，实际 {:?}",
             v.warnings
+        );
+    }
+
+    #[test]
+    fn bottom_pass_band_ignores_corner_mountain() {
+        // 主管 2026-08-06 三轮纠偏：判据 = 直线穿行带（飞机实际走的线），不是整个圆面。
+        // 圆西侧角落 700m 高山（飞机穿行不经过），穿行带地形 50m → 底部 1500m 应可行。
+        let z = Zone {
+            id: "rz".into(),
+            zone_type: crate::config::ZoneType::Restricted,
+            shape: ZoneShape::Circle {
+                center: [116.14959340327005, 39.597263409766285],
+                radius_km: 20.0,
+            },
+            alt_min_m: 2000.0,
+            alt_max_m: 5000.0,
+            height_semantics: crate::config::HeightSemantics::Msl,
+        };
+        let start = Geo::new(116.82168446499925, 40.23810827713887).unwrap();
+        let target = Geo::new(115.28680713092322, 39.04668499383146).unwrap();
+        // 地形网格：覆盖 start→target 走廊；lon < 115.95（圆西侧角落）700m，其余 50m
+        let rows = 20usize;
+        let cols = 24usize;
+        let mut h = vec![0.0f32; rows * cols];
+        for r in 0..rows {
+            for c in 0..cols {
+                let lon = 115.55 + 0.05 * c as f64;
+                h[r * cols + c] = if lon < 115.95 { 700.0 } else { 50.0 };
+            }
+        }
+        let terr = crate::terrain::memory::Terrain {
+            rows,
+            cols,
+            origin_lon: 115.55,
+            origin_lat: 39.30,
+            cell_lon_deg: 0.05,
+            cell_lat_deg: 0.05,
+            h,
+        };
+        let pass = restricted_pass_alt(&z, 3000.0, None, Some(&terr), &start, &target, 15.0);
+        assert_eq!(
+            pass,
+            Some(1500.0),
+            "穿行带 50m → 底部 1500m 可行；圆角落 700m 山不应参与判据"
         );
     }
 
