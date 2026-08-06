@@ -648,6 +648,59 @@ pub fn verify_path(
                     }
                 }
             }
+            // Restricted（非墙，高度层语义）：**几何精确**穿圆判定——等距采样会漏掉
+            // 浅穿/短弦（段贴圆擦过时采样点可能全在圆外，如 2026-08-06 new_rz 浅穿
+            // 0.5km、弦 8.9km 但采样点漏过 → 3000m 直穿 restricted 违规交付）。
+            // 段与圆相交区间 [t1,t2]（解析二次方程，局部等距投影），区间内采样高度。
+            for z in zs {
+                if z.is_wall() {
+                    continue;
+                }
+                let crate::config::ZoneShape::Circle { center, radius_km } = &z.shape else {
+                    continue;
+                };
+                let (cx, cy, r) = (center[0], center[1], *radius_km);
+                let mlat = ((a.lat + b.lat) / 2.0).to_radians();
+                let kx = mlat.cos() * 111.32;
+                let ky = 111.32;
+                let dx = (b.lon - a.lon) * kx;
+                let dy = (b.lat - a.lat) * ky;
+                let ox = (cx - a.lon) * kx;
+                let oy = (cy - a.lat) * ky;
+                let aa = dx * dx + dy * dy;
+                if aa < 1e-12 {
+                    continue;
+                }
+                let bb = -2.0 * (dx * ox + dy * oy);
+                let cc = ox * ox + oy * oy - r * r;
+                let disc = bb * bb - 4.0 * aa * cc;
+                if disc <= 0.0 {
+                    continue; // 段直线不穿圆
+                }
+                let sq = disc.sqrt();
+                let t1 = ((-bb - sq) / (2.0 * aa)).clamp(0.0, 1.0);
+                let t2 = ((-bb + sq) / (2.0 * aa)).clamp(0.0, 1.0);
+                if t2 <= 0.0 || t1 >= 1.0 {
+                    continue;
+                }
+                for kk in 0..=4 {
+                    let tt = t1 + (t2 - t1) * kk as f64 / 4.0;
+                    let (lon, lat, alt) = (
+                        a.lon + (b.lon - a.lon) * tt,
+                        a.lat + (b.lat - a.lat) * tt,
+                        a.alt_m + (b.alt_m - a.alt_m) * tt,
+                    );
+                    if let Ok(g) = crate::coord::Geo::new(lon, lat) {
+                        let ground = ctx.terrain.and_then(|t| t.height_at(lon, lat));
+                        if crate::config::zone_contains_at(z, &g, alt, ground) {
+                            rep.issues.push(format!(
+                                "segment {i}: inside zone (alt band) at t={tt:.3} alt={alt:.0}"
+                            ));
+                            break;
+                        }
+                    }
+                }
+            }
         }
         for k in 0..=segs {
             let t = k as f64 / segs as f64;
