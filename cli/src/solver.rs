@@ -141,20 +141,32 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
     // 3. 任务区域（所有起点 + target 包围盒 + 缓冲）
     let target = input.mission.target.to_geo()?;
     let region = region_of(&specs, &target);
-    // 3b. 网格自适应（主管 2026-08-06 双大雷达场景）：**仅大区域**（span > 2.5°）时
-    // 固定 256 格 → 格距粗（320km/256 ≈ 1.43km）→ FMM 绕行弧锯齿曲率 < 物理转弯
-    // 半径（实测 15.5km < 15.89km）→ 平滑链转弯半径 verify 拒 → 回退锯齿。
-    // 自适应到格距 ≤ 1.1km（实测 grid 300 即通过）。小区域（≤2.5°）保持默认 grid——
-    // 细网格会让 5c2 软罚带（2 格）物理宽度变窄 → FMM 贴墙更近 → 绕行 clearance
-    // 余量不足 → 平滑内切后 verify 拒（双禁飞区 real_bad 256 成功、301 失败）。
+    // 3b. 网格自适应（主管 2026-08-06 双大雷达/多边形场景）：**仅大区域**（span > 2.5°）时
+    // 固定 256 格 → 格距粗 → FMM 绕行弧锯齿曲率 < 物理转弯半径 → 平滑链转弯半径
+    // verify 拒 → 回退锯齿。
+    // 自适应格距：**含多边形墙（NoFly/Obstacle 多边形）→ ≤600m**（绕多边形尖角曲率
+    // 敏感：顶点处绕弧曲率 ≈ 膨胀距离，锯齿误差 2% 即不足，实测 zigzag7 grid512
+    // cell 0.72km 失败 / grid600 cell 0.64km 成功）；纯圆墙 → ≤1100m（绕圆弧曲率 =
+    // 墙半径，不敏感，zigzag5 grid300 即通过）。
+    // 小区域（≤2.5°）保持默认 grid——细网格会让 5c2 软罚带物理宽度变窄 → FMM 贴墙
+    // 更近 → 绕行 clearance 余量不足（双禁飞区 real_bad 256 成功、301 失败）。
     // 上限 1024 防 OOM。
     let span_km = region.span_deg * 111.32;
+    let has_poly_wall = input
+        .mission
+        .no_fly_zones
+        .iter()
+        .chain(input.mission.restricted_zones.iter())
+        .chain(input.mission.obstacles.iter())
+        .any(|z| z.is_wall() && matches!(z.shape, ZoneShape::Polygon { .. }));
+    let target_cell = if has_poly_wall { 600.0 } else { 1100.0 };
     let auto_grid = if region.span_deg > 2.5 {
-        ((span_km * 1000.0) / 1100.0).ceil() as usize
+        ((span_km * 1000.0) / target_cell).ceil() as usize
     } else {
         0
     };
     let grid = params.grid.max(8).max(auto_grid).min(1024);
+    eprintln!("[debug] region span={:.2}deg grid={} cell_m={:.0}", region.span_deg, grid, region.span_deg * 111_320.0 / grid as f64);
 
     // 4. Zone 集合（no_fly + restricted + obstacles）
     //    代价场墙策略（M2 高度层）：
@@ -206,7 +218,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
     // 5c. 禁飞区墙向外膨胀 + 过渡带软罚（见 apply_inflation_and_band）
     let cell_m = region.span_deg * 111_320.0 / grid as f64;
     let inflation_cells = (inflation_m / cell_m.max(1.0)).ceil() as usize;
-    apply_inflation_and_band(&mut field, inflation_cells);
+    apply_inflation_and_band(&mut field, inflation_cells, cell_m);
 
     // 5b. 雷达静态代价（Phase 4 M3）：膨胀半径内 cost ×(1+coef·(几何并集概率 + 深穿惩罚))
     //     ——FMM 倾向绕行；LOS 动态遮挡由 verify 威胁评估判定（不进静态代价场）。
@@ -289,12 +301,13 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                         }
                     }
                 }
-                apply_inflation_and_band(&mut f, inflation_cells);
+                apply_inflation_and_band(&mut f, inflation_cells, cell_m);
                 Some(f)
             } else {
                 None
             };
             let field_ref = veh_field.as_ref().unwrap_or(&field);
+            eprintln!("[debug] fmm attempt {} field ready (veh={})", _attempt, veh_field.is_some());
             // 逐段 FMM → 回溯 → 拼接（去重段端点）
             let mut raw_segs: Vec<Path> = Vec::new();
             let mut no_solution = false;
@@ -1180,11 +1193,18 @@ fn push_out_of_walls(
 /// 禁飞区墙膨胀 + 过渡带软罚（5c + 5c2）：
 /// - 5c：NoFly/Obstacle 硬墙向外膨胀 inflation_cells 格（考虑飞机机动留转弯空间，
 ///   主管 2026-08-06：绕飞太贴边→考虑飞机机动——绕行需留物理转弯空间）；
-/// - 5c2：膨胀墙外 2 格内代价渐变递增（墙边 ×1.5，带外 ×1），FMM 权衡代价后自然
+/// - 5c2：膨胀墙外过渡带内代价渐变递增（墙边 ×1.5，带外 ×1），FMM 权衡代价后自然
 ///   走离墙更远的栅格，拉直后 clearance 余量充足（防贴墙锯齿，主管 2026-08-05
-///   双禁飞区场景实测）。参数经实验标定 band=2/coef=0.5：窄缝（间隙 18.9km/7.8km）
-///   与真实场景均平滑；band=3/coef=0.5 会把窄缝中间挤成锯齿（已弃）。
-fn apply_inflation_and_band(field: &mut crate::costfield::CostField, inflation_cells: usize) {
+///   双禁飞区场景实测）。**软罚带按物理距离 1.5km（格数随 cell_m 自适应）**——
+///   固定 2 格在细网格（自适应大 region，cell<0.75km）时物理宽度变窄 → FMM 贴墙
+///   更近 → 绕行 clearance 余量不足 → 平滑内切后 verify 拒（主管 2026-08-06
+///   双大雷达+多边形 no_fly 场景实测 clearance 0.00 < inflation）。窄缝（7.8km）
+///   仍 > 2×1.5km，不挤缝（band=3 格/0.75km=2.25km 物理才挤，已弃）。
+fn apply_inflation_and_band(
+    field: &mut crate::costfield::CostField,
+    inflation_cells: usize,
+    cell_m: f64,
+) {
     let grid = field.rows.max(field.cols);
     // 5c. 膨胀（栅格级多轮 8 邻域扩散）
     if inflation_cells > 0 {
@@ -1233,11 +1253,12 @@ fn apply_inflation_and_band(field: &mut crate::costfield::CostField, inflation_c
             }
         }
     }
-    // 5c2. 过渡带软罚（BFS 距离变换，8 邻域，源 = 当前 INF 墙）
+    // 5c2. 过渡带软罚（BFS 距离变换，8 邻域，源 = 当前 INF 墙；物理带 1.5km）
     {
         use std::collections::VecDeque;
-        const BAND_CELLS: u32 = 2;
+        const BAND_M: f64 = 1500.0;
         const BAND_COEF: f32 = 0.5;
+        let band_cells = (BAND_M / cell_m.max(1.0)).ceil() as u32;
         let mut dist = vec![u32::MAX; grid * grid];
         let mut q = VecDeque::new();
         for i in 0..grid * grid {
@@ -1276,8 +1297,8 @@ fn apply_inflation_and_band(field: &mut crate::costfield::CostField, inflation_c
                 continue;
             }
             let d = dist[i];
-            if d >= 1 && d <= BAND_CELLS {
-                let t = 1.0 - (d as f32 - 1.0) / BAND_CELLS as f32; // d=1 → t=1.0；d=BAND → t≈0.33
+            if d >= 1 && d <= band_cells {
+                let t = 1.0 - (d as f32 - 1.0) / band_cells as f32; // d=1 → t=1.0；d=band → t≈0.33
                 field.cost[i] *= 1.0 + BAND_COEF * t;
             }
         }
