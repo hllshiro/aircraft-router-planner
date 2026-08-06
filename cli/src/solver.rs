@@ -258,7 +258,6 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
         let mut raw_joined: Path = Path::new(Vec::new());
         let mut force_restricted_wall = false;
         'fmm_attempt: for _attempt in 0..2 {
-            eprintln!("[debug] fmm_attempt {} force_wall={}", _attempt, force_restricted_wall);
             let restricted_wall_for = |z: &Zone| {
                 force_restricted_wall
                     || restricted_detour_required(
@@ -921,7 +920,6 @@ fn build_restricted_profiles(
     let need_wall = false;
     // 逐个 hit：在当前的尾段上找穿行区间 → 切 [首段, 剖面段, 尾段]（多 restricted 顺序处理）
     for z in hits {
-        eprintln!("[debug] build hit {}", z.id);
         let tail = out_segs.last().unwrap();
         let ZoneShape::Circle { center, radius_km } = z.shape else {
             continue;
@@ -1049,7 +1047,7 @@ fn build_restricted_profiles(
         else {
             continue; // 底部/顶部都不可行 → 已画墙绕行（raw 不穿它）
         };
-        // 过渡段基线水平距离（无裕量）：2500m 高差 → 15° 爬升角所需最小水平距离。
+        // 过渡段基线水平距离（无裕量）：高差 → 15° 爬升角所需最小水平距离。
         // desc/climb 锚点判定用"直线距离 ≥ 1.1×基线"（保证过渡直线爬升角 ≤ 13.6°），
         // 且锚点沿 raw 路径前移（直线段上，距硬墙远，避免拉直后爬升角超/穿墙）。
         let climb_base_km = if max_climb_deg > 0.1 {
@@ -1057,39 +1055,63 @@ fn build_restricted_profiles(
         } else {
             f64::INFINITY
         };
-        // desc：沿路径从 i_in 向前，找第一个与 in 直线距离 ≥ climb_base_km 的点
-        //（在 FMM 绕行后的直线段上 → 距硬墙 ≥ inflation，过渡直线合法且爬升角 ≤15°）
-        let pin = tail.points[i_in];
-        let pout = tail.points[i_out];
-        let mut i_desc = i_in;
-        for i in (0..i_in).rev() {
-            if dist_km(tail.points[i].lon, tail.points[i].lat, pin.lon, pin.lat) >= climb_base_km {
-                i_desc = i;
-                break;
-            }
-        }
-        let mut i_climb = i_out;
-        for i in (i_out + 1)..tail.points.len() {
-            if dist_km(pout.lon, pout.lat, tail.points[i].lon, tail.points[i].lat) >= climb_base_km {
-                i_climb = i;
-                break;
-            }
-        }
-        // 切分 5 段：
-        //  [首段 raw[0..=i_desc]@alt_m, 过渡直线 desc→in(mask=true 跳过平滑,15°),
-        //   in→out raw 子段@pass_alt（绕行弧 500m 平飞，走平滑链无爬升角问题）,
-        //   过渡直线 out→climb(mask=true), 尾段 raw[i_climb..]@alt_m]
-        let head = Path::new(tail.points[..=i_desc].to_vec());
+        // in→out 平飞段 = raw[i_in..=i_out] @pass_alt（含绕行弧），平滑前硬墙外扩
+        //（FMM 贴墙 clearance≈inflation，平滑内切后不足 verify 阈值 → 外扩到
+        // radius+inflation+margin；margin=0.5km 吸收平滑内切与网格离散误差）。
         let in_out_raw: Vec<RouterPoint> = tail.points[i_in..=i_out]
             .iter()
             .map(|p| RouterPoint::new(p.lon, p.lat, pass_alt))
             .collect();
-        // in→out 平飞段平滑前硬墙外扩：FMM 贴墙绕行（clearance≈inflation），平滑
-        // （Catmull-Rom/Dubins/抽稀）内切后 clearance < verify 阈值 → 逐点外扩到
-        // radius+inflation+margin（margin=0.5km 吸收平滑内切与网格离散误差）。
         let in_out = push_out_of_walls(&in_out_raw, zones, inflation_km, 0.5);
         let pin2 = in_out[0];
         let pout2 = *in_out.last().unwrap();
+        // 方向辅助（局部等距投影 heading；相邻过渡段转角 ≤ 60°——固定翼最大转角，
+        // 否则 join 后 final verify turn 拒 → 回退锯齿，如 zigzag6 vertex5 64.55°）。
+        let heading = |lon1: f64, lat1: f64, lon2: f64, lat2: f64| {
+            let mlat = ((lat1 + lat2) / 2.0).to_radians();
+            let kx = mlat.cos() * 111.32;
+            let dx = (lon2 - lon1) * kx;
+            let dy = (lat2 - lat1) * 111.32;
+            dy.atan2(dx).to_degrees().rem_euclid(360.0)
+        };
+        let angle_between = |h1: f64, h2: f64| {
+            let d = (h1 - h2).abs() % 360.0;
+            if d > 180.0 { 360.0 - d } else { d }
+        };
+        let p0pt = tail.points[0];
+        let plast = *tail.points.last().unwrap();
+        // desc：沿路径从 i_in 向前，找直线距离 ≥ climb_base 且 start→desc 与 desc→in
+        // 转角 ≤ 55° 的点（首段平滑为 start→desc 直线后连接 desc→in 过渡；55° 留 5°
+        // 余量——检查用局部投影近似，verify 用精确投影，边界会差 ~0.3°）
+        let mut i_desc = i_in;
+        for i in (0..i_in).rev() {
+            if dist_km(tail.points[i].lon, tail.points[i].lat, pin2.lon, pin2.lat) >= climb_base_km {
+                let h1 = heading(p0pt.lon, p0pt.lat, tail.points[i].lon, tail.points[i].lat);
+                let h2 = heading(tail.points[i].lon, tail.points[i].lat, pin2.lon, pin2.lat);
+                if angle_between(h1, h2) <= 55.0 {
+                    i_desc = i;
+                    break;
+                }
+            }
+        }
+        // climb：沿路径从 i_out 向后，找直线距离 ≥ climb_base 且 out→climb 与
+        // climb→target 转角 ≤ 55° 的点（尾段平滑为 climb→target 直线）
+        let mut i_climb = i_out;
+        for i in (i_out + 1)..tail.points.len() {
+            if dist_km(pout2.lon, pout2.lat, tail.points[i].lon, tail.points[i].lat) >= climb_base_km {
+                let h1 = heading(pout2.lon, pout2.lat, tail.points[i].lon, tail.points[i].lat);
+                let h2 = heading(tail.points[i].lon, tail.points[i].lat, plast.lon, plast.lat);
+                if angle_between(h1, h2) <= 55.0 {
+                    i_climb = i;
+                    break;
+                }
+            }
+        }
+        // 切分 5 段：
+        //  [首段 raw[0..=i_desc]@alt_m, 过渡直线 desc→in(mask=true 跳过平滑,15°),
+        //   in→out raw 子段@pass_alt（绕行弧平飞，走平滑链）,
+        //   过渡直线 out→climb(mask=true), 尾段 raw[i_climb..]@alt_m]
+        let head = Path::new(tail.points[..=i_desc].to_vec());
         let desc_in = Path::new(vec![
             RouterPoint::new(tail.points[i_desc].lon, tail.points[i_desc].lat, alt_m),
             pin2,
