@@ -1,0 +1,183 @@
+//! Phase 0 反馈错误输入回归套件（主管拍板 2026-08-06：落点 A + 地形依赖检测降级）。
+//!
+//! 背景：phase0_out/ 是 Phase 0 调试产物目录（已 gitignore）。其中 18 个**输入型**
+//! mission JSON 是历史上主管反馈 bug 的原始输入（锯齿/直穿 restricted/禁飞区陷阱/
+//! restricted 高度层剖面判据等）。本套件把它们复制为正式回归用例，防止错误复现。
+//!
+//! 回归语义（核心断言）：
+//!   1. 每个输入 parse + validate + solve 全过（不 panic、不 Err）；
+//!   2. 输出路径逐点不穿任何 zone（水平包含 + 高度带，与 zone_contains_at 同语义）——
+//!      no_fly/obstacle 全高度禁入，restricted 仅禁入高度带（底部/顶部剖面穿越合法）。
+//!
+//! 地形依赖（主管决策）：cases 中 terrain.path 指向
+//! `phase0/data/pending/china_dem_l12.arpack`（数据文件已 gitignore）。
+//! 运行期检测：文件存在 → 改写 path 为绝对路径使用真实地形；缺失 → terrain.source=none
+//! 合成平面（覆盖不到真实地形 bug，但保证用例在无数据环境仍可跑）。
+//!
+//! 新增用例：把输入 JSON 放进 tests/regression/cases/ 即可自动纳入（遍历发现）。
+
+use std::path::{Path, PathBuf};
+
+use aircraft_router_planner_cli::config::{self, HeightSemantics, Input, Zone, ZoneShape};
+use aircraft_router_planner_cli::coord::Geo;
+use aircraft_router_planner_cli::solver::{self, SolveParams};
+
+/// cases 目录：<crate>/tests/regression/cases/
+fn cases_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/regression/cases")
+}
+
+/// 真实地形数据文件候选（workspace 根/phase0/data/pending/...）
+fn real_terrain_path() -> Option<PathBuf> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let cand = root.join("phase0/data/pending/china_dem_l12.arpack");
+    cand.exists().then_some(cand)
+}
+
+/// 解析用例输入并按地形依赖检测改写 terrain：
+/// - 数据存在 → terrain.path 改写为绝对路径（真实地形）；
+/// - 数据缺失 → terrain.source=none（合成平面）。
+fn load_case(name: &str) -> Input {
+    let p = cases_dir().join(name);
+    let raw = std::fs::read_to_string(&p)
+        .unwrap_or_else(|e| panic!("{name}: read case failed: {e}"));
+    let mut input: Input = Input::from_json_str(&raw)
+        .unwrap_or_else(|e| panic!("{name}: parse failed: {e}"));
+    if input.mission.terrain.source == config::TerrainSourceType::None {
+        return input;
+    }
+    match real_terrain_path() {
+        Some(abs) => {
+            input.mission.terrain.path = Some(abs.to_string_lossy().into_owned());
+        }
+        None => {
+            input.mission.terrain.source = config::TerrainSourceType::None;
+            input.mission.terrain.path = None;
+        }
+    }
+    input
+}
+
+/// 水平包含：圆（测地距离）或 多边形（射线法）。
+fn point_in_zone_shape(z: &Zone, p: &Geo) -> bool {
+    match &z.shape {
+        ZoneShape::Circle { center, radius_km } => {
+            let c = Geo::new(center[0], center[1]).ok();
+            match c {
+                Some(c) => c.distance_m(p) <= radius_km * 1000.0,
+                None => false,
+            }
+        }
+        ZoneShape::Polygon { vertices } => point_in_polygon(vertices, p),
+    }
+}
+
+/// 射线法 point-in-polygon（lon=x, lat=y，平面近似足够回归语义）。
+fn point_in_polygon(verts: &[[f64; 2]], p: &Geo) -> bool {
+    let mut inside = false;
+    let (x, y) = (p.lon, p.lat);
+    let mut j = verts.len() - 1;
+    for i in 0..verts.len() {
+        let (xi, yi) = (verts[i][0], verts[i][1]);
+        let (xj, yj) = (verts[j][0], verts[j][1]);
+        if ((yi > y) != (yj > y))
+            && (x < (xj - xi) * (y - yi) / (yj - yi) + xi)
+        {
+            inside = !inside;
+        }
+        j = i;
+    }
+    inside
+}
+
+/// 高度带判定（与 zone_contains_at 同语义：MSL 直接比较；AGL 无地面 → 保守视为在带内）。
+fn alt_in_band(z: &Zone, alt_m: f64) -> bool {
+    match z.height_semantics {
+        HeightSemantics::Msl => alt_m >= z.alt_min_m && alt_m <= z.alt_max_m,
+        HeightSemantics::Agl => true, // 无地面高度 → 保守拦截
+    }
+}
+
+/// 路径点是否违规进入某 zone（水平包含 + 高度带）。
+fn point_violates(z: &Zone, p: &Geo, alt_m: f64) -> bool {
+    point_in_zone_shape(z, p) && alt_in_band(z, alt_m)
+}
+
+/// 核心断言：输出路径逐点不穿任何 zone。
+fn assert_path_clear(input: &Input, out: &config::Output, name: &str) {
+    let mut zones = input.mission.no_fly_zones.clone();
+    zones.extend(input.mission.restricted_zones.clone());
+    zones.extend(input.mission.obstacles.clone());
+    if zones.is_empty() {
+        return;
+    }
+    for v in &out.vehicles {
+        for (i, pt) in v.path.iter().enumerate() {
+            let geo = match Geo::new(pt.x, pt.y) {
+                Ok(g) => g,
+                Err(_) => continue,
+            };
+            for z in &zones {
+                if point_violates(z, &geo, pt.alt_m) {
+                    panic!(
+                        "{name}: vehicle {} path point {i} (lon={}, lat={}, alt={}) violates zone {} ({:?})",
+                        v.id, pt.x, pt.y, pt.alt_m, z.id, z.zone_type
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// 遍历 cases 目录，逐个回归。
+#[test]
+fn phase0_feedback_inputs_regression() {
+    let dir = cases_dir();
+    let mut names: Vec<String> = std::fs::read_dir(&dir)
+        .unwrap_or_else(|e| panic!("cannot read cases dir {}: {e}", dir.display()))
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.ends_with(".json"))
+        .collect();
+    names.sort();
+
+    assert!(
+        !names.is_empty(),
+        "no regression cases found under {}",
+        dir.display()
+    );
+
+    let terrain_ok = real_terrain_path().is_some();
+    eprintln!(
+        "[regress] {} cases, real terrain = {}",
+        names.len(),
+        if terrain_ok { "present" } else { "MISSING (using terrain none)" }
+    );
+
+    for name in &names {
+        let input = load_case(name);
+        // 输入必须过契约校验（退化输入本身即 bug，反馈输入都应是合法任务）
+        config::validate(&input)
+            .unwrap_or_else(|e| panic!("{name}: validate failed: {e:?}"));
+
+        let mut params = SolveParams::default();
+        if input.mission.terrain.source != config::TerrainSourceType::None {
+            if let Some(p) = &input.mission.terrain.path {
+                params.terrain_path = Some(PathBuf::from(p));
+            }
+        }
+
+        let out = solver::solve(&input, &params, 0)
+            .unwrap_or_else(|e| panic!("{name}: solve error: {e:?}"));
+
+        // status 契约：success / degraded_timeout / no_solution 均合法，但 input_invalid 不应在此出现
+        assert_ne!(
+            out.status, "input_invalid",
+            "{name}: unexpected input_invalid after validate passed"
+        );
+
+        // 有路径则断言不穿 zone（核心回归语义）
+        assert_path_clear(&input, &out, name);
+
+        eprintln!("[regress] {name}: status={} vehicles={}", out.status, out.vehicles.len());
+    }
+}

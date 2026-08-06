@@ -741,8 +741,34 @@ fn make_segment_check<'a>(
                 if clr <= 1e-9 || clr < inflation_km {
                     return false;
                 }
+            } else if let crate::config::ZoneShape::Circle { center, radius_km } = &z.shape {
+                // restricted 圆：与 verify 完全同口径——解析二次方程得到穿圆参数区间
+                // [t1,t2]，**区间内**采样高度（0..N 等距采样会漏掉浅穿/短弦：段擦圆
+                // 边缘穿入仅 0.03 宽，16 个等距点可能全在圆外 → check 放行 verify
+                // 会拒的穿区段，2026-08-06 zigzag9 theta_star 拉直段擦过 restricted 圆）。
+                if let Some((t1, t2)) = crate::smooth::segment_circle_intersect_t(
+                    lon1,
+                    lat1,
+                    lon2,
+                    lat2,
+                    center[0],
+                    center[1],
+                    *radius_km,
+                ) {
+                    for i in 0..=N {
+                        let t = t1 + (t2 - t1) * i as f64 / N as f64;
+                        let lon = lon1 + (lon2 - lon1) * t;
+                        let lat = lat1 + (lat2 - lat1) * t;
+                        let alt = alt1 + (alt2 - alt1) * t;
+                        if let Ok(g) = Geo::new(lon, lat) {
+                            if zone_contains_at(z, &g, alt, None) {
+                                return false;
+                            }
+                        }
+                    }
+                }
             } else if clr <= 1e-9 {
-                // restricted：高度层采样（水平相交后，高度沿线段插值判定）
+                // restricted 多边形：净距相交（段-边相交=0）→ 高度层采样
                 for i in 0..=N {
                     let t = i as f64 / N as f64;
                     let lon = lon1 + (lon2 - lon1) * t;
@@ -1741,6 +1767,50 @@ mod tests {
             check_infl(115.0, 39.0, 3000.0, 117.0, 39.5, 3000.0),
             "远离段应放行"
         );
+    }
+
+    #[test]
+    fn segment_check_restricted_shallow_graze_rejected() {
+        // zigzag9 根因（2026-08-06）：theta_star 拉直段"擦过" restricted 圆边缘——
+        // 段-圆相交区间仅 ~0.03 宽（t∈[0.592,0.622]），16 点等距采样可能全在圆外
+        // → 旧 check（净距 clr≤1e-9 或等距采样）放行 verify 会拒的穿区段。
+        // 修复：check 与 verify 同口径（解析二次方程 + [t1,t2] 区间内采样）。
+        use crate::config::{HeightSemantics, ZoneShape, ZoneType};
+        let z = Zone {
+            id: "rz".into(),
+            zone_type: ZoneType::Restricted,
+            shape: ZoneShape::Circle {
+                center: [116.27050736818683, 41.08978345198258],
+                radius_km: 50.0,
+            },
+            alt_min_m: 0.0,
+            alt_max_m: 5000.0,
+            height_semantics: HeightSemantics::Msl,
+        };
+        let zones = vec![z];
+        let check = make_segment_check(&zones, None, 0.0);
+        // zigzag9 theta_star 拉直段 start→(114.2076,42.3648) 擦过 rz1 圆边缘
+        // （浅穿）→ 高度 3000 在带内 → 必须拒绝拉直
+        assert!(
+            !check(
+                118.28982699875671,
+                38.42208802408725,
+                3000.0,
+                114.2076,
+                42.3648,
+                3000.0
+            ),
+            "擦边浅穿 restricted 圆必须拒绝（与 verify 同口径）"
+        );
+        // 同段但高度 6000（带外）→ 放行
+        assert!(check(
+            118.28982699875671,
+            38.42208802408725,
+            6000.0,
+            114.2076,
+            42.3648,
+            6000.0
+        ));
     }
 
     #[test]

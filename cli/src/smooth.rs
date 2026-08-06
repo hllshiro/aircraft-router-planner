@@ -554,6 +554,47 @@ pub struct VerifyContext<'a> {
 /// - 爬升角：段高度差/水平距离 ≤ tan(max_climb_deg)（仅固定翼）；
 /// - 弦高：相对 `reference`（美化前）逐点弦高 ≤ opts.chord_tol_m（几何逼近误差）；
 /// - A6：`phys_min_radius_m` 提供时校验 r_min ≥ phys_min_radius_m（参数化，Phase 4 接入）。
+/// 段-圆水平相交参数区间（解析二次方程，局部等距投影）。返回 Some((t1,t2))
+/// 当相交区间与 [0,1] 有重叠（含边界接触，保守）；否则 None。
+/// 统一 check（Theta* 拉直）与 verify 的圆判定口径——此前 check 用净距
+/// （起点纬度投影，圆边缘 ±2% 误差可翻转"穿/不穿"判定），verify 用解析法，
+/// 边缘场景 check 放行 verify 会拒的穿区段（2026-08-06 zigzag9：theta_star
+/// 拉直段擦过 restricted 圆边缘被放行 → verify 拒 → 全链失败回退密集楼梯）。
+pub(crate) fn segment_circle_intersect_t(
+    lon1: f64,
+    lat1: f64,
+    lon2: f64,
+    lat2: f64,
+    cx: f64,
+    cy: f64,
+    r_km: f64,
+) -> Option<(f64, f64)> {
+    let mlat = ((lat1 + lat2) / 2.0).to_radians();
+    let kx = mlat.cos() * 111.32;
+    let ky = 111.32;
+    let dx = (lon2 - lon1) * kx;
+    let dy = (lat2 - lat1) * ky;
+    let ox = (cx - lon1) * kx;
+    let oy = (cy - lat1) * ky;
+    let aa = dx * dx + dy * dy;
+    if aa < 1e-12 {
+        return None;
+    }
+    let bb = -2.0 * (dx * ox + dy * oy);
+    let cc = ox * ox + oy * oy - r_km * r_km;
+    let disc = bb * bb - 4.0 * aa * cc;
+    if disc <= 0.0 {
+        return None;
+    }
+    let sq = disc.sqrt();
+    let t1 = ((-bb - sq) / (2.0 * aa)).clamp(0.0, 1.0);
+    let t2 = ((-bb + sq) / (2.0 * aa)).clamp(0.0, 1.0);
+    if t2 <= 0.0 || t1 >= 1.0 {
+        return None;
+    }
+    Some((t1, t2))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn verify_path(
     path: &Path,
@@ -661,29 +702,11 @@ pub fn verify_path(
                     continue;
                 };
                 let (cx, cy, r) = (center[0], center[1], *radius_km);
-                let mlat = ((a.lat + b.lat) / 2.0).to_radians();
-                let kx = mlat.cos() * 111.32;
-                let ky = 111.32;
-                let dx = (b.lon - a.lon) * kx;
-                let dy = (b.lat - a.lat) * ky;
-                let ox = (cx - a.lon) * kx;
-                let oy = (cy - a.lat) * ky;
-                let aa = dx * dx + dy * dy;
-                if aa < 1e-12 {
-                    continue;
-                }
-                let bb = -2.0 * (dx * ox + dy * oy);
-                let cc = ox * ox + oy * oy - r * r;
-                let disc = bb * bb - 4.0 * aa * cc;
-                if disc <= 0.0 {
+                let Some((t1, t2)) =
+                    segment_circle_intersect_t(a.lon, a.lat, b.lon, b.lat, cx, cy, r)
+                else {
                     continue; // 段直线不穿圆
-                }
-                let sq = disc.sqrt();
-                let t1 = ((-bb - sq) / (2.0 * aa)).clamp(0.0, 1.0);
-                let t2 = ((-bb + sq) / (2.0 * aa)).clamp(0.0, 1.0);
-                if t2 <= 0.0 || t1 >= 1.0 {
-                    continue;
-                }
+                };
                 for kk in 0..=4 {
                     let tt = t1 + (t2 - t1) * kk as f64 / 4.0;
                     let (lon, lat, alt) = (
@@ -962,24 +985,52 @@ pub fn smooth_path_chain<'a>(
     // Dubins 拟合阶段：输出是"物理修正"圆角（转弯半径 r_m），相对 raw 折线的
     // 弦高可达数百米（绕行 L 形圆角 ~0.7km）——100m 逼近容差会误杀合法绕行，
     // 对该阶段放宽弦高（DUBINS_CHORD_TOL_M），运动学/地形/禁飞仍严格复验。
+    // 弦高 reference：用 Theta* 合法拉直输出（若无则原始折线）。FMM 对 NoData
+    // 5x 高代价区（如渤海空洞）产生"伪影绕行"，把原始楼梯当 reference 会让
+    // Theta*/后续阶段的合法拉直被弦高门（100m）误杀（伪影偏差可达数 km）→
+    // 全链失败回退密集楼梯（2026-08-06 zigzag9：NoData 伪影 968km raw 全链拒）。
+    // 语义：弦高门只约束"相对合法参考的几何逼近"；穿墙/穿区由 zone/地形复验
+    // 兜底（Theta* 输出本身 check-legal，后续阶段偏离会 zone 拒）。
+    let reference: Path = stages
+        .iter()
+        .find(|(n, _)| *n == "theta_star")
+        .map(|(_, p)| p.clone())
+        .unwrap_or_else(|| input.clone());
+    // 从后向前遍历全部阶段，在"通过全复验"的阶段中选点数最少的交付。
+    // 弦高 reference 放宽后（见上），多个阶段可能同时合法（如 Theta* 折线
+    // 与 Dubins 圆角）；交付点数少的既合法又简洁，且段边界拼接的运动学风险
+    // 更小（2026-08-06 zigzag3：reference=Theta* 时 seg 交付 96 点 Dubins，
+    // 与受限区剖面段拼接处半径 7431m<11035m → 全路径终检拒 → 回退 raw）。
+    let mut best: Option<(usize, &Path)> = None;
     for (idx, (_name, stage)) in stages.iter().enumerate().rev() {
         let rep = if _name == "dubins" {
             let mut o = opts.clone();
             o.chord_tol_m = DUBINS_CHORD_TOL_M;
-            verify_path(stage, Some(input), &o, ctx, phys_min_radius_m)
+            verify_path(stage, Some(&reference), &o, ctx, phys_min_radius_m)
         } else {
-            verify_path(stage, Some(input), opts, ctx, phys_min_radius_m)
+            verify_path(stage, Some(&reference), opts, ctx, phys_min_radius_m)
         };
-        if rep.ok {
-            let applied: Vec<String> = stages[1..=idx].iter().map(|(n, _)| n.clone()).collect();
-            return SmoothResult {
-                path: stage.clone(),
-                applied,
-                warning: None,
-                verify: rep,
-            };
+        if rep.ok && best.is_none_or(|(_, p)| stage.points.len() < p.points.len()) {
+            best = Some((idx, stage));
         }
-        // 该阶段复验失败 → 回退
+        // 该阶段复验失败 → 跳过
+    }
+    if let Some((idx, stage)) = best {
+        let applied: Vec<String> = stages[1..=idx].iter().map(|(n, _)| n.clone()).collect();
+        let verify_opts = if stages[idx].0 == "dubins" {
+            let mut o = opts.clone();
+            o.chord_tol_m = DUBINS_CHORD_TOL_M;
+            o
+        } else {
+            opts.clone()
+        };
+        let rep = verify_path(stage, Some(&reference), &verify_opts, ctx, phys_min_radius_m);
+        return SmoothResult {
+            path: stage.clone(),
+            applied,
+            warning: None,
+            verify: rep,
+        };
     }
     // 全链失败：原始折线 + 显式告警
     let rep = verify_path(input, None, opts, ctx, phys_min_radius_m);
@@ -1015,6 +1066,45 @@ mod chain_tests {
         fn resolution_desc(&self) -> String {
             "flat".into()
         }
+    }
+
+    #[test]
+    fn segment_circle_intersect_shallow_graze() {
+        // zigzag9（2026-08-06）：段"擦过"圆边缘，相交区间窄（0.592..0.622）
+        // → 必须判相交（旧净距法在此翻转：起点纬度投影误差 ~2% 恰在半径边缘）。
+        let t = segment_circle_intersect_t(
+            118.28982699875671,
+            38.42208802408725,
+            114.2076,
+            42.3648,
+            116.27050736818683,
+            41.08978345198258,
+            50.0,
+        );
+        assert!(t.is_some(), "浅穿必须判相交");
+        if let Some((t1, t2)) = t {
+            assert!(t1 > 0.5 && t2 < 0.7, "浅穿区间应在 0.59..0.63 附近, got {t1:.3}..{t2:.3}");
+        }
+        // 远线段（不穿圆）→ None
+        assert!(
+            segment_circle_intersect_t(
+                118.0, 38.0, 117.0, 38.5, 116.27050736818683, 41.08978345198258, 50.0
+            )
+            .is_none()
+        );
+        // 深穿（段穿过圆心附近）→ Some
+        assert!(
+            segment_circle_intersect_t(
+                116.27,
+                40.5,
+                116.27,
+                41.7,
+                116.27050736818683,
+                41.08978345198258,
+                50.0
+            )
+            .is_some()
+        );
     }
 
     #[test]

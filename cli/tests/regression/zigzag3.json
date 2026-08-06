@@ -1,0 +1,76 @@
+{
+  "schema_version": "0.20",
+  "mission": {
+    "start": {
+      "lon": 116.82168446499925,
+      "lat": 40.23810827713887,
+      "alt_m": 2000
+    },
+    "target": {
+      "lon": 115.28680713092322,
+      "lat": 39.04668499383146,
+      "alt_m": 2000
+    },
+    "vehicles": [
+      {
+        "id": "v1",
+        "profile": {
+          "aircraft_type": "FIXED_WING",
+          "cruise_speed_mps": 250,
+          "min_turn_radius_m": 442,
+          "max_climb_angle_deg": 15
+        },
+        "start_pose": {
+          "lon": 116.82168446499925,
+          "lat": 40.23810827713887,
+          "alt_m": 3000,
+          "heading_deg": 45
+        },
+        "mid_waypoints": []
+      }
+    ],
+    "red_forces": {
+      "radars": []
+    },
+    "no_fly_zones": [
+      {
+        "id": "zone_1785981861143",
+        "zone_type": "no_fly",
+        "shape": "circle",
+        "geometry": {
+          "center": [
+            116.05393498799636,
+            39.52362721224397
+          ],
+          "radius_km": 10
+        },
+        "alt_min_m": 0,
+        "alt_max_m": 12000,
+        "height_semantics": "msl"
+      }
+    ],
+    "restricted_zones": [
+      {
+        "id": "rz_1785977075924",
+        "zone_type": "restricted",
+        "shape": "circle",
+        "geometry": {
+          "center": [
+            116.04572696812967,
+            39.52124111666756
+          ],
+          "radius_km": 20
+        },
+        "alt_min_m": 1000,
+        "alt_max_m": 5000,
+        "height_semantics": "msl"
+      }
+    ],
+    "obstacles": [],
+    "terrain": {
+      "source": "path",
+      "path": "phase0/data/pending/china_dem_l12.arpack"
+    },
+    "parameters": {}
+  }
+}

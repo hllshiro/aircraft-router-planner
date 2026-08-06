@@ -1,0 +1,61 @@
+{
+ "schema_version": "0.20",
+ "mission": {
+  "start": {
+   "lon": 115.0,
+   "lat": 39.0,
+   "alt_m": 3000
+  },
+  "target": {
+   "lon": 116.5,
+   "lat": 39.9,
+   "alt_m": 3000
+  },
+  "terrain": {
+   "source": "none"
+  },
+  "no_fly_zones": [
+   {
+    "id": "circ20",
+    "zone_type": "no_fly",
+    "shape": "circle",
+    "geometry": {
+     "center": [
+      115.6,
+      39.45
+     ],
+     "radius_km": 20
+    },
+    "alt_min_m": 0,
+    "alt_max_m": 12000
+   },
+   {
+    "id": "para",
+    "zone_type": "no_fly",
+    "shape": "polygon",
+    "geometry": {
+     "vertices": [
+      [
+       115.85000000000001,
+       39.28
+      ],
+      [
+       116.15,
+       39.28
+      ],
+      [
+       116.32000000000001,
+       39.62
+      ],
+      [
+       116.02000000000001,
+       39.62
+      ]
+     ]
+    },
+    "alt_min_m": 0,
+    "alt_max_m": 12000
+   }
+  ]
+ }
+}
