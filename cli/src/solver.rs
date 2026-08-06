@@ -227,31 +227,49 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
         seg_ends.push(v.start);
         seg_ends.extend(v.mid_waypoints.iter().copied());
         seg_ends.push(target);
-        // 该机受限区墙（底部可通行语义，主管 2026-08-06）：飞行高度落在 restricted
-        // 高度区间内 → 该机 FMM 画墙绕行（水平避开，3000m 场景不再直穿导致锯齿回退）；
+        // 机型平滑参数提前（受限区剖面需要 max_climb：决定下降/爬升距离）
+        let (opts, phys_min_radius_m) = crate::smooth::smooth_options_for(&v.profile, &params_merged);
+        // 该机受限区墙（底部剖面语义，主管 2026-08-06）：飞行高度落在 restricted
+        // 高度区间内 → 若底部通道可行（穿行区地形够低 + 爬升距离足够）则不画墙，
+        // FMM 直穿后由 build_restricted_profiles 生成降高剖面（不绕路）；
+        // 底部被地形挡住 / 太贴边 / 多边形 → 画墙水平绕行（fallback 保底）；
         // 高度在区间外（如低于 alt_min_m 的"底部通道"）→ 不画墙直穿（可通行）。
-        let veh_field: Option<crate::costfield::CostField> =
-            if all_zones.iter().any(|z| restricted_blocks_alt(z, v.alt_m)) {
-                let mut f = field.clone();
-                let g = f.rows;
-                for r in 0..g {
-                    for c in 0..g {
-                        let (lon, lat) = cell_lonlat(r, c, &region, g);
-                        if let Ok(gg) = Geo::new(lon, lat) {
-                            if all_zones
-                                .iter()
-                                .any(|z| restricted_blocks_alt(z, v.alt_m) && zone_contains(z, &gg))
-                            {
-                                f.cost[r * g + c] = f32::INFINITY;
-                            }
+        let veh_field: Option<crate::costfield::CostField> = if all_zones.iter().any(|z| {
+            restricted_detour_required(
+                z,
+                v.alt_m,
+                terrain.as_deref(),
+                &v.start,
+                &target,
+                opts.max_climb_deg,
+            )
+        }) {
+            let mut f = field.clone();
+            let g = f.rows;
+            for r in 0..g {
+                for c in 0..g {
+                    let (lon, lat) = cell_lonlat(r, c, &region, g);
+                    if let Ok(gg) = Geo::new(lon, lat) {
+                        if all_zones.iter().any(|z| {
+                            restricted_detour_required(
+                                z,
+                                v.alt_m,
+                                terrain.as_deref(),
+                                &v.start,
+                                &target,
+                                opts.max_climb_deg,
+                            ) && zone_contains(z, &gg)
+                        }) {
+                            f.cost[r * g + c] = f32::INFINITY;
                         }
                     }
                 }
-                apply_inflation_and_band(&mut f, inflation_cells);
-                Some(f)
-            } else {
-                None
-            };
+            }
+            apply_inflation_and_band(&mut f, inflation_cells);
+            Some(f)
+        } else {
+            None
+        };
         let field_ref = veh_field.as_ref().unwrap_or(&field);
         // 逐段 FMM → 回溯 → 拼接（去重段端点）
         let mut raw_segs: Vec<Path> = Vec::new();
@@ -295,10 +313,18 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
         // 平滑链（≥2 点；VerifyContext 接地形净空 + Zone 高度层）
         // Phase 4 M4：SmoothOptions + A6 物理下限由机型配置派生
         // Phase 4 M5：分段平滑（段端点=必经点保留）→ 拼接 → 全路径终检复验
+        // 受限区底部剖面：每段直穿的 circle restricted → 降高剖面切分
+        // （剖面段跳过平滑链，防止抽稀破坏 15° 斜率）
+        let mut smooth_src: Vec<Path> = Vec::new();
+        let mut profile_mask: Vec<bool> = Vec::new();
+        for seg in &raw_segs {
+            let (sub, mask) = build_restricted_profiles(seg, &all_zones, v.alt_m, opts.max_climb_deg);
+            smooth_src.extend(sub);
+            profile_mask.extend(mask);
+        }
         let mut warnings = Vec::new();
         let mut pts = raw_joined.points.clone();
         if pts.len() >= 2 {
-            let (opts, phys_min_radius_m) = crate::smooth::smooth_options_for(&v.profile, &params_merged);
             let inflation_km = inflation_m / 1000.0;
             let check = make_segment_check(
                 &all_zones,
@@ -316,7 +342,12 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
             // 每段独立平滑（首尾段端点保留——Theta* 截直不得移除必经点）
             let mut smooth_segs = Vec::new();
             let mut seg_warnings = Vec::new();
-            for seg in &raw_segs {
+            for (idx, seg) in smooth_src.iter().enumerate() {
+                if profile_mask[idx] {
+                    // 受限区剖面段：已按 max_climb 生成下降/平飞/爬升，直接采用
+                    smooth_segs.push(seg.clone());
+                    continue;
+                }
                 let result = smooth_path_chain(seg, &chain, &opts, &ctx, Some(phys_min_radius_m));
                 if let Some(w) = &result.warning {
                     seg_warnings.push(w.clone());
@@ -643,6 +674,248 @@ fn restricted_blocks_alt(z: &Zone, alt_m: f64) -> bool {
         && alt_m <= z.alt_max_m
 }
 
+/// 度制近似平面距离（km）。短距离（<100km）内精度足够（剖面可行性采样/锚点用）。
+/// 纬度 111.32 km/°；经度按中纬度 cos 收缩（度单位直接换算，勿再 to_radians）。
+fn dist_km(lon1: f64, lat1: f64, lon2: f64, lat2: f64) -> f64 {
+    let dlat = lat2 - lat1; // 度
+    let dlon = lon2 - lon1; // 度
+    let mlat = ((lat1 + lat2) / 2.0).to_radians();
+    let x = dlon * mlat.cos() * 111.32;
+    let y = dlat * 111.32;
+    (x * x + y * y).sqrt()
+}
+
+/// 该机飞行高度落在 restricted 高度区间内时，是否必须在 FMM 层画墙**水平绕行**：
+/// - 高度在区间外（低于 alt_min_m 的"底部通道"或高于 alt_max_m）→ 不拦截，直穿；
+/// - 高度在区间内 → 优先**降高剖面直穿**（主管 2026-08-06：航路允许变高度，
+///   restricted 底部可通行不应水平绕路）：底部通道（alt_min − 500m）在穿行区地形
+///   足够低（≤ 底部 − 净空）且 start/target 到圆边界留有爬升距离（max_climb 限制）
+///   → 不画墙，FMM 直穿后由 `build_restricted_profiles` 生成下降/平飞/爬升剖面；
+///   - 底部被地形挡住（山区 restricted 降不下去）或太贴边（爬升距离不足）→ 画墙
+///     水平绕行（fallback，保底不产生锯齿/失败路径）。
+/// 多边形 restricted 的底部剖面暂不支持（MVP：仅圆形直穿剖面），画墙绕行。
+#[allow(clippy::too_many_arguments)]
+fn restricted_detour_required(
+    z: &Zone,
+    alt_m: f64,
+    terrain: Option<&dyn TerrainSource>,
+    start: &Geo,
+    target: &Geo,
+    max_climb_deg: f64,
+) -> bool {
+    if !restricted_blocks_alt(z, alt_m) {
+        return false;
+    }
+    let ZoneShape::Circle { center, radius_km } = z.shape else {
+        return true; // 多边形：底部剖面未实现，水平绕行
+    };
+    // 底部剖面爬升距离：max_climb 决定进入/离开前的最小水平距离（沿直线粗判）。
+    // ×1.25 裕量：FMM 锯齿路径"沿路径距离"> 锚点间直线距离 → 直线斜率会大于标称值；
+    // 裕量保证 desc→in / out→climb 直线段斜率严格 < max_climb（verify 用直线距离）。
+    let bottom_alt = (z.alt_min_m - 500.0).max(0.0);
+    let climb_dist = if max_climb_deg > 0.1 {
+        (alt_m - bottom_alt) / max_climb_deg.to_radians().tan() * 1.25
+    } else {
+        f64::INFINITY
+    };
+    // d_in/d_out 单位 km，climb_dist 单位 m → 统一换算后比较
+    let d_in = dist_km(center[0], center[1], start.lon, start.lat) - radius_km;
+    let d_out = dist_km(center[0], center[1], target.lon, target.lat) - radius_km;
+    if d_in * 1000.0 < climb_dist || d_out * 1000.0 < climb_dist {
+        return true; // 太贴边：爬升距离不足 → 画墙绕行
+    }
+    let Some(t) = terrain else {
+        return false; // 无地形（平面 0m）：底部通道恒可行 → 直穿 + 剖面
+    };
+    // 底部通道可行性：穿行区（圆内）地形最高点 + 净空 ≤ 底部高度
+    let clearance = 100.0;
+    let (clon, clat) = (center[0], center[1]);
+    let km_per_deg_lat = 111.32;
+    let km_per_deg_lon = 111.32 * clat.to_radians().cos().max(1e-6);
+    let span_lat = radius_km / km_per_deg_lat;
+    let span_lon = radius_km / km_per_deg_lon;
+    let step = 0.02; // 度 ≈ 2.2km 采样步长（穿行区地形粗判）
+    let mut max_terr: Option<f64> = None;
+    let mut lat = clat - span_lat;
+    while lat <= clat + span_lat {
+        let mut lon = clon - span_lon;
+        while lon <= clon + span_lon {
+            if dist_km(clon, clat, lon, lat) <= radius_km {
+                if let Sample::Land(h) = t.sample_at(lon, lat) {
+                    max_terr = Some(max_terr.map_or(h, |m: f64| m.max(h)));
+                }
+            }
+            lon += step;
+        }
+        lat += step;
+    }
+    match max_terr {
+        Some(h) => h + clearance > bottom_alt, // 地形挡住底部 → 画墙绕行
+        None => false,                          // 圆内无陆地（水面/无数据）→ 直穿
+    }
+}
+
+/// 单个 restricted 的底部剖面参数（沿路径距离 s 定义：下降/平飞/爬升三段）。
+struct RestrictedProfile {
+    s_desc: f64,
+    s_in: f64,
+    s_out: f64,
+    s_climb: f64,
+    bottom_alt: f64,
+}
+
+/// 剖面高度函数：沿路径距离 ss → 高度（米）。
+/// - ss < s_desc：巡航高度 alt_m（未开始下降）；
+/// - s_desc → s_in：线性下降至 bottom_alt（斜率 = max_climb）；
+/// - s_in → s_out：底部平飞（穿 restricted 区间，高度 < alt_min → 可通行）；
+/// - s_out → s_climb：线性爬升回 alt_m；
+/// - ss > s_climb：巡航高度。
+fn profile_alt_at(pr: &RestrictedProfile, ss: f64, alt_m: f64) -> f64 {
+    if ss < pr.s_desc {
+        alt_m
+    } else if ss < pr.s_in {
+        let f = (ss - pr.s_desc) / (pr.s_in - pr.s_desc).max(1e-9);
+        alt_m - f * (alt_m - pr.bottom_alt)
+    } else if ss <= pr.s_out {
+        pr.bottom_alt
+    } else if ss < pr.s_climb {
+        let f = (ss - pr.s_out) / (pr.s_climb - pr.s_out).max(1e-9);
+        pr.bottom_alt + f * (alt_m - pr.bottom_alt)
+    } else {
+        alt_m
+    }
+}
+
+/// 受限区底部剖面（主管 2026-08-06：restricted"底部可通行"——低于 alt_min_m 的高度
+/// 可穿越，且航路规划允许变高度，不应水平绕路）。FMM 直穿圆形 restricted 后，把穿行段
+/// 切成 下降(≤max_climb) → 底部平飞(alt_min−500m) → 爬升(≤max_climb) 高度剖面；
+/// 剖面段压缩为锚点（desc/in/out/climb）并**跳过平滑链**（抽稀会破坏 15° 斜率，
+/// 而锚点间本身是 15° 直线，无需再平滑）。底部不可行（地形过高/太贴边）的 restricted
+/// 已在 FMM 前画墙绕行（`restricted_detour_required`），不会走到这里。
+///
+/// 锚点全部用 **start→target 直线参数化**（解析圆交点、直线插值坐标）——不能沿用
+/// FMM 锯齿路径的沿路径距离（锯齿使路径总长 264km vs 直线 187km，距离严重不成比例），
+/// 且锯齿路径点会让剖面锚点不共线（desc/in/out 折角 → 固定翼转弯半径检查拒绝；
+/// desc→in 直线距离缩短 → 爬升角超 max_climb）。
+/// 返回：切分后的段（[首段, 剖面段, 尾段]）+ 剖面段掩码（true = 跳过平滑直接采用）。
+fn build_restricted_profiles(
+    seg: &Path,
+    zones: &[Zone],
+    alt_m: f64,
+    max_climb_deg: f64,
+) -> (Vec<Path>, Vec<bool>) {
+    let n = seg.points.len();
+    if n < 2 {
+        return (vec![seg.clone()], vec![false]);
+    }
+    // 该机高度拦截的圆形 restricted（底部直穿类型）
+    let hits: Vec<&Zone> = zones
+        .iter()
+        .filter(|z| matches!(z.shape, ZoneShape::Circle { .. }) && restricted_blocks_alt(z, alt_m))
+        .collect();
+    if hits.is_empty() {
+        return (vec![seg.clone()], vec![false]);
+    }
+    let (p0, p1) = (seg.points[0], seg.points[n - 1]);
+    // 平面 km 坐标系（以 p0 为原点，度制近似）
+    let mlat = ((p0.lat + p1.lat) / 2.0).to_radians();
+    let kx = mlat.cos() * 111.32;
+    let ky = 111.32;
+    let dx = (p1.lon - p0.lon) * kx;
+    let dy = (p1.lat - p0.lat) * ky;
+    let l_line_km = (dx * dx + dy * dy).sqrt();
+    if l_line_km < 0.1 {
+        return (vec![seg.clone()], vec![false]);
+    }
+    let line_m = l_line_km * 1000.0;
+    // 每个穿行 restricted：直线与圆交点（解析二次方程）→ 剖面参数（沿直线距离 s）
+    let mut profiles: Vec<RestrictedProfile> = Vec::new();
+    for z in hits {
+        let ZoneShape::Circle { center, radius_km } = z.shape else { continue };
+        let cx = (center[0] - p0.lon) * kx;
+        let cy = (center[1] - p0.lat) * ky;
+        let a = dx * dx + dy * dy;
+        let b = -2.0 * (dx * cx + dy * cy);
+        let c = cx * cx + cy * cy - radius_km * radius_km;
+        let disc = b * b - 4.0 * a * c;
+        if disc <= 0.0 {
+            continue; // 直线不穿圆
+        }
+        let sq = disc.sqrt();
+        let u1 = (-b - sq) / (2.0 * a);
+        let u2 = (-b + sq) / (2.0 * a);
+        let (u_in, u_out) = (u1.min(u2), u1.max(u2));
+        if u_out <= 0.0 || u_in >= 1.0 {
+            continue; // 圆在线段端点之外，FMM 直穿不经过该圆
+        }
+        let bottom_alt = (z.alt_min_m - 500.0).max(0.0);
+        // ×1.25 裕量（与 restricted_detour_required 一致）：即使直线插值仍有微小
+        // 近似误差，也保证 desc→in / out→climb 直线爬升角严格 ≤ max_climb。
+        let climb_dist_m = if max_climb_deg > 0.1 {
+            ((alt_m - bottom_alt).max(0.0)) / max_climb_deg.to_radians().tan() * 1.25
+        } else {
+            f64::INFINITY
+        };
+        let u_desc = (u_in - climb_dist_m / line_m).max(0.0);
+        let u_climb = (u_out + climb_dist_m / line_m).min(1.0);
+        profiles.push(RestrictedProfile {
+            s_desc: u_desc * line_m,
+            s_in: u_in * line_m,
+            s_out: u_out * line_m,
+            s_climb: u_climb * line_m,
+            bottom_alt,
+        });
+    }
+    if profiles.is_empty() {
+        return (vec![seg.clone()], vec![false]);
+    }
+    // 锚点（直线插值坐标，全部共线；kind: 0=desc 1=in 2=out 3=climb）
+    let mut us: Vec<(f64, f64, f64, u8)> = Vec::new(); // (u, lon, lat, kind)
+    for pr in &profiles {
+        for (su, kind) in [
+            (pr.s_desc / line_m, 0u8),
+            (pr.s_in / line_m, 1),
+            (pr.s_out / line_m, 2),
+            (pr.s_climb / line_m, 3),
+        ] {
+            let lon = p0.lon + (p1.lon - p0.lon) * su;
+            let lat = p0.lat + (p1.lat - p0.lat) * su;
+            us.push((su, lon, lat, kind));
+        }
+    }
+    us.sort_by(|x, y| x.0.partial_cmp(&y.0).unwrap());
+    us.dedup_by(|x, y| (x.0 - y.0).abs() < 1e-6);
+    // 剖面区间：所有 restricted 的 desc 最小值 ~ climb 最大值
+    let u_desc_min = profiles.iter().map(|p| p.s_desc / line_m).fold(f64::MAX, f64::min);
+    let u_climb_max = profiles.iter().map(|p| p.s_climb / line_m).fold(0.0, f64::max);
+    let pt_at = |u: f64| -> RouterPoint {
+        RouterPoint::new(
+            p0.lon + (p1.lon - p0.lon) * u,
+            p0.lat + (p1.lat - p0.lat) * u,
+            alt_m,
+        )
+    };
+    // 首段：start → desc_min（平飞 3000m，正常平滑拉直）
+    let seg0 = Path::new(vec![p0, pt_at(u_desc_min)]);
+    // 剖面段：desc_min..climb_max 内全部锚点（每个 restricted 的 desc/in/out/climb 保留，
+    // 保证每个圆进入时高度已低于 alt_min；多 restricted 重叠取更低高度）
+    let prof_pts: Vec<RouterPoint> = us
+        .iter()
+        .filter(|(su, _, _, _)| *su >= u_desc_min - 1e-9 && *su <= u_climb_max + 1e-9)
+        .map(|(su, lon, lat, _)| {
+            let mut alt = alt_m;
+            for pr in &profiles {
+                alt = alt.min(profile_alt_at(pr, su * line_m, alt_m));
+            }
+            RouterPoint::new(*lon, *lat, alt)
+        })
+        .collect();
+    let seg1 = Path::new(prof_pts);
+    // 尾段：climb_max → target（平飞 3000m）
+    let seg2 = Path::new(vec![pt_at(u_climb_max), p1]);
+    (vec![seg0, seg1, seg2], vec![false, true, false])
+}
+
 /// 禁飞区墙膨胀 + 过渡带软罚（5c + 5c2）：
 /// - 5c：NoFly/Obstacle 硬墙向外膨胀 inflation_cells 格（考虑飞机机动留转弯空间，
 ///   主管 2026-08-06：绕飞太贴边→考虑飞机机动——绕行需留物理转弯空间）；
@@ -850,7 +1123,8 @@ mod tests {
     #[test]
     fn restricted_zone_height_layer_blocks_or_passes() {
         // 底部可通行的限飞区（主管 2026-08-06）：restricted 圆 [2000,5000]msl 挡在
-        // start→target 直线上。3000m 飞行高度在区间内 → FMM 画墙绕行（平滑，非锯齿）；
+        // start→target 直线上。3000m 飞行高度在区间内、底部通道地形可行 → **降高剖面
+        // 直穿**（下降→底部平飞→爬升，不水平绕路——航路允许变高度）；
         // 1500m 在区间外（底部通道）→ 直穿（不绕行）。
         let mk = |alt: f64| {
             format!(
@@ -867,15 +1141,25 @@ mod tests {
                 }}"#
             )
         };
-        // 3000m：区间内 → 平滑绕行（不得回退密集锯齿）
+        // 3000m：区间内 + 底部可行 → 降高剖面直穿（不再水平绕行；不得回退密集锯齿）
         let input = parse(&mk(3000.0));
         let out = solve(&input, &SolveParams::default(), 42).unwrap();
         let v = &out.vehicles[0];
         assert_eq!(v.status, "planned");
         assert!(
             v.path.len() <= 10,
-            "3000m 遇 restricted 应平滑绕行，实际 {} 点（锯齿回退）",
+            "3000m 剖面直穿应 ≈6 点（desc/in/out/climb + 端点），实际 {} 点",
             v.path.len()
+        );
+        assert!(
+            v.distance_m < 190_000.0,
+            "3000m 底部剖面直穿距离应 ≈187km（不绕行），实际 {}km",
+            v.distance_m / 1000.0
+        );
+        assert!(
+            v.path.iter().any(|p| p.alt_m < 2000.0),
+            "3000m 剖面应在 restricted 穿行区降高到 <2000m，实际最小高度 {}m",
+            v.path.iter().map(|p| p.alt_m).fold(f64::MAX, f64::min)
         );
         assert!(
             v.warnings.iter().all(|w| !w.contains("smoothing_failed")),
