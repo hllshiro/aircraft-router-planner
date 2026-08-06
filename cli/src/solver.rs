@@ -245,6 +245,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
         let mut raw_joined: Path = Path::new(Vec::new());
         let mut force_restricted_wall = false;
         'fmm_attempt: for _attempt in 0..2 {
+            eprintln!("[debug] fmm_attempt {} force_wall={}", _attempt, force_restricted_wall);
             let restricted_wall_for = |z: &Zone| {
                 force_restricted_wall
                     || restricted_detour_required(
@@ -734,7 +735,7 @@ fn restricted_pass_alt(
     let ZoneShape::Circle { center, radius_km } = z.shape else {
         return None;
     };
-    let bottom = (z.alt_min_m - 500.0).max(0.0);
+    let bottom = z.alt_min_m - 500.0;
     let top = z.alt_max_m + 500.0;
     let climb_dist = |pass: f64| -> f64 {
         if max_climb_deg > 0.1 {
@@ -749,8 +750,13 @@ fn restricted_pass_alt(
     let fit = |pass: f64| d_in * 1000.0 >= climb_dist(pass) && d_out * 1000.0 >= climb_dist(pass);
     // 顶部绕飞可行性：爬升距离 + 升限（alt_max + 500 ≤ ceiling）
     let top_ok = fit(top) && ceiling_m.map_or(true, |c| top <= c);
-    // 底部穿行可行性：爬升距离 + 穿行带（直线穿圆段）地形 ≤ 底部 − 净空
-    let bottom_ok = fit(bottom) && bottom_terrain_ok(z, terrain, bottom, start, target);
+    // 底部穿行可行性：爬升距离 + **底部严格低于 alt_min**（穿行高度必须在 restricted
+    // 高度区间外；alt_min=0 时 bottom=-500 负高不可行——0m 仍在 [0,alt_max] 区间内且
+    // 撞地形）+ 穿行带（直线穿圆段）地形 ≤ 底部 − 净空
+    let bottom_ok = bottom >= 0.0
+        && bottom < z.alt_min_m
+        && fit(bottom)
+        && bottom_terrain_ok(z, terrain, bottom, start, target);
     match (bottom_ok, top_ok) {
         (true, _) => Some(bottom), // 底部垂直机动总量更小 → 恒更优（显式代价比较结论）
         (false, true) => Some(top), // 底部不可行 → 顶部绕飞（优于水平绕行：水平距离不增加）
@@ -902,6 +908,7 @@ fn build_restricted_profiles(
     let need_wall = false;
     // 逐个 hit：在当前的尾段上找穿行区间 → 切 [首段, 剖面段, 尾段]（多 restricted 顺序处理）
     for z in hits {
+        eprintln!("[debug] build hit {}", z.id);
         let tail = out_segs.last().unwrap();
         let ZoneShape::Circle { center, radius_km } = z.shape else {
             continue;
@@ -1426,6 +1433,31 @@ mod tests {
         );
         // 巡航 1500m（区间外底部通道）→ 不拦截（restricted_blocks_alt false）
         assert!(!restricted_blocks_alt(&z, 1500.0));
+    }
+
+    #[test]
+    fn restricted_pass_alt_zero_alt_min_forces_top() {
+        // 主管 2026-08-06 场景：restricted [0,5000]msl → bottom = -500（负高）不可行
+        //（0m 仍在 [0,5000] 区间内且撞地形）→ 必须顶部绕飞 5500m（而非 0m 剖面——
+        // 0m 穿行被 verify alt band + 地形净空拒绝 → 回退锯齿）。
+        let z = Zone {
+            id: "rz".into(),
+            zone_type: crate::config::ZoneType::Restricted,
+            shape: ZoneShape::Circle {
+                center: [115.1103270025858, 39.570299948815645],
+                radius_km: 20.0,
+            },
+            alt_min_m: 0.0,
+            alt_max_m: 5000.0,
+            height_semantics: crate::config::HeightSemantics::Msl,
+        };
+        let start = Geo::new(116.82168446499925, 40.23810827713887).unwrap();
+        let target = Geo::new(113.93832638409175, 38.5937625849369).unwrap();
+        // 无地形：底部 -500 负高 → 不可行 → 顶部 5500（不能返回 0m）
+        assert_eq!(
+            restricted_pass_alt(&z, 3000.0, None, None, &start, &target, 15.0),
+            Some(5500.0)
+        );
     }
 
     #[test]
