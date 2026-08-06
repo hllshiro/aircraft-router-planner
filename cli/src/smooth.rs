@@ -547,7 +547,8 @@ pub struct VerifyContext<'a> {
 ///
 /// - 采样密度：每段等距 `verify_seg_samples` 点（段内最坏情况，端点+中点+加密）；
 /// - 地形净空：Land → z ≥ h + clearance；Water/Lake → 水面（净空 0 起算）；
-///   NoData → 保守不通过（净空不确定，warning 注明）；OutOfBounds → 不通过（越界墙）；
+///   NoData → 降级警告（空洞策略：净空不确定但不阻断，调用方汇总进 degradations）；
+///   OutOfBounds → 不通过（越界墙）；
 /// - 转弯半径：三点外接圆半径（等距平面近似），≥ opts.turn_radius_m（仅固定翼）；
 /// - 转角：相邻段航向差 ≤ opts.max_turn_deg（仅固定翼）；
 /// - 爬升角：段高度差/水平距离 ≤ tan(max_climb_deg)（仅固定翼）；
@@ -750,11 +751,13 @@ pub fn verify_path(
                         }
                     }
                     crate::terrain::Sample::NoData => {
+                        // 空洞策略（主管 2026-08-04）：不设数据合格判断，对任意空洞形态
+                        // 给出可用结果，最坏降级警告进 stats.degradations。空洞处高度未知
+                        // 不阻断航路——固定端点（start/target）落在空洞时硬拒会让全链被拒、
+                        // 回退密集网格楼梯（主管 2026-08-06 zigzag8：渤海/内蒙 NoData 洞
+                        // → 1196 点锯齿）。降级警告由调用方汇总进 degradations。
                         rep.warnings.push(format!(
-                            "sample (lon={lon:.4},lat={lat:.4}) NoData terrain: clearance unknown (conservative fail)"
-                        ));
-                        rep.issues.push(format!(
-                            "sample (lon={lon:.4},lat={lat:.4}) NoData terrain: clearance unknown"
+                            "sample (lon={lon:.4},lat={lat:.4}) NoData terrain: clearance unknown (degraded)"
                         ));
                     }
                     crate::terrain::Sample::OutOfBounds => {
@@ -1182,8 +1185,9 @@ mod chain_tests {
     }
 
     #[test]
-    fn chain_rollback_on_verify_fail() {
-        // 地形全 NoData → 净空保守 fail → 全链回退 → smoothing_failed 告警
+    fn chain_nodata_degrades_not_fails() {
+        // 地形全 NoData → 空洞策略（主管 2026-08-04）：净空不确定但不阻断航路，
+        // 降级警告（不产生 smoothing_failed 回退楼梯；主管 2026-08-06 zigzag8 根因）。
         struct NoDataTerrain;
         impl TerrainSource for NoDataTerrain {
             fn height_at(&self, _lon: f64, _lat: f64) -> Option<f64> {
@@ -1211,15 +1215,20 @@ mod chain_tests {
         };
         let input = Path::new(vec![
             PathPoint::new(0.0, 0.0, 500.0),
+            PathPoint::new(0.5, 0.5, 500.0),
             PathPoint::new(1.0, 0.0, 500.0),
         ]);
         let check = |_: f64, _: f64, _: f64, _: f64, _: f64, _: f64| true;
         let chain = default_chain(&opts, &check);
         let out = smooth_path_chain(&input, &chain, &opts, &ctx, None);
-        assert!(out.applied.is_empty());
-        assert_eq!(out.warning.as_deref(), Some("smoothing_failed: no smoothed stage passed full verification"));
-        // 回退到原始路径（宁丑勿违）
-        assert_eq!(out.path, input);
+        // NoData 不再阻断：链应应用至少一个阶段（不再回退 smoothing_failed 楼梯）
+        assert!(!out.applied.is_empty(), "applied: {:?}", out.applied);
+        assert_eq!(out.warning, None, "NoData 地形不应 smoothing_failed");
+        assert!(
+            out.verify.warnings.iter().any(|w| w.contains("NoData terrain")),
+            "应保留 NoData 降级警告，实际 {:?}",
+            out.verify.warnings
+        );
     }
 
     #[test]

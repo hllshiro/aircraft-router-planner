@@ -408,6 +408,18 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
             }
             // 拼接 + 全路径终检（段间转角/整路径威胁在拼接后才可见）
             let joined = join_paths(&smooth_segs);
+            // 段端点 = 起点 + 必经点 + 目标（直线替代用；必经点硬约束，任何平滑不得移除）
+            let mut straight_pts: Vec<crate::path::PathPoint> = Vec::new();
+            for g in &seg_ends {
+                let p = crate::path::PathPoint::new(g.lon, g.lat, v.alt_m);
+                let dup = straight_pts.last().map_or(false, |q| {
+                    (q.lon - p.lon).abs() < 1e-12 && (q.lat - p.lat).abs() < 1e-12
+                });
+                if !dup {
+                    straight_pts.push(p);
+                }
+            }
+            let straight = Path::new(straight_pts);
             let final_rep = crate::smooth::verify_path(
                 &joined,
                 None,
@@ -425,6 +437,44 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                 warnings.push(msg.into());
                 degradations.push(msg.into());
                 warnings.extend(final_rep.warnings.iter().cloned());
+                // 空洞/代价场网格伪影兜底（空洞策略 2026-08-04：可用结果 + 降级警告进
+                // stats.degradations）：FMM 对 NoData 5x 代价区域绕行 → raw 是密集网格
+                // 楼梯（本场景绕渤海 NoData 44km 侧偏，1138km vs 直线 784km）→ Theta*
+                // 拉直被弦高门（相对 raw 100m）拒绝 → 全链失败回退楼梯。若 raw 显著长于
+                // 分段直线（网格伪影而非真实绕障）且直线通过完整几何复验（不穿硬墙/不超
+                // 机动/净空满足，NoData 已降级为警告）→ 交付直线（必经点保留）+ 降级警告。
+                let cur_dist = Path::new(pts.clone()).length_m();
+                // 不穿雷达深区（≥0.7×有效半径）才走通用兜底——穿雷达由下方雷达专用
+                // 直线直穿替代处理（主管 2026-08-05 拍板语义，保持雷达行为不变）。
+                let threat_ok = straight.points.iter().all(|p| {
+                    threat.static_penetration(p.lon, p.lat, p.alt_m) >= 0.7
+                });
+                if straight.points.len() >= 2
+                    && cur_dist > straight.length_m() * 1.05 + 1_000.0
+                    && threat_ok
+                {
+                    let rep_s = crate::smooth::verify_path(
+                        &straight,
+                        None,
+                        &opts,
+                        &ctx,
+                        Some(phys_min_radius_m),
+                    );
+                    if rep_s.ok {
+                        pts = straight.points.clone();
+                        // 直线替代成功 → 最终交付已平滑，撤销 smoothing_failed 误报
+                        warnings.retain(|w| !w.starts_with("smoothing_failed"));
+                        degradations.retain(|d| !d.starts_with("smoothing_failed"));
+                        warnings.extend(rep_s.warnings.iter().cloned());
+                        let msg2 = format!(
+                            "raw FMM grid artifact: straight-line transit adopted (terrain NoData degraded)"
+                        );
+                        if !degradations.contains(&msg2) {
+                            degradations.push(msg2.clone());
+                        }
+                        warnings.push(msg2);
+                    }
+                }
             }
             // 雷达 degradation：从终检 issues + 终检 warnings + 段警告提取（雷达软约束，去重）
             for i in final_rep
@@ -455,19 +505,6 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                     }
                 }
                 if rep_now.over_threshold && penetrates {
-                    let mut straight_pts: Vec<crate::path::PathPoint> = Vec::new();
-                    // 段端点 = 起点 + 必经点 + 目标（raw_segs 在 fmm_attempt 循环内，
-                    // 此处用等价端点序列；直线直穿保留必经点）
-                    for g in &seg_ends {
-                        let p = crate::path::PathPoint::new(g.lon, g.lat, v.alt_m);
-                        let dup = straight_pts.last().map_or(false, |q| {
-                            (q.lon - p.lon).abs() < 1e-12 && (q.lat - p.lat).abs() < 1e-12
-                        });
-                        if !dup {
-                            straight_pts.push(p);
-                        }
-                    }
-                    let straight = Path::new(straight_pts);
                     let cur_dist = Path::new(pts.clone()).length_m();
                     if straight.points.len() >= 2
                         && cur_dist > straight.length_m() * 1.05 + 1_000.0
@@ -480,7 +517,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                             Some(phys_min_radius_m),
                         );
                         if rep_s.ok {
-                            pts = straight.points;
+                            pts = straight.points.clone();
                             // 直线替代成功 → 最终交付已平滑，撤销 smoothing_failed 误报
                             warnings.retain(|w| !w.starts_with("smoothing_failed"));
                             degradations.retain(|d| !d.starts_with("smoothing_failed"));
@@ -495,6 +532,20 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                         }
                     }
                 }
+            }
+        }
+        // NoData 退化汇总（空洞策略 2026-08-04：最坏降级警告进 stats.degradations）：
+        // verify 对空洞只降级警告（不阻断），此处把沿途 NoData 采样汇总为一条 degradation。
+        let nodata_n = warnings
+            .iter()
+            .filter(|w| w.contains("NoData terrain"))
+            .count();
+        if nodata_n > 0 {
+            let msg = format!(
+                "terrain: {nodata_n} NoData sample(s) along route, clearance unknown (degraded)"
+            );
+            if !degradations.contains(&msg) {
+                degradations.push(msg);
             }
         }
         let dist = Path::new(pts.clone()).length_m();
@@ -1934,6 +1985,66 @@ mod tests {
         }
         // 旋翼机（uav2）无 Dubins 链（急转合法）——路径点应不因拟合失败回退
         assert!(out.vehicles[1].warnings.is_empty(), "旋翼机不应有 smoothing 告警");
+    }
+
+    #[test]
+    fn zigzag8_nodata_endpoints_do_not_staircase() {
+        // 主管 2026-08-06 输入：无 zone/雷达，China DEM L12 真实地形。
+        // start (118.10,38.57) 近渤海、target (111.78,43.79) 内蒙——两点均落在
+        // china_dem_l12 的 NoData 空洞（起点带 t∈[0,0.062]、终点带 t∈[0.983,1.0]）。
+        // 空洞策略（2026-08-04 拍板）：不设数据合格判断，对任意空洞给出可用结果，
+        // 最坏降级警告进 stats.degradations。
+        // 修复前：verify 对 NoData 保守硬拒 → 全链失败 → 回退 1196 点网格楼梯
+        // 1138km + smoothing_failed（密集锯齿）。
+        // 修复后：NoData 降级警告 + 网格伪影直线兜底 → 平滑直线 ~784km。
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+        let cand = root.join("phase0/data/pending/china_dem_l12.arpack");
+        if !cand.exists() {
+            eprintln!("skip zigzag8: real terrain missing ({})", cand.display());
+            return;
+        }
+        let s = r#"{
+            "schema_version":"0.20",
+            "mission":{
+                "start":{"lon":118.09890161274431,"lat":38.5694180755746,"alt_m":1000},
+                "target":{"lon":111.78290034358717,"lat":43.78646838602853,"alt_m":3000},
+                "vehicles":[{"id":"v1","profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":250,
+                    "min_turn_radius_m":442,"max_climb_angle_deg":15},
+                    "start_pose":{"lon":118.09890161274431,"lat":38.5694180755746,"alt_m":3000,"heading_deg":45},
+                    "mid_waypoints":[]}],
+                "red_forces":{"radars":[]},
+                "no_fly_zones":[],"restricted_zones":[],"obstacles":[],
+                "terrain":{"source":"path","path":"__P__"},
+                "parameters":{}
+            }
+        }"#;
+        let s = s.replace("__P__", &cand.to_string_lossy().replace('\\', "\\\\"));
+        let input = parse(&s);
+        let out = solve(&input, &SolveParams::default(), 0).unwrap();
+        let v = &out.vehicles[0];
+        assert_eq!(v.status, "planned");
+        assert!(
+            v.warnings.iter().all(|w| !w.contains("smoothing_failed")),
+            "NoData 空洞不应 smoothing_failed，实际 {:?}",
+            v.warnings
+        );
+        assert!(
+            v.path.len() <= 10,
+            "应交付平滑直线（≈2 点），实际 {} 点",
+            v.path.len()
+        );
+        // 直线 783.9km：交付距离应接近直线，远小于 raw 楼梯 1138km
+        assert!(
+            v.distance_m < 800_000.0,
+            "应 ≈ 直线 784km，实际 {}km",
+            v.distance_m / 1000.0
+        );
+        // 空洞策略：NoData 降级警告进 stats.degradations
+        assert!(
+            out.stats.degradations.iter().any(|d| d.contains("NoData")),
+            "degradations 应含 NoData 降级，实际 {:?}",
+            out.stats.degradations
+        );
     }
 }
 
