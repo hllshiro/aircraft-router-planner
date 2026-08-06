@@ -92,7 +92,9 @@ function GroundClickPlane({
 
   return (
     <mesh rotation={[-Math.PI / 2, 0, 0]} visible={active} onClick={handleClick}>
-      <planeGeometry args={[500000, 500000]} />
+      {/* 点击平面 ±600km（相对 start 原点）：500×500 太小，start→target 超 250km
+          时 target 附近点不到（主管 2026-08-06） */}
+      <planeGeometry args={[1200000, 1200000]} />
       <meshBasicMaterial visible={false} />
     </mesh>
   );

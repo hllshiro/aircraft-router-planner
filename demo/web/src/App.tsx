@@ -36,7 +36,8 @@ export default function App() {
     let cancelled = false;
     setTerrainError(null);
     const bbox = sceneBounds(config);
-    fetchTerrain(t.path, bbox, [64, 64])
+    // 96×96：跨度变大（sceneBounds 1.4 倍自适应）后保持地形精细度（server 上限 128）
+    fetchTerrain(t.path, bbox, [96, 96])
       .then((d) => {
         if (!cancelled) setTerrainData(d);
       })
