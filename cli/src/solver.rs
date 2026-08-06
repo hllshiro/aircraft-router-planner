@@ -917,22 +917,34 @@ fn build_restricted_profiles(
             let pa = &tail.points[i];
             let pb = &tail.points[i + 1];
             let d = crate::config::zone_segment_clearance_km(pa.lon, pa.lat, pb.lon, pb.lat, z);
-            let a_in = dist_km(pa.lon, pa.lat, cx, cy) < r;
-            let b_in = dist_km(pb.lon, pb.lat, cx, cy) < r;
+            // 端点 inside 判定与 verify（zone_contains_at）同口径：Geo::distance_m
+            // （haversine）≤ r——dist_km（平面近似）在圆边界处有 ~0.1% 偏差，
+            // 边界点（如距圆心 20.02 vs 19.99km）会漏判进入 → 首段含圆内 3000m 违规。
+            let a_in = Geo::new(pa.lon, pa.lat)
+                .map_or(false, |g| crate::config::zone_contains(z, &g));
+            let b_in = Geo::new(pb.lon, pb.lat)
+                .map_or(false, |g| crate::config::zone_contains(z, &g));
             let crossing = d <= 1e-9 || a_in || b_in; // 段与圆相交/端点在内
             if crossing && !in_circle {
-                in_idx = Some(i);
+                // 圆凸：in_idx 只取第一次进入（raw 锯齿在圆边界摆动时可能"出圆→再进"，
+                // 覆盖 in_idx 会把剖面起点推迟到最后一个进入点 → 首段含圆内 3000m 违规）
+                if in_idx.is_none() {
+                    in_idx = Some(i);
+                }
                 in_circle = true;
             }
             if in_circle {
                 if b_in {
                     out_idx = Some(i + 1); // 圆内区间持续（终点更新）
-                } else if !crossing && a_in {
-                    // 段从圆内穿出：终点仍是圆内
-                    out_idx = Some(i + 1);
                 } else if !crossing {
-                    // 段已完全在圆外 → 圆凸，区间结束
+                    // 段已完全在圆外 → 圆凸，区间结束（out = 段起点，圆外）
+                    out_idx = Some(i);
                     in_circle = false;
+                } else {
+                    // crossing && !b_in：段从圆内穿出 → out = 段终点（圆外点）。
+                    // out 必须是圆外点——否则 out→climb 爬升过渡从圆内开始，
+                    // 高度 500→1000+ 进入 restricted 区间违规（verify alt band 拒）。
+                    out_idx = Some(i + 1);
                 }
             }
         }
