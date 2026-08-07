@@ -166,7 +166,8 @@ pub struct VehicleProfile {
     /// 速度范围 [v_min, v_max] m/s（十轮主管裁决：速度为核心输入）
     #[serde(default)]
     pub speed_range_mps: Option<[f64; 2]>,
-    /// 最小转弯半径 m（缺省默认参数表；A6 自洽：r_min ≥ v²/(g·tan φ_max)）
+    /// 最小转弯半径 m（缺省默认参数表；A6 自洽：r_min ≥ v²/(g·tan φ_max)，
+    /// 2026-08-07 主管放宽：显式半径信任，转弯段降速实现，不再按巡航物理下限拒）
     #[serde(default)]
     pub min_turn_radius_m: Option<f64>,
     /// 最大爬升角 °
@@ -735,10 +736,13 @@ fn validate_vehicle(v: &VehicleInput) -> Result<(), AppError> {
             return Err(AppError::InputInvalid(InputInvalidReason::VehicleParamsInconsistent));
         }
     }
-    // A6 物理自洽（十二轮共识）：r_min ≥ v²/(g·tan φ_max)，输入同时提供时校验
-    if let (Some(v), Some(bank), Some(r)) = (speed, p.max_bank_deg, p.min_turn_radius_m) {
-        let r_min = DefaultParams::physical_turn_radius_m(v, bank);
-        if r < r_min * 0.999 {
+    // A6 物理自洽（十二轮共识，2026-08-07 主管放宽）：r_min ≥ v²/(g·tan φ_max)。
+    // 速度非锁定——极端条件下转弯段可降速（v_turn = sqrt(r·g·tanφ)）实现小半径，
+    // 显式 min_turn_radius_m 不再按巡航速度物理下限拒绝（solver 信任输入并输出降速
+    // 提示；smooth_options_for 的 A6 有效下限 = min(phys, turn_radius) 恒满足）。
+    // 仅保留正数防线：固定翼 r < 1m 无物理意义（旋翼机 r→0 合法，悬停原地转向）。
+    if let (Some(_v), Some(_bank), Some(r)) = (speed, p.max_bank_deg, p.min_turn_radius_m) {
+        if p.aircraft_type == AircraftType::FixedWing && r < 1.0 {
             return Err(AppError::InputInvalid(InputInvalidReason::VehicleParamsInconsistent));
         }
     }
@@ -1122,8 +1126,9 @@ mod tests {
     }
 
     #[test]
-    fn a6_physical_self_consistency() {
-        // 250 m/s @ 30° bank → r_min ≈ 11045m；输入 5000m 应拒绝
+    fn a6_physical_self_consistency_relaxed() {
+        // 2026-08-07 主管放宽：250 m/s @ 30° bank → r_min ≈ 11045m；
+        // 显式 5000m < r_min 不再拒绝（转弯段降速实现，solver 输出降速提示）。
         let r_min = DefaultParams::physical_turn_radius_m(250.0, 30.0);
         assert!((r_min - 11_045.0).abs() < 10.0, "r_min={r_min}");
         let s = r#"{
@@ -1139,10 +1144,40 @@ mod tests {
             }
         }"#;
         let input = Input::from_json_str(s).unwrap();
-        match validate(&input) {
+        validate(&input).expect("A6 放宽：显式半径信任，不再拒绝");
+
+        // 正数防线仍生效：固定翼 r=0（<1m）拒绝；旋翼机 r→0 合法（悬停原地转向）
+        let bad = r#"{
+            "schema_version":"0.20",
+            "mission":{
+                "start":{"lon":116.30,"lat":39.90,"alt_m":500},
+                "target":{"lon":117.10,"lat":40.20,"alt_m":1000},
+                "vehicles":[
+                    {"id":"v1","profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":250,
+                                "max_bank_deg":30,"min_turn_radius_m":0},
+                     "start_pose":{"lon":116.3,"lat":39.9,"alt_m":500}}
+                ]
+            }
+        }"#;
+        let bad_input = Input::from_json_str(bad).unwrap();
+        match validate(&bad_input) {
             Err(AppError::InputInvalid(InputInvalidReason::VehicleParamsInconsistent)) => {}
-            other => panic!("expected A6 reject, got {other:?}"),
+            other => panic!("expected reject for fixed-wing r<=0, got {other:?}"),
         }
+        let ok_rotor = r#"{
+            "schema_version":"0.20",
+            "mission":{
+                "start":{"lon":116.30,"lat":39.90,"alt_m":500},
+                "target":{"lon":117.10,"lat":40.20,"alt_m":1000},
+                "vehicles":[
+                    {"id":"v1","profile":{"aircraft_type":"ROTORCRAFT","cruise_speed_mps":60,
+                                "max_bank_deg":30,"min_turn_radius_m":0},
+                     "start_pose":{"lon":116.3,"lat":39.9,"alt_m":500}}
+                ]
+            }
+        }"#;
+        let rotor_input = Input::from_json_str(ok_rotor).unwrap();
+        validate(&rotor_input).expect("旋翼机 r=0 合法（悬停原地转向）");
     }
 
     #[test]

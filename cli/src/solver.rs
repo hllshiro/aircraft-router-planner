@@ -188,17 +188,18 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
     let nofly = circle_index(&all_zones.iter().collect::<Vec<_>>());
 
     // 4b. 参数合并 + 禁飞区膨胀距离（主管 2026-08-06：绕飞太贴边→考虑飞机机动）。
-    //     物理转弯半径 r = v²/(g·tanφ)（与 smooth_options_for 同式）；绕行弧需要 ≥r 的
-    //     转弯空间，把 NoFly/Obstacle 硬墙向外膨胀 max(0.5×r)（clamp [2km, 10km]）——
-    //     FMM 绕行自然远离边界，Dubins 转弯弧留足空间（不再因贴边急弯被物理复验拒绝）。
+    //     规划转弯半径 r = turn_radius（信任输入/默认表，2026-08-07 起不再钳巡航物理
+    //     下限；小半径经转弯段降速实现）；绕行弧需要 ≥r 的转弯空间，把 NoFly/Obstacle
+    //     硬墙向外膨胀 max(0.5×r)（clamp [2km, 10km]）——FMM 绕行自然远离边界，
+    //     Dubins 转弯弧留足空间（不再因贴边急弯被物理复验拒绝）。
     let params_merged = crate::config::DefaultParams::default().merge(&input.mission.parameters);
     let mut degradations = Vec::new();
     radar_param_degradations(input, &mut degradations);
     let inflation_m = specs
         .iter()
         .map(|v| {
-            let (_opts, phys) = crate::smooth::smooth_options_for(&v.profile, &params_merged);
-            (phys * 0.5).clamp(2_000.0, 10_000.0)
+            let (opts, _phys) = crate::smooth::smooth_options_for(&v.profile, &params_merged);
+            (opts.turn_radius_m * 0.5).clamp(2_000.0, 10_000.0)
         })
         .fold(0.0f64, f64::max);
     let inflation_km = inflation_m / 1000.0;
@@ -405,6 +406,33 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
             break;
         }
         let mut warnings = Vec::new();
+        // 降速提示（主管 2026-08-07：速度非锁定，转弯段可降速实现小半径）：
+        // turn_radius < 巡航物理下限 → 转弯段需降到 v_turn = sqrt(r·g·tanφ)。
+        if opts.turn_radius_m > 0.0 {
+            let bank = v
+                .profile
+                .max_bank_deg
+                .unwrap_or(params_merged.default_max_bank_deg);
+            let v_turn = (opts.turn_radius_m * 9.81 * bank.to_radians().tan()).sqrt();
+            let cruise_v = v
+                .profile
+                .cruise_speed_mps
+                .or_else(|| v.profile.speed_range_mps.map(|[a, b]| (a + b) / 2.0))
+                .unwrap_or(match v.profile.aircraft_type {
+                    crate::config::AircraftType::FixedWing => {
+                        params_merged.default_fixed_wing_speed_mps
+                    }
+                    crate::config::AircraftType::Rotorcraft => {
+                        params_merged.default_rotorcraft_speed_mps
+                    }
+                });
+            if v_turn < cruise_v - 1e-9 {
+                warnings.push(format!(
+                    "turn radius {:.0}m: turn segments require speed reduction {:.0}->{:.0} m/s",
+                    opts.turn_radius_m, cruise_v, v_turn
+                ));
+            }
+        }
         let mut pts = raw_joined.points.clone();
         if pts.len() >= 2 {
             let check = make_segment_check(
@@ -495,7 +523,8 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
             );
             if final_rep.ok {
                 pts = joined.points;
-                warnings = seg_warnings.clone();
+                // extend 而非覆盖：保留 profile 级降速提示（turn_radius 信任输入）
+                warnings.extend(seg_warnings.iter().cloned());
             } else {
                 if std::env::var_os("ARP_DEBUG_SMOOTH").is_some() {
                     eprintln!(
