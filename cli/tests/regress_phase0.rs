@@ -178,6 +178,23 @@ fn phase0_feedback_inputs_regression() {
         // 有路径则断言不穿 zone（核心回归语义）
         assert_path_clear(&input, &out, name);
 
+        // zigzag11（2026-08-07 主管）：双 100km 雷达 + no_fly 多边形 + no_fly 圆 +
+        // 双 restricted，raw 1755 点网格楼梯回退（smoothing_failed）。修复：段边界
+        // 入口航向约束 Theta* 首跳（seg3 out→climb 与 seg4 climb→A 夹角 61.94°>
+        // 60°→ 拼接后终检拒→全链回退）→ 10 点平滑交付。强断言防锯齿复发。
+        if name == "zigzag11.json" {
+            let v = &out.vehicles[0];
+            assert!(
+                v.path.len() < 30,
+                "{name}: still staircase dense ({} pts), entry_heading regression",
+                v.path.len()
+            );
+            assert!(
+                !v.warnings.iter().any(|w| w.contains("smoothing_failed")),
+                "{name}: smoothing_failed re-appeared"
+            );
+        }
+
         eprintln!("[regress] {name}: status={} vehicles={}", out.status, out.vehicles.len());
     }
 }

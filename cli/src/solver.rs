@@ -382,7 +382,6 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                 Some(&threat as &dyn crate::threat::ThreatModel),
                 inflation_km,
             );
-            let chain = default_chain(&opts, &check);
             let ctx = VerifyContext {
                 terrain: terrain.as_deref(),
                 nofly: Some(&nofly),
@@ -390,21 +389,28 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                 threat: Some(&threat),
                 zone_inflation_m: inflation_m,
             };
-            // 每段独立平滑（首尾段端点保留——Theta* 截直不得移除必经点）
+            // 每段独立平滑（首尾段端点保留——Theta* 截直不得移除必经点）。
+            // 入口航向：前一段输出方向，约束当前段首跳（段边界转角，否则拼接后
+            // 终检暴露——2026-08-07 主管 1755 点场景 seg3 out→climb 与 seg4
+            // climb→A 夹角 61.94° > 60°，climb 是段首点单段 verify 无法发现）。
             let mut smooth_segs = Vec::new();
             let mut seg_warnings = Vec::new();
+            let mut entry_heading: Option<f64> = None;
             for (idx, seg) in smooth_src.iter().enumerate() {
                 if profile_mask[idx] {
                     // 受限区剖面段：已按 max_climb 生成下降/平飞/爬升，直接采用
                     smooth_segs.push(seg.clone());
+                    entry_heading = seg.last_segment_heading();
                     continue;
                 }
+                let chain = default_chain(&opts, &check, entry_heading);
                 let result = smooth_path_chain(seg, &chain, &opts, &ctx, Some(phys_min_radius_m));
                 if let Some(w) = &result.warning {
                     seg_warnings.push(w.clone());
                 }
                 seg_warnings.extend(result.verify.warnings.iter().cloned());
-                smooth_segs.push(result.path);
+                smooth_segs.push(result.path.clone());
+                entry_heading = result.path.last_segment_heading();
             }
             // 拼接 + 全路径终检（段间转角/整路径威胁在拼接后才可见）
             let joined = join_paths(&smooth_segs);

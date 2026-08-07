@@ -77,6 +77,14 @@ impl Path {
         Some(bearing_deg(a.lon, a.lat, b.lon, b.lat))
     }
 
+    /// 最后一段航向（段边界拼接用——下一段的入口航向）。
+    pub fn last_segment_heading(&self) -> Option<f64> {
+        if self.points.len() < 2 {
+            return None;
+        }
+        self.segment_heading_deg(self.points.len() - 2)
+    }
+
     /// 点 p 到折线 [a, b] 段的球面近似弦高（米）。
     /// 在平面（等距近似）上计算点到线段距离，用于抽稀弦高容差判定。
     pub fn chord_error_m(&self, idx: usize, a_idx: usize, b_idx: usize) -> Option<f64> {

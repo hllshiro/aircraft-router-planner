@@ -106,11 +106,18 @@ pub type SegmentCheck<'a> = dyn Fn(f64, f64, f64, f64, f64, f64) -> bool + 'a;
 /// 第一个 `check` 通过的跳跃点 j（i,j 之间直连合法），保 i、j，删中间点。
 /// `max_turn_deg`：跳点额外受航向连续性约束（相邻航段转角 ≤ max，
 /// 防"弧线拉直成 61°+ 折线"导致运动学复验失败；None = 不限制）。
+/// `entry_heading`：段首点（index 0）的入航向（度，真北，来自前一段输出方向）。
+/// 段首点本身无法从段内计算入航向，但它是受限区剖面/过渡段的拼接边界——若
+/// 首跳（index0→j）方向与入航向夹角 > max_turn，拼接后段边界转角超限，单段
+/// verify 无法发现（2026-08-07 主管 1755 点场景：climb 点转角 61.94° > 60°，
+/// seg3 过渡 out→climb 与 seg4 首跳 climb→A 夹角超限，终检 vertex 5 拒）。
+/// None = 不约束段首（起点段无前段，保持原语义）。
 /// 复杂度 O(n²)（点列短，粗层走廊点数百级可接受）。
 pub fn theta_star_smooth(
     path: &Path,
     check: &SegmentCheck,
     max_turn_deg: Option<f64>,
+    entry_heading: Option<f64>,
 ) -> Path {
     if path.len() < 3 {
         return path.clone();
@@ -130,16 +137,22 @@ pub fn theta_star_smooth(
                 j -= 1;
                 continue;
             }
-            if let Some(max_turn) = max_turn_deg
-                && out.len() >= 2
-            {
-                let p_prev = out[out.len() - 2];
-                let p_cur = out[out.len() - 1];
-                let h0 = heading_deg_pts(&p_prev, &p_cur);
-                let h1 = heading_deg_pts(&p_cur, &b);
-                if crate::path::angle_diff_deg(h0, h1).abs() > max_turn {
-                    j -= 1;
-                    continue;
+            if let Some(max_turn) = max_turn_deg {
+                // 首跳（out 只有段首点）用入航向；之后用上一跳方向。
+                let h0 = if out.len() >= 2 {
+                    let p_prev = out[out.len() - 2];
+                    let p_cur = out[out.len() - 1];
+                    Some(heading_deg_pts(&p_prev, &p_cur))
+                } else {
+                    entry_heading
+                };
+                if let Some(h0) = h0 {
+                    let p_cur = out[out.len() - 1];
+                    let h1 = heading_deg_pts(&p_cur, &b);
+                    if crate::path::angle_diff_deg(h0, h1).abs() > max_turn {
+                        j -= 1;
+                        continue;
+                    }
                 }
             }
             break;
@@ -376,7 +389,7 @@ mod base_tests {
     fn theta_star_removes_collinear() {
         // 全共线点：check 恒 true → 应压缩为两点
         let p = straight_path(20);
-        let out = theta_star_smooth(&p, &|_, _, _, _, _, _| true, None);
+        let out = theta_star_smooth(&p, &|_, _, _, _, _, _| true, None, None);
         assert_eq!(out.len(), 2, "got {}", out.len());
     }
 
@@ -385,8 +398,35 @@ mod base_tests {
         // 中间点直连被 check 拒绝：保留分段
         let p = straight_path(10);
         // 只允许相邻直连（j=i+1 总是允许）
-        let out = theta_star_smooth(&p, &|_, _, _, _, _, _| false, None);
+        let out = theta_star_smooth(&p, &|_, _, _, _, _, _| false, None, None);
         assert_eq!(out.len(), p.len(), "got {}", out.len());
+    }
+
+    #[test]
+    fn theta_star_first_jump_respects_entry_heading() {
+        // 段边界回归（2026-08-07 zigzag11）：Theta* 首跳（段首 index0 → j）必须受
+        // 入航向约束，否则拼接后段边界转角超限（climb 点 61.94°>60°）→ 终检拒 →
+        // 全链回退 1755 点网格楼梯。构造：入航向朝东（0°），首跳点向东北偏 70°
+        // （超 60°）应被拒；放宽到 90° 时允许。
+        let p = Path::new(vec![
+            PathPoint::new(0.0, 0.0, 100.0),
+            PathPoint::new(0.01, 0.01, 100.0), // 偏 45°（首跳候选）
+            PathPoint::new(0.02, 0.02, 100.0),
+            PathPoint::new(0.03, 0.03, 100.0),
+        ]);
+        // 入航向 0°（东），首跳点方向 45°（东北）→ 45° <= 60° 允许
+        let out = theta_star_smooth(&p, &|_, _, _, _, _, _| true, Some(60.0), Some(0.0));
+        assert_eq!(out.len(), 2, "45° 首跳应允许: got {}", out.len());
+        // 入航向 90°（北），首跳点方向 45° → 差 45° <= 60° 允许
+        let out = theta_star_smooth(&p, &|_, _, _, _, _, _| true, Some(60.0), Some(90.0));
+        assert_eq!(out.len(), 2, "45° 差应允许: got {}", out.len());
+        // 入航向 180°（西），首跳点方向 45° → 差 135° > 60° → 拒跳，退邻点
+        // （首跳被拒但后续跳点仍可拉直 → 3 点：(0,0)→(0.01,0.01)→(0.03,0.03)）
+        let out = theta_star_smooth(&p, &|_, _, _, _, _, _| true, Some(60.0), Some(180.0));
+        assert_eq!(out.len(), 3, "135° 首跳应拒: got {}", out.len());
+        // 无入航向（起点段）→ 不约束首跳（保持原语义）
+        let out = theta_star_smooth(&p, &|_, _, _, _, _, _| true, Some(60.0), None);
+        assert_eq!(out.len(), 2, "无入航向应直接拉直: got {}", out.len());
     }
 
     #[test]
@@ -628,7 +668,6 @@ pub fn verify_path(
     };
     let xy: Vec<(f64, f64)> = path.points.iter().map(|p| proj.to_xy(p.lon, p.lat)).collect();
     for i in 1..n {
-        let h = path.segment_heading_deg(i - 1).unwrap_or(0.0);
         // 爬升角（仅固定翼）
         if kinematic {
             let (ax, ay) = xy[i - 1];
@@ -645,18 +684,23 @@ pub fn verify_path(
                 }
             }
         }
-        if i > 1 && kinematic {
-            // 转角
-            let h0 = path.segment_heading_deg(i - 2).unwrap_or(0.0);
-            let turn = angle_diff_deg(h, h0).abs();
+        if i + 1 < n && kinematic {
+            // 转角 + 转弯半径（点 i 处，三点 (i-1, i, i+1)）。
+            // 原 `i > 1` 盲区：段内 index 1 的点（Theta* 首跳点/段边界点）单段
+            // 平滑时不查转角，拼接后 index 变大终检才暴露段边界转角超限，如
+            // 2026-08-07 主管 1755 点场景 vertex 5 turn 61.94° > 60°。统一语义：
+            // 点 i 的转角 = angle(seg(i-1), seg(i))，半径 = 三点外接圆——对全部
+            // 内部点（i = 1..n-2）生效；末点无出段，跳过。
+            let h0 = path.segment_heading_deg(i - 1).unwrap_or(0.0);
+            let h1 = path.segment_heading_deg(i).unwrap_or(h0);
+            let turn = angle_diff_deg(h0, h1).abs();
             if turn > opts.max_turn_deg {
                 rep.issues.push(format!(
                     "vertex {i}: turn {turn:.2}deg > max {:.1}deg",
                     opts.max_turn_deg
                 ));
             }
-            // 转弯半径：三点外接圆
-            let (a, b, c) = (xy[i - 2], xy[i - 1], xy[i]);
+            let (a, b, c) = (xy[i - 1], xy[i], xy[i + 1]);
             if let Some(r) = circumradius(a, b, c)
                 && r < opts.turn_radius_m * 0.99
             {
@@ -873,13 +917,15 @@ pub struct ThetaStarSmoother<'a> {
     pub check: &'a SegmentCheck<'a>,
     /// 航向连续性约束（相邻航段转角上限；None = 不限制）
     pub max_turn_deg: Option<f64>,
+    /// 段首点入航向（度，真北；None = 不约束段首）
+    pub entry_heading: Option<f64>,
 }
 impl Smoother for ThetaStarSmoother<'_> {
     fn name(&self) -> &str {
         "theta_star"
     }
     fn smooth(&self, path: &Path) -> Option<Path> {
-        Some(theta_star_smooth(path, self.check, self.max_turn_deg))
+        Some(theta_star_smooth(path, self.check, self.max_turn_deg, self.entry_heading))
     }
 }
 
@@ -928,10 +974,15 @@ impl Smoother for GreedySimplifySmoother {
 /// - 固定翼：Theta* 去锯齿 → Catmull-Rom 样条（绕行弧线平滑）→ Dubins 拟合 → 贪心抽稀；
 /// - 旋翼机：Theta* 去锯齿 → 贪心抽稀（**不含 Dubins 全局拟合**——悬停原地转向
 ///   是合法机动，圆弧拟合会拉直/破坏转向点；尖角由机型感知复验放行）。
-pub fn default_chain<'a>(opts: &SmoothOptions, check: &'a SegmentCheck<'a>) -> Vec<Box<dyn Smoother + 'a>> {
+pub fn default_chain<'a>(
+    opts: &SmoothOptions,
+    check: &'a SegmentCheck<'a>,
+    entry_heading: Option<f64>,
+) -> Vec<Box<dyn Smoother + 'a>> {
     let mut chain: Vec<Box<dyn Smoother + 'a>> = vec![Box::new(ThetaStarSmoother {
         check,
         max_turn_deg: Some(opts.max_turn_deg),
+        entry_heading,
     })];
     if opts.aircraft_type == AircraftType::FixedWing {
         // Catmull-Rom 过点样条：对"绕行弧线"（Theta* 拉直受深探测 check 限制只能折线逼近）
@@ -1264,7 +1315,7 @@ mod chain_tests {
             .collect();
         let input = Path::new(pts);
         let check = |_: f64, _: f64, _: f64, _: f64, _: f64, _: f64| true;
-        let chain = default_chain(&opts, &check);
+        let chain = default_chain(&opts, &check, None);
         let out = smooth_path_chain(&input, &chain, &opts, &ctx, None);
         assert!(!out.applied.is_empty(), "applied: {:?}", out.applied);
         assert!(out.warning.is_none(), "warning: {:?}", out.warning);
@@ -1309,7 +1360,7 @@ mod chain_tests {
             PathPoint::new(1.0, 0.0, 500.0),
         ]);
         let check = |_: f64, _: f64, _: f64, _: f64, _: f64, _: f64| true;
-        let chain = default_chain(&opts, &check);
+        let chain = default_chain(&opts, &check, None);
         let out = smooth_path_chain(&input, &chain, &opts, &ctx, None);
         // NoData 不再阻断：链应应用至少一个阶段（不再回退 smoothing_failed 楼梯）
         assert!(!out.applied.is_empty(), "applied: {:?}", out.applied);
@@ -1336,7 +1387,7 @@ mod chain_tests {
             PathPoint::new(1.0, 0.0, 500.0),
         ]);
         let check = |_: f64, _: f64, _: f64, _: f64, _: f64, _: f64| true;
-        let chain = default_chain(&opts, &check);
+        let chain = default_chain(&opts, &check, None);
         let out = smooth_path_chain(&input, &chain, &opts, &ctx, None);
         // 不 panic；NaN 输入复验 fail → 回退原始
         assert!(!out.verify.ok);
@@ -1374,7 +1425,7 @@ mod chain_tests {
         let check = |lon1: f64, lat1: f64, _: f64, lon2: f64, lat2: f64, _: f64| {
             !((lon2 - lon1).abs() > 0.025 && (lat2 - lat1).abs() > 0.01)
         };
-        let chain = default_chain(&opts, &check);
+        let chain = default_chain(&opts, &check, None);
         let out = smooth_path_chain(&wave, &chain, &opts, &ctx, None);
         assert_eq!(
             out.warning.as_deref(),
@@ -1397,7 +1448,7 @@ mod chain_tests {
         };
         let wave = square_wave(4, 0.02);
         let check = |_: f64, _: f64, _: f64, _: f64, _: f64, _: f64| true;
-        let chain = default_chain(&opts, &check);
+        let chain = default_chain(&opts, &check, None);
         let out = smooth_path_chain(&wave, &chain, &opts, &ctx, None);
         assert!(out.warning.is_none(), "warning: {:?}", out.warning);
         assert!(out.verify.ok, "issues: {:?}", out.verify.issues);
@@ -1444,7 +1495,7 @@ mod chain_tests {
         let check = |lon1: f64, lat1: f64, _: f64, lon2: f64, lat2: f64, _: f64| {
             !((lon2 - lon1).abs() > 0.025 && (lat2 - lat1).abs() > 0.01)
         };
-        let chain = default_chain(&opts, &check);
+        let chain = default_chain(&opts, &check, None);
         let out = smooth_path_chain(&wave, &chain, &opts, &ctx, None);
         assert!(out.verify.ok, "issues: {:?}", out.verify.issues);
         assert!(out.warning.is_none(), "warning: {:?}", out.warning);
