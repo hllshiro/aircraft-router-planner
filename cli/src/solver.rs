@@ -22,7 +22,7 @@ use crate::path::{Path, PathPoint as RouterPoint};
 use crate::smooth::{default_chain, smooth_path_chain, VerifyContext};
 use crate::spatial::{CircleEntry, CircleIndex};
 use crate::terrain::builtin::BuiltinSource;
-use crate::terrain::{Sample, TerrainSource};
+use crate::terrain::{BulkPrefetch, Sample, TerrainSource};
 use crate::threat::{SphericalRadarThreat, ThreatModel, ThreatParams};
 
 /// 解算参数（M1：地形路径 CLI/输入指定；grid 粗网格分辨率）。
@@ -405,6 +405,36 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                 threat: Some(&threat),
                 zone_inflation_m: inflation_m,
             };
+            // 风险1修复（2026-08-07）：平滑链 verify + 威胁 LOS 采样直接打地形源
+            // （height_at 走 LRU），采样点可能越出代价场预取矩形——region 仅起点/target
+            // 包围盒 + 0.15° 缓冲，而绕行弧（NoFly/雷达/restricted）可偏出该矩形 → 冷块
+            // mmap 切片 + zstd 解压延迟。平滑前按 smooth_src 联合包围盒 + 机动 slack
+            // （转弯半径 + 5km，Dubins 弧偏出 raw 的量级）补一次批量预取：块进全局 LRU，
+            // 之后 height_at 全部命中缓存。region 本身不动——扩大会粗化 FMM 网格 cell
+            // （小区域固定 256 格），有锯齿风险。
+            if let Some(t) = terrain.as_ref() {
+                let slack_deg = (phys_min_radius_m + 5_000.0) / 111_320.0;
+                let mut min_lon = f64::INFINITY;
+                let mut min_lat = f64::INFINITY;
+                let mut max_lon = f64::NEG_INFINITY;
+                let mut max_lat = f64::NEG_INFINITY;
+                for seg in &smooth_src {
+                    for p in &seg.points {
+                        min_lon = min_lon.min(p.lon);
+                        min_lat = min_lat.min(p.lat);
+                        max_lon = max_lon.max(p.lon);
+                        max_lat = max_lat.max(p.lat);
+                    }
+                }
+                if min_lon.is_finite() {
+                    t.prefetch_lonlat(
+                        min_lon - slack_deg,
+                        min_lat - slack_deg,
+                        max_lon + slack_deg,
+                        max_lat + slack_deg,
+                    );
+                }
+            }
             // 每段独立平滑（首尾段端点保留——Theta* 截直不得移除必经点）。
             // 入口航向：前一段输出方向，约束当前段首跳（段边界转角，否则拼接后
             // 终检暴露——2026-08-07 主管 1755 点场景 seg3 out→climb 与 seg4
