@@ -16,7 +16,7 @@ use crate::config::{
     VehicleOutput, Zone, ZoneShape,
 };
 use crate::coord::Geo;
-use crate::costfield::{backtrack_path, build_semantic_cost_field, fmm_propagate};
+use crate::costfield::{backtrack_path, build_semantic_cost_field, build_semantic_cost_field_par_local, fmm_propagate};
 use crate::error::{AppError, InputInvalidReason};
 use crate::path::{Path, PathPoint as RouterPoint};
 use crate::smooth::{default_chain, smooth_path_chain, VerifyContext};
@@ -62,8 +62,10 @@ struct VehicleSpec {
 
 /// 端到端解算。elapsed_ms 为端到端耗时（main 计时传入）。
 pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Output, AppError> {
-    // 1. 地形源（none = 无地形平面；path/builtin = ARPK1 文件）
-    let terrain: Option<Box<dyn TerrainSource>> = match input.mission.terrain.source {
+    // 1. 地形源（none = 无地形平面；path/builtin = ARPK1 文件）。
+    //    具体类型 BuiltinSource（solver 仅用 ARPK1）：field build 可走 BulkPrefetch
+    //    并行无锁预取（候选③，3.71×，对比测试验证）。
+    let terrain: Option<BuiltinSource> = match input.mission.terrain.source {
         TerrainSourceType::None => None,
         _ => {
             let p = params
@@ -71,7 +73,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                 .clone()
                 .or_else(|| input.mission.terrain.path.clone().map(PathBuf::from));
             match p {
-                Some(p) => Some(Box::new(BuiltinSource::open(&p)?)),
+                Some(p) => Some(BuiltinSource::open(&p)?),
                 None => {
                     // 主管决策 2026-08-05：默认低精度地形 = 量化中国数据（china_dem_l12.arpack）。
                     // 候选：exe 同目录 / exe 上溯 workspace 根 / 工作目录相对路径。
@@ -90,7 +92,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                         }
                     }
                     if let Some(c) = candidates.iter().find(|c| c.exists()) {
-                        Some(Box::new(BuiltinSource::open(c)?))
+                        Some(BuiltinSource::open(c)?)
                     } else {
                         return Err(AppError::Data(
                             "terrain.source=path/builtin 但未提供地形文件，且默认低精度地形 \
@@ -199,21 +201,35 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
     let inflation_km = inflation_m / 1000.0;
 
     // 5. 语义代价场（Land=1 / Water=1 / Lake=1 / NoData=5 / OOB=INF；NoFly/Obstacle 墙）
-    let mut field = build_semantic_cost_field(grid, grid, |r, c| {
-        let (lon, lat) = cell_lonlat(r, c, &region, grid);
+    //    硬墙判定闭包（每格：墙内 → OutOfBounds 禁行）——par_local 与串行回退共用。
+    let walled = |lon: f64, lat: f64| -> bool {
         if let Ok(g) = Geo::new(lon, lat) {
-            if all_zones
+            all_zones
                 .iter()
                 .any(|z| z.is_wall() && zone_contains(z, &g))
-            {
+        } else {
+            false
+        }
+    };
+    let mut field = match &terrain {
+        // 候选③：并行 + 无锁批量预取（3.71× vs 串行，对比测试 9504381 之后验证）
+        Some(t) => build_semantic_cost_field_par_local(
+            t,
+            region.min_lon,
+            region.min_lat,
+            region.span_deg,
+            grid,
+            5.0,
+            &walled,
+        ),
+        None => build_semantic_cost_field(grid, grid, |r, c| {
+            let (lon, lat) = cell_lonlat(r, c, &region, grid);
+            if walled(lon, lat) {
                 return Sample::OutOfBounds;
             }
-        }
-        match &terrain {
-            Some(t) => t.sample_at(lon, lat),
-            None => Sample::Land(0.0),
-        }
-    }, 5.0);
+            Sample::Land(0.0)
+        }, 5.0),
+    };
 
     // 5c. 禁飞区墙向外膨胀 + 过渡带软罚（见 apply_inflation_and_band）
     let cell_m = region.span_deg * 111_320.0 / grid as f64;
@@ -276,7 +292,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                         z,
                         v.alt_m,
                         v.profile.ceiling_m,
-                        terrain.as_deref(),
+                        terrain.as_ref().map(|t| t as &dyn TerrainSource),
                         &v.start,
                         &target,
                         opts.max_climb_deg,
@@ -358,7 +374,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                     v.alt_m,
                     opts.max_climb_deg,
                     v.profile.ceiling_m,
-                    terrain.as_deref(),
+                    terrain.as_ref().map(|t| t as &dyn TerrainSource),
                     &v.start,
                     &target,
                     inflation_m / 1000.0,
@@ -383,7 +399,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                 inflation_km,
             );
             let ctx = VerifyContext {
-                terrain: terrain.as_deref(),
+                terrain: terrain.as_ref().map(|t| t as &dyn TerrainSource),
                 nofly: Some(&nofly),
                 zones: Some(&all_zones),
                 threat: Some(&threat),

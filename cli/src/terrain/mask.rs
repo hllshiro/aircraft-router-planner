@@ -15,7 +15,7 @@
 //! - 2 = 内陆湖（湖面高程由 DEM 提供，一般高于海平面）
 
 use crate::error::AppError;
-use super::{GeoBounds, Sample, TerrainSource};
+use super::{BulkPrefetch, GeoBounds, Sample, TerrainSource};
 
 /// 掩膜类别。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -308,6 +308,36 @@ impl<T: TerrainSource> TerrainSource for MaskedSource<T> {
             self.inner.resolution_desc(),
             self.mask.resolution_desc()
         )
+    }
+}
+
+/// 无锁批量预取转发：mask 分层逻辑与 `sample_at` 完全同构，内层高度走无锁路径。
+impl<T: BulkPrefetch> BulkPrefetch for MaskedSource<T> {
+    fn prefetch_lonlat(
+        &self,
+        min_lon: f64,
+        min_lat: f64,
+        max_lon: f64,
+        max_lat: f64,
+    ) -> std::collections::HashMap<usize, Vec<i16>> {
+        self.inner.prefetch_lonlat(min_lon, min_lat, max_lon, max_lat)
+    }
+
+    fn sample_local(
+        &self,
+        local: &std::collections::HashMap<usize, Vec<i16>>,
+        lon: f64,
+        lat: f64,
+    ) -> Sample {
+        match self.mask.class_at(lon, lat) {
+            MaskClass::Sea => Sample::Water,
+            MaskClass::Lake => match self.inner.sample_local(local, lon, lat) {
+                Sample::Land(h) | Sample::Lake(h) => Sample::Lake(h),
+                Sample::Water => Sample::Lake(0.0),
+                Sample::NoData | Sample::OutOfBounds => Sample::NoData,
+            },
+            MaskClass::Land => self.inner.sample_local(local, lon, lat),
+        }
     }
 }
 

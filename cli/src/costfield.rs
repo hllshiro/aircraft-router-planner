@@ -13,7 +13,7 @@
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
-use crate::terrain::Sample;
+use crate::terrain::{BulkPrefetch, Sample};
 
 /// 2D 代价场（行优先，`idx = r * cols + c`）。`cost >= 1`，越大越难通过。
 #[derive(Debug, Clone)]
@@ -191,6 +191,114 @@ where
         let mut offset = 0;
         for (h, (_r0, r1)) in handles.into_iter().zip(&ranges) {
             let sub = h.join().unwrap_or_else(|_| vec![0.0; (r1 - _r0) * cols]);
+            f.cost[offset..offset + sub.len()].copy_from_slice(&sub);
+            offset += sub.len();
+        }
+    });
+    f
+}
+
+/// 并行 + 无锁批量预取构建（候选③，2026-08-07 对比验证：release 冷缓存 3.71× vs 串行）。
+///
+/// 为什么组合才有效（对比测试结论）：
+/// - 单独并行化（`build_semantic_cost_field_par`）：0.91×——共享 `sample_at` 的 Mutex
+///   锁竞争抵消 zstd 解压并行收益；
+/// - 单独无锁（`BulkPrefetch::sample_local` 单线程）：0.99×——Mutex 无竞争 lock 本来
+///   便宜（~24ns/次），解压串行才是大头；
+/// - **并行 + 无锁**：行分块，每线程 `prefetch_lonlat` 自己行范围的块（并行锁外解压）
+///   + 局部无锁查表——3.71×（381ms → 103ms，1024² 冷缓存）。
+///
+/// 数值与 `build_semantic_cost_field` 逐位一致（每格采样独立，仅遍历并行化）。
+/// `walled`：Fn(lon, lat) -> bool——命中硬墙（NoFly/Obstacle）→ OutOfBounds 禁行墙
+/// （与 solver 原闭包语义一致；网格点经纬度 = `min_lon + (c+0.5)/grid*span`，同 cell_lonlat）。
+pub fn build_semantic_cost_field_par_local<B, W>(
+    src: &B,
+    min_lon: f64,
+    min_lat: f64,
+    span: f64,
+    grid: usize,
+    nodata_mult: f32,
+    walled: W,
+) -> CostField
+where
+    B: BulkPrefetch + Sync,
+    W: Fn(f64, f64) -> bool + Sync + Send,
+{
+    let nthreads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .clamp(1, 16);
+    let mut f = CostField::new(grid, grid);
+    if nthreads <= 1 || grid < 64 {
+        // 回退：单线程预取 + 无锁（仍比带锁快/持平；walled 支持）
+        let half = 0.5 / grid as f64 * span;
+        let slack = span / grid as f64;
+        let local = src.prefetch_lonlat(
+            min_lon + half - slack,
+            min_lat + half - slack,
+            min_lon + span - half + slack,
+            min_lat + span - half + slack,
+        );
+        for r in 0..grid {
+            let v = (r as f64 + 0.5) / grid as f64;
+            let lat = min_lat + v * span;
+            for c in 0..grid {
+                let u = (c as f64 + 0.5) / grid as f64;
+                let lon = min_lon + u * span;
+                let i = r * grid + c;
+                f.cost[i] = if walled(lon, lat) {
+                    Sample::OutOfBounds.base_cost(nodata_mult)
+                } else {
+                    src.sample_local(&local, lon, lat).base_cost(nodata_mult)
+                };
+            }
+        }
+        return f;
+    }
+    let chunk = grid.div_ceil(nthreads);
+    let half = 0.5 / grid as f64 * span;
+    let slack = span / grid as f64;
+    let col_lon0 = min_lon + half - slack;
+    let col_lon1 = min_lon + span - half + slack;
+    std::thread::scope(|scope| {
+        let mut ranges: Vec<(usize, usize)> = Vec::new();
+        let mut handles = Vec::new();
+        for t in 0..nthreads {
+            let r0 = t * chunk;
+            if r0 >= grid {
+                break;
+            }
+            let r1 = (r0 + chunk).min(grid);
+            ranges.push((r0, r1));
+            let src = src;
+            let walled = &walled;
+            handles.push(scope.spawn(move || {
+                // 本线程行范围 [r0, r1) 的网格点 lat 跨度 → 预取（并行锁外解压）
+                let lat0 = min_lat + (r0 as f64 + 0.5) / grid as f64 * span;
+                let lat1 = min_lat + (r1 as f64 + 0.5) / grid as f64 * span;
+                let local = src.prefetch_lonlat(col_lon0, lat0 - slack, col_lon1, lat1 + slack);
+                let n = (r1 - r0) * grid;
+                let mut sub = vec![0f32; n];
+                for r in r0..r1 {
+                    let v = (r as f64 + 0.5) / grid as f64;
+                    let lat = min_lat + v * span;
+                    let base = (r - r0) * grid;
+                    for c in 0..grid {
+                        let u = (c as f64 + 0.5) / grid as f64;
+                        let lon = min_lon + u * span;
+                        sub[base + c] = if walled(lon, lat) {
+                            Sample::OutOfBounds.base_cost(nodata_mult)
+                        } else {
+                            src.sample_local(&local, lon, lat).base_cost(nodata_mult)
+                        };
+                    }
+                }
+                sub
+            }));
+        }
+        let mut offset = 0;
+        for (h, (_r0, r1)) in handles.into_iter().zip(&ranges) {
+            let sub = h.join().unwrap_or_else(|_| vec![0.0; (r1 - _r0) * grid]);
             f.cost[offset..offset + sub.len()].copy_from_slice(&sub);
             offset += sub.len();
         }

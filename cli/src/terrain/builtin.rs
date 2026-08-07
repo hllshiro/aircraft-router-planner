@@ -24,7 +24,7 @@ use std::sync::Mutex;
 
 use sha2::{Digest, Sha256};
 
-use super::{GeoBounds, TerrainSource};
+use super::{BulkPrefetch, GeoBounds, Sample, TerrainSource};
 use crate::error::AppError;
 
 /// 格式魔数与版本。
@@ -333,13 +333,144 @@ impl BuiltinSource {
         let v01 = self.cell(r0, c0 + 1)?;
         let v10 = self.cell(r0 + 1, c0)?;
         let v11 = self.cell(r0 + 1, c0 + 1)?;
-        let h00 = v00 as f64;
-        let h01 = v01 as f64;
-        let h10 = v10 as f64;
-        let h11 = v11 as f64;
-        let top = h00 + (h01 - h00) * w_c;
-        let bot = h10 + (h11 - h10) * w_c;
-        Some(top + (bot - top) * w_r)
+        Some(interp2(v00, v01, v10, v11, w_c, w_r))
+    }
+}
+
+/// 双线性插值（cell 值 → f64；供带锁/无锁两路径复用，保证数值一致）。
+#[inline]
+fn interp2(v00: i16, v01: i16, v10: i16, v11: i16, w_c: f64, w_r: f64) -> f64 {
+    let h00 = v00 as f64;
+    let h01 = v01 as f64;
+    let h10 = v10 as f64;
+    let h11 = v11 as f64;
+    let top = h00 + (h01 - h00) * w_c;
+    let bot = h10 + (h11 - h10) * w_c;
+    top + (bot - top) * w_r
+}
+
+impl BulkPrefetch for BuiltinSource {
+    /// 经纬度矩形 → 地形行列范围（±1 余量覆盖双线性邻域）→ 锁外加载全部块。
+    fn prefetch_lonlat(
+        &self,
+        min_lon: f64,
+        min_lat: f64,
+        max_lon: f64,
+        max_lat: f64,
+    ) -> HashMap<usize, Vec<i16>> {
+        let c0f = ((min_lon - self.origin_lon) / self.cell_lon_deg).floor() - 1.0;
+        let c1f = ((max_lon - self.origin_lon) / self.cell_lon_deg).ceil() + 1.0;
+        let r0f = ((min_lat - self.origin_lat) / self.cell_lat_deg).floor() - 1.0;
+        let r1f = ((max_lat - self.origin_lat) / self.cell_lat_deg).ceil() + 1.0;
+        let c0 = c0f.max(0.0) as usize;
+        let c1 = (c1f.min(self.cols as f64)).max(c0 as f64) as usize;
+        let r0 = r0f.max(0.0) as usize;
+        let r1 = (r1f.min(self.rows as f64)).max(r0 as f64) as usize;
+        self.prefetch_rect(r0, r1, c0, c1)
+    }
+
+    /// 无锁采样（与 `sample_at` 同语义：bounds 外 OOB，洞 NoData，否则 Land(h)）。
+    fn sample_local(&self, local: &HashMap<usize, Vec<i16>>, lon: f64, lat: f64) -> Sample {
+        if let Some(b) = self.bounds() {
+            if !b.contains(lon, lat) {
+                return Sample::OutOfBounds;
+            }
+        }
+        match self.sample_local_height(local, lon, lat) {
+            Some(h) => Sample::Land(h),
+            None => Sample::NoData,
+        }
+    }
+}
+
+impl BuiltinSource {
+    /// 锁外加载 [r0..=r1]×[c0..=c1]（地形行列）覆盖的全部块。
+    /// 优先复用全局缓存（clone），未命中锁外解压并双检插入全局缓存（后续 FMM 阶段仍可用）。
+    /// 返回局部块表（与 `cell()` 同数值；配合 `sample_local` 无锁访问）。
+    fn prefetch_rect(&self, r0: usize, r1: usize, c0: usize, c1: usize) -> HashMap<usize, Vec<i16>> {
+        let mut local = HashMap::new();
+        if r0 > r1 || c0 > c1 {
+            return local;
+        }
+        let bx0 = r0 / BLOCK_SIZE as usize;
+        let bx1 = r1 / BLOCK_SIZE as usize;
+        let by0 = c0 / BLOCK_SIZE as usize;
+        let by1 = c1 / BLOCK_SIZE as usize;
+        for bx in bx0..=bx1 {
+            for by in by0..=by1 {
+                let bidx = bx * self.blocks_y + by;
+                if local.contains_key(&bidx) {
+                    continue;
+                }
+                // 先查全局缓存（锁内仅查表+clone）
+                let hit = {
+                    let cache = lock_cache(&self.cache);
+                    cache.map.get(&bidx).cloned()
+                };
+                let block = match hit {
+                    Some(b) => b,
+                    None => {
+                        // 未命中：锁外解压，双检插入全局（后续 FMM 阶段仍可用）
+                        let Some(b) = self.load_block(bidx) else { continue };
+                        let mut cache = lock_cache(&self.cache);
+                        if !cache.map.contains_key(&bidx) {
+                            cache.insert(bidx, b.clone());
+                        }
+                        b
+                    }
+                };
+                local.insert(bidx, block);
+            }
+        }
+        local
+    }
+
+    /// 无锁高度采样（双线性插值，与 `sample` 数值一致；local 未命中回退带锁 `cell`）。
+    fn sample_local_height(
+        &self,
+        local: &HashMap<usize, Vec<i16>>,
+        lon: f64,
+        lat: f64,
+    ) -> Option<f64> {
+        let fc = (lon - self.origin_lon) / self.cell_lon_deg;
+        let fr = (lat - self.origin_lat) / self.cell_lat_deg;
+        let c0 = fc.floor() as isize;
+        let r0 = fr.floor() as isize;
+        if c0 < 0 || r0 < 0 || c0 + 1 >= self.cols as isize || r0 + 1 >= self.rows as isize {
+            return None;
+        }
+        let w_c = fc - c0 as f64;
+        let w_r = fr - r0 as f64;
+        let (r0, c0) = (r0 as usize, c0 as usize);
+        let v00 = self.cell_local(local, r0, c0)?;
+        let v01 = self.cell_local(local, r0, c0 + 1)?;
+        let v10 = self.cell_local(local, r0 + 1, c0)?;
+        let v11 = self.cell_local(local, r0 + 1, c0 + 1)?;
+        Some(interp2(v00, v01, v10, v11, w_c, w_r))
+    }
+
+    /// 无锁格值读取：local 命中直读（无锁），未命中回退带锁 `cell`（语义与 cell 完全一致）。
+    #[inline]
+    fn cell_local(&self, local: &HashMap<usize, Vec<i16>>, r: usize, c: usize) -> Option<i16> {
+        if r >= self.rows || c >= self.cols {
+            return None;
+        }
+        let bx = r / BLOCK_SIZE as usize;
+        let by = c / BLOCK_SIZE as usize;
+        let bidx = bx * self.blocks_y + by;
+        let lr = r % BLOCK_SIZE as usize;
+        let lc = c % BLOCK_SIZE as usize;
+        match local.get(&bidx) {
+            Some(b) => {
+                let v = b[lr * BLOCK_SIZE as usize + lc];
+                if v == self.no_data {
+                    None
+                } else {
+                    Some(v)
+                }
+            }
+            None => self.cell(r, c),
+        }
     }
 }
 

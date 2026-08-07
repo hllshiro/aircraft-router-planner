@@ -137,6 +137,33 @@ pub trait TerrainSource: Send + Sync {
     fn resolution_desc(&self) -> String;
 }
 
+/// 无锁批量预取采样优化（候选，2026-08-07 对比验证）。
+/// 可选实现：`BuiltinSource`（块级预取 + 无锁查表）与 `MaskedSource`（转发 inner）；
+/// 其余源不实现。field_build 层可用 `prefetch_lonlat` 一次性锁外解压区域块，
+/// 再 `sample_local` 无锁采样——消除 4M 次 Mutex 锁竞争（并行化验证失败的主因）。
+///
+/// 语义约束：`sample_local` 必须与 `sample_at` 完全一致（OOB/NoData/Land/Water/Lake），
+/// 否则对比测试 bit-exact 断言会失败。
+pub trait BulkPrefetch: TerrainSource {
+    /// 预取经纬度矩形覆盖的全部块（锁外解压，返回局部块表；配合 `sample_local` 无锁访问）。
+    /// 未实现/越界 → 空表（调用方回退带锁 `sample_at` 语义不变）。
+    fn prefetch_lonlat(
+        &self,
+        min_lon: f64,
+        min_lat: f64,
+        max_lon: f64,
+        max_lat: f64,
+    ) -> std::collections::HashMap<usize, Vec<i16>>;
+
+    /// 无锁采样（与 `sample_at` 同语义；local 未命中回退带锁路径）。
+    fn sample_local(
+        &self,
+        local: &std::collections::HashMap<usize, Vec<i16>>,
+        lon: f64,
+        lat: f64,
+    ) -> Sample;
+}
+
 /// 按输入路径选择 reader（4.3：按扩展名/魔数自动选择）。
 /// - `.hgt` → SRTM/HGT
 /// - `.tif` / `.tiff` → GeoTIFF
