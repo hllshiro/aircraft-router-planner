@@ -4,9 +4,14 @@
 //! SRTM3 = 1201×1201（3 弧秒，赤道≈92m），SRTM1 = 3601×3601（1 弧秒，赤道≈30m）；
 //! 空洞 = -32768。瓦片第一行 = 最高纬度（北行优先）。
 //! 文件名形如 `N39E116.hgt`（起点在文件名的南/西角）。
+//!
+//! 目录形态（M5，2026-08-07 主管拍板：外部格式按需读取）：单片 ≤26MB，
+//! 按需粒度 = **片**——扫描文件名 + 文件尺寸 O(1) 建片索引，采样按经纬度
+//! 定位片 → 片全量解码 + 片级 LRU（8 片 ≈ 208MB，见 `tiledir`）。
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
+use super::tiledir::{TileDirSource, TileMeta, TileOpener};
 use super::{GeoBounds, TerrainSource};
 use crate::error::AppError;
 
@@ -115,6 +120,52 @@ fn parse_hgt_filename(fname: &str) -> Result<(f64, f64), AppError> {
     Ok((lat0, lon0))
 }
 
+// ==================== 目录形态（M5：片级 LRU） ====================
+
+/// 打开 SRTM 目录源：扫描 `.hgt` 片，文件名 + 文件尺寸 O(1) 建片索引。
+/// 无效文件（文件名无 N/S/E/W / 尺寸非 1201² 或 3601²）跳过；无有效片 → 错误。
+pub fn open_dir(dir: &Path) -> Result<TileDirSource, AppError> {
+    let mut tiles = Vec::new();
+    let rd = std::fs::read_dir(dir)?;
+    for entry in rd {
+        let Ok(e) = entry else { continue };
+        let p = e.path();
+        if !p.is_file() {
+            continue;
+        }
+        let ext = p
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if ext != "hgt" {
+            continue;
+        }
+        let fname = match p.file_name().and_then(|s| s.to_str()) {
+            Some(f) => f.to_string(),
+            None => continue,
+        };
+        let Ok((lat0, lon0)) = parse_hgt_filename(&fname) else { continue };
+        // 尺寸 → 网格边长 → cell（与 SrtmSource::open 同一判定）
+        let Ok(len) = std::fs::metadata(&p).map(|m| m.len()) else { continue };
+        let size = match len {
+            2_884_802 => 1201,
+            25_934_402 => 3601,
+            _ => continue,
+        };
+        let cell = 1.0 / (size - 1) as f64;
+        tiles.push(TileMeta {
+            path: PathBuf::from(&p),
+            min_lon: lon0,
+            min_lat: lat0,
+            cell_lon_deg: cell,
+            cell_lat_deg: cell,
+        });
+    }
+    let opener: TileOpener = Box::new(|p| Ok(Box::new(SrtmSource::open(p)?)));
+    TileDirSource::new(tiles, opener, "srtm")
+}
+
 impl TerrainSource for SrtmSource {
     fn height_at(&self, lon: f64, lat: f64) -> Option<f64> {
         self.sample(lon, lat)
@@ -179,5 +230,56 @@ mod tests {
         assert!(s.height_at(118.0, 39.5).is_none());
         assert!(s.height_at(116.5, 40.5).is_none());
         drop(std::fs::remove_file(&p));
+    }
+
+    /// 写全常数值 SRTM3 瓦片（1201×1201）。
+    fn write_flat_hgt(path: &Path, val: i16) -> std::io::Result<()> {
+        use std::io::Write;
+        let mut f = std::fs::File::create(path)?;
+        let mut buf = Vec::with_capacity(1201 * 1201 * 2);
+        for _ in 0..1201 * 1201 {
+            buf.extend_from_slice(&val.to_be_bytes());
+        }
+        f.write_all(&buf)
+    }
+
+    #[test]
+    fn dir_open_sample_and_cross_tile() {
+        let dir = std::env::temp_dir().join("srtm_dir_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        write_flat_hgt(&dir.join("N42E015.hgt"), 100).unwrap();
+        write_flat_hgt(&dir.join("N42E016.hgt"), 200).unwrap();
+        // 无关文件应被跳过
+        std::fs::write(dir.join("note.txt"), "not a tile").unwrap();
+
+        let s = open_dir(&dir).unwrap();
+        assert_eq!(s.tile_count(), 2);
+        let b = s.global_bounds();
+        assert!((b.min_lon - 15.0).abs() < 1e-9 && (b.max_lon - 17.0).abs() < 1e-9);
+        // 片内采样
+        assert_eq!(s.height_at(15.5, 42.5), Some(100.0));
+        assert_eq!(s.height_at(16.5, 42.5), Some(200.0));
+        // 跨片边界：16.0 属右片（floor 键），右片左缘值 = 200
+        assert_eq!(s.height_at(16.0, 42.5), Some(200.0));
+        // 出界 → None
+        assert_eq!(s.height_at(14.5, 42.5), None);
+        drop(std::fs::remove_dir_all(&dir));
+    }
+
+    #[test]
+    fn dir_skips_bad_size_and_empty_errors() {
+        // 目录只有非标准尺寸 .hgt → 无有效片 → 错误
+        let dir = std::env::temp_dir().join("srtm_dir_bad");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("N42E015.hgt"), vec![0u8; 100]).unwrap();
+        assert!(open_dir(&dir).is_err());
+        drop(std::fs::remove_dir_all(&dir));
+
+        // 目录只有非 .hgt → 错误
+        let dir2 = std::env::temp_dir().join("srtm_dir_empty");
+        std::fs::create_dir_all(&dir2).unwrap();
+        std::fs::write(dir2.join("junk.txt"), "x").unwrap();
+        assert!(open_dir(&dir2).is_err());
+        drop(std::fs::remove_dir_all(&dir2));
     }
 }

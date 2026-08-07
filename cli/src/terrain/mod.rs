@@ -12,6 +12,7 @@ pub mod geotiff;
 pub mod mask;
 pub mod memory;
 pub mod srtm;
+pub mod tiledir;
 
 use std::path::Path;
 
@@ -166,11 +167,15 @@ pub trait BulkPrefetch: TerrainSource {
 }
 
 /// 按输入路径选择 reader（4.3：按扩展名/魔数自动选择）。
+/// - 目录 → 片级目录源（DTED/SRTM，M4/M5；按格式优先级 GeoTIFF > DTED > SRTM）
 /// - `.hgt` → SRTM/HGT
 /// - `.tif` / `.tiff` → GeoTIFF
 /// - `.dt0` / `.dt1` / `.dt2` → DTED/DTED2
 /// - `.zstd` / `.arpack`（自建）→ 内置紧凑格式
 pub fn open_source(path: &Path) -> Result<Box<dyn TerrainSource>, AppError> {
+    if path.is_dir() {
+        return open_dir_source(path);
+    }
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
@@ -185,6 +190,46 @@ pub fn open_source(path: &Path) -> Result<Box<dyn TerrainSource>, AppError> {
             "unsupported terrain file extension: .{other} (expect .hgt/.tif/.dt0-2/.zstd)"
         ))),
     }
+}
+
+/// 目录输入 → 片级目录源。格式优先级（主管 2026-08-07 拍板）：GeoTIFF > DTED > SRTM。
+/// GeoTIFF 目录暂不支持（单文件 GeoTIFF 已按需 tile/strip LRU）——目录含 .tif 时
+/// 明确报错并指引传单文件，避免静默降级到低优先级格式。
+fn open_dir_source(dir: &Path) -> Result<Box<dyn TerrainSource>, AppError> {
+    let mut has_geotiff = false;
+    let mut has_dted = false;
+    let mut has_srtm = false;
+    for entry in std::fs::read_dir(dir)? {
+        let Ok(e) = entry else { continue };
+        let ext = e
+            .path()
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        match ext.as_str() {
+            "tif" | "tiff" => has_geotiff = true,
+            "dt0" | "dt1" | "dt2" => has_dted = true,
+            "hgt" => has_srtm = true,
+            _ => {}
+        }
+    }
+    if has_geotiff {
+        return Err(AppError::Data(format!(
+            "{}: directory contains GeoTIFF file(s); GeoTIFF 目录暂不支持（单文件 GeoTIFF 已支持 tile/strip 按需读取），请直接传入 .tif/.tiff 文件",
+            dir.display()
+        )));
+    }
+    if has_dted {
+        return dted::open_dir(dir).map(|s| Box::new(s) as Box<dyn TerrainSource>);
+    }
+    if has_srtm {
+        return srtm::open_dir(dir).map(|s| Box::new(s) as Box<dyn TerrainSource>);
+    }
+    Err(AppError::Data(format!(
+        "{}: no supported terrain files (.hgt/.tif/.dt0-2) found in directory",
+        dir.display()
+    )))
 }
 
 /// 语义化 LOS 遮挡判定（空洞分层，主管 2026-08-04 拍板）。
