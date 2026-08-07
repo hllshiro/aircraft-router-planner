@@ -27,6 +27,26 @@ use sha2::{Digest, Sha256};
 use super::{BulkPrefetch, GeoBounds, Sample, TerrainSource};
 use crate::error::AppError;
 
+/// 文件字节存储：内存（`parse` 测试/转换校验路径）或 mmap（`open` 按需路径）。
+/// 2026-08-07 按需读取（主管拍板）：大型 ARPK1 打开 O(1)（只读头部+块索引），
+/// 块数据按需从映射读（虚拟内存，物理页按访问加载），不再全量读入内存。
+#[derive(Debug)]
+enum Store {
+    Mem(Vec<u8>),
+    Mmap(memmap2::Mmap),
+}
+
+impl Store {
+    /// 取 [offset, offset+len) 字节切片（offset 为**文件绝对偏移**，含头部+索引+数据流）。
+    #[inline]
+    fn get(&self, offset: usize, len: usize) -> Option<&[u8]> {
+        match self {
+            Store::Mem(b) => b.get(offset..offset.checked_add(len)?),
+            Store::Mmap(m) => m.get(offset..offset.checked_add(len)?),
+        }
+    }
+}
+
 /// 格式魔数与版本。
 pub const MAGIC: [u8; 8] = *b"ARPACK1\0";
 pub const FORMAT_VERSION: u32 = 1;
@@ -99,118 +119,131 @@ pub struct BuiltinSource {
     blocks_y: usize,
     no_data: i16,
     source: String,
-    /// 块索引：[(offset, len)]
+    /// 块索引：[(offset, len)]（offset 为文件绝对偏移）
     index: Vec<(u64, u32)>,
-    /// 文件字节（块数据流；解压缓存按块索引）
-    data: Vec<u8>,
+    /// 预期 SHA-256（头部 [288..320]；`verify_sha` 可选全量校验用）
+    sha_expected: [u8; 32],
+    /// 文件字节（全文件；Mem=内存副本 / Mmap=只读映射，块按需读）
+    store: Store,
     /// 已解压块缓存（block_idx → i16 展平，FIFO 有界）；Mutex 满足 TerrainSource: Send+Sync
     cache: Mutex<BlockCache>,
 }
 
-impl BuiltinSource {
-    /// 打开 + fail-fast 校验（magic/版本/SHA-256/截断）。
-    pub fn open(path: &Path) -> Result<Self, AppError> {
-        let bytes = std::fs::read(path)?;
-        Self::parse(&bytes)
+/// 头部 + 块索引解析结果（parse / open 共用）。
+#[derive(Debug, Clone)]
+struct HeaderFields {
+    data_version: u32,
+    rows: usize,
+    cols: usize,
+    origin_lon: f64,
+    origin_lat: f64,
+    cell_lon_deg: f64,
+    cell_lat_deg: f64,
+    z_resolution_m: f64,
+    vertical_datum: u8,
+    resolution_semantics: u8,
+    block_compression: u8,
+    blocks_x: usize,
+    blocks_y: usize,
+    no_data: i16,
+    source: String,
+    sha_expected: [u8; 32],
+}
+
+/// 解析头部 + 块索引（结构校验：magic/版本/字段/索引越界）。
+/// `data_end` = 数据流终点（parse 用 bytes.len()，mmap open 用文件长度）——
+/// 索引越界检查用它防止截断/越界（替代全量 SHA 的 fail-fast 语义，O(1)）。
+fn parse_header_index(
+    bytes: &[u8],
+    data_end: usize,
+) -> Result<(HeaderFields, Vec<(u64, u32)>), AppError> {
+    if bytes.len() < HEADER_SIZE + 32 {
+        return Err(AppError::Data(format!(
+            "arpack file truncated: {} bytes < header+sha",
+            bytes.len()
+        )));
     }
+    if bytes[0..8] != MAGIC {
+        return Err(AppError::Data("arpack magic mismatch (not an ARPACK1 file)".into()));
+    }
+    let le = |i: usize| -> u32 {
+        u32::from_le_bytes([bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]])
+    };
+    let lef = |i: usize| -> f64 {
+        f64::from_le_bytes([
+            bytes[i],
+            bytes[i + 1],
+            bytes[i + 2],
+            bytes[i + 3],
+            bytes[i + 4],
+            bytes[i + 5],
+            bytes[i + 6],
+            bytes[i + 7],
+        ])
+    };
+    let format_version = le(8);
+    if format_version != FORMAT_VERSION {
+        return Err(AppError::Data(format!(
+            "arpack format_version mismatch: got {format_version}, expect {FORMAT_VERSION}"
+        )));
+    }
+    let data_version = le(12);
+    let rows = le(16) as usize;
+    let cols = le(20) as usize;
+    let origin_lon = lef(24);
+    let origin_lat = lef(32);
+    let cell_lon_deg = lef(40);
+    let cell_lat_deg = lef(48);
+    let z_resolution_m = lef(56);
+    let vertical_datum = bytes[64];
+    let resolution_semantics = bytes[65];
+    let block_compression = bytes[66];
+    let _reserved = bytes[67];
+    let block_size = le(68);
+    if block_size != BLOCK_SIZE {
+        return Err(AppError::Data(format!(
+            "arpack block_size {block_size} unsupported (expect {BLOCK_SIZE})"
+        )));
+    }
+    let blocks_x = le(72) as usize;
+    let blocks_y = le(76) as usize;
+    let no_data = i16::from_le_bytes([bytes[80], bytes[81]]);
+    let source = String::from_utf8_lossy(&bytes[82..256]).trim_end_matches('\0').to_string();
+    if rows == 0 || cols == 0 || blocks_x == 0 || blocks_y == 0 || cell_lon_deg <= 0.0 || cell_lat_deg <= 0.0
+    {
+        return Err(AppError::Data("arpack degenerate header".into()));
+    }
+    let mut sha_expected = [0u8; 32];
+    sha_expected.copy_from_slice(&bytes[HEADER_SIZE..HEADER_SIZE + 32]);
 
-    /// 从字节解析（测试友好）。全部校验失败 → `AppError::Data`。
-    pub fn parse(bytes: &[u8]) -> Result<Self, AppError> {
-        if bytes.len() < HEADER_SIZE + 32 {
-            return Err(AppError::Data(format!(
-                "arpack file truncated: {} bytes < header+sha",
-                bytes.len()
-            )));
+    // 块索引
+    let n_blocks = blocks_x * blocks_y;
+    let idx_start = HEADER_SIZE + 32;
+    let idx_bytes = n_blocks * 12;
+    if bytes.len() < idx_start + idx_bytes {
+        return Err(AppError::Data("arpack truncated: block index out of range".into()));
+    }
+    let mut index = Vec::with_capacity(n_blocks);
+    for b in 0..n_blocks {
+        let p = idx_start + b * 12;
+        let offset = u64::from_le_bytes([
+            bytes[p],
+            bytes[p + 1],
+            bytes[p + 2],
+            bytes[p + 3],
+            bytes[p + 4],
+            bytes[p + 5],
+            bytes[p + 6],
+            bytes[p + 7],
+        ]);
+        let len = u32::from_le_bytes([bytes[p + 8], bytes[p + 9], bytes[p + 10], bytes[p + 11]]);
+        if offset as usize + len as usize > data_end {
+            return Err(AppError::Data("arpack truncated: block data out of range".into()));
         }
-        if bytes[0..8] != MAGIC {
-            return Err(AppError::Data("arpack magic mismatch (not an ARPACK1 file)".into()));
-        }
-        let le = |i: usize| -> u32 {
-            u32::from_le_bytes([bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]])
-        };
-        let lef = |i: usize| -> f64 {
-            f64::from_le_bytes([
-                bytes[i],
-                bytes[i + 1],
-                bytes[i + 2],
-                bytes[i + 3],
-                bytes[i + 4],
-                bytes[i + 5],
-                bytes[i + 6],
-                bytes[i + 7],
-            ])
-        };
-        let format_version = le(8);
-        if format_version != FORMAT_VERSION {
-            return Err(AppError::Data(format!(
-                "arpack format_version mismatch: got {format_version}, expect {FORMAT_VERSION}"
-            )));
-        }
-        let data_version = le(12);
-        let rows = le(16) as usize;
-        let cols = le(20) as usize;
-        let origin_lon = lef(24);
-        let origin_lat = lef(32);
-        let cell_lon_deg = lef(40);
-        let cell_lat_deg = lef(48);
-        let z_resolution_m = lef(56);
-        let vertical_datum = bytes[64];
-        let resolution_semantics = bytes[65];
-        let block_compression = bytes[66];
-        let _reserved = bytes[67];
-        let block_size = le(68);
-        if block_size != BLOCK_SIZE {
-            return Err(AppError::Data(format!(
-                "arpack block_size {block_size} unsupported (expect {BLOCK_SIZE})"
-            )));
-        }
-        let blocks_x = le(72) as usize;
-        let blocks_y = le(76) as usize;
-        let no_data = i16::from_le_bytes([bytes[80], bytes[81]]);
-        let source = String::from_utf8_lossy(&bytes[82..256]).trim_end_matches('\0').to_string();
-        if rows == 0 || cols == 0 || blocks_x == 0 || blocks_y == 0 || cell_lon_deg <= 0.0 || cell_lat_deg <= 0.0
-        {
-            return Err(AppError::Data("arpack degenerate header".into()));
-        }
-
-        // 块索引
-        let n_blocks = blocks_x * blocks_y;
-        let idx_start = HEADER_SIZE + 32;
-        let idx_bytes = n_blocks * 12;
-        if bytes.len() < idx_start + idx_bytes {
-            return Err(AppError::Data("arpack truncated: block index out of range".into()));
-        }
-        let mut index = Vec::with_capacity(n_blocks);
-        for b in 0..n_blocks {
-            let p = idx_start + b * 12;
-            let offset = u64::from_le_bytes([
-                bytes[p],
-                bytes[p + 1],
-                bytes[p + 2],
-                bytes[p + 3],
-                bytes[p + 4],
-                bytes[p + 5],
-                bytes[p + 6],
-                bytes[p + 7],
-            ]);
-            let len = u32::from_le_bytes([bytes[p + 8], bytes[p + 9], bytes[p + 10], bytes[p + 11]]);
-            if offset as usize + len as usize > bytes.len() {
-                return Err(AppError::Data("arpack truncated: block data out of range".into()));
-            }
-            index.push((offset, len));
-        }
-
-        // SHA-256 校验（数据部分 = 从 idx_start 到文件尾）
-        let data_part = &bytes[idx_start..];
-        let mut hasher = Sha256::new();
-        hasher.update(data_part);
-        let digest = hasher.finalize();
-        if digest.as_slice() != &bytes[HEADER_SIZE..HEADER_SIZE + 32] {
-            return Err(AppError::Data("arpack sha256 mismatch (corrupt data)".into()));
-        }
-
-        let data = bytes[idx_start..].to_vec();
-        Ok(Self {
+        index.push((offset, len));
+    }
+    Ok((
+        HeaderFields {
             data_version,
             rows,
             cols,
@@ -226,10 +259,124 @@ impl BuiltinSource {
             blocks_y,
             no_data,
             source,
+            sha_expected,
+        },
+        index,
+    ))
+}
+
+impl BuiltinSource {
+    /// 打开 + 结构校验（O(1)：magic/版本/块索引越界；**不做全量 SHA**——按需读取）。
+    /// 块数据按需从 mmap 读取；全量完整性用 [`Self::verify_sha`]（导入后/开发期）。
+    pub fn open(path: &Path) -> Result<Self, AppError> {
+        use std::io::{Read, Seek, SeekFrom};
+        let mut file = std::fs::File::open(path)?;
+        let file_len = file.metadata()?.len() as usize;
+        if file_len < HEADER_SIZE + 32 {
+            return Err(AppError::Data(format!(
+                "arpack file truncated: {file_len} bytes < header+sha"
+            )));
+        }
+        // 读头部（含 sha 字段）→ 解析 blocks_x/y → 读块索引区 → 结构校验（O(1)）
+        let mut hdr = [0u8; HEADER_SIZE + 32];
+        file.read_exact(&mut hdr)?;
+        let le = |i: usize| -> u32 {
+            u32::from_le_bytes([hdr[i], hdr[i + 1], hdr[i + 2], hdr[i + 3]])
+        };
+        if hdr[0..8] != MAGIC {
+            return Err(AppError::Data("arpack magic mismatch (not an ARPACK1 file)".into()));
+        }
+        if le(8) != FORMAT_VERSION {
+            return Err(AppError::Data(format!(
+                "arpack format_version mismatch: got {}, expect {FORMAT_VERSION}",
+                le(8)
+            )));
+        }
+        let blocks_x = le(72) as usize;
+        let blocks_y = le(76) as usize;
+        let idx_bytes = blocks_x.checked_mul(blocks_y).unwrap_or(0).checked_mul(12).unwrap_or(0);
+        let mut hdr_index = vec![0u8; HEADER_SIZE + 32 + idx_bytes];
+        hdr_index[..HEADER_SIZE + 32].copy_from_slice(&hdr);
+        if idx_bytes > 0 {
+            file.seek(SeekFrom::Start((HEADER_SIZE + 32) as u64))?;
+            file.read_exact(&mut hdr_index[HEADER_SIZE + 32..])?;
+        }
+        let (h, index) = parse_header_index(&hdr_index, file_len)?;
+        // mmap 全文件（虚拟映射，物理页按访问加载；只读共享，多线程无锁读块）
+        let mmap = unsafe { memmap2::Mmap::map(&file)? };
+        Ok(Self {
+            data_version: h.data_version,
+            rows: h.rows,
+            cols: h.cols,
+            origin_lon: h.origin_lon,
+            origin_lat: h.origin_lat,
+            cell_lon_deg: h.cell_lon_deg,
+            cell_lat_deg: h.cell_lat_deg,
+            z_resolution_m: h.z_resolution_m,
+            vertical_datum: h.vertical_datum,
+            resolution_semantics: h.resolution_semantics,
+            block_compression: h.block_compression,
+            blocks_x: h.blocks_x,
+            blocks_y: h.blocks_y,
+            no_data: h.no_data,
+            source: h.source,
+            sha_expected: h.sha_expected,
             index,
-            data,
+            store: Store::Mmap(mmap),
             cache: Mutex::new(BlockCache::default()),
         })
+    }
+
+    /// 从字节解析（测试友好）。全部校验失败 → `AppError::Data`（含全量 SHA）。
+    pub fn parse(bytes: &[u8]) -> Result<Self, AppError> {
+        let (h, index) = parse_header_index(bytes, bytes.len())?;
+
+        // SHA-256 校验（数据部分 = 从 idx_start 到文件尾）
+        let idx_start = HEADER_SIZE + 32;
+        let mut hasher = Sha256::new();
+        hasher.update(&bytes[idx_start..]);
+        let digest = hasher.finalize();
+        if digest.as_slice() != &bytes[HEADER_SIZE..HEADER_SIZE + 32] {
+            return Err(AppError::Data("arpack sha256 mismatch (corrupt data)".into()));
+        }
+
+        Ok(Self {
+            data_version: h.data_version,
+            rows: h.rows,
+            cols: h.cols,
+            origin_lon: h.origin_lon,
+            origin_lat: h.origin_lat,
+            cell_lon_deg: h.cell_lon_deg,
+            cell_lat_deg: h.cell_lat_deg,
+            z_resolution_m: h.z_resolution_m,
+            vertical_datum: h.vertical_datum,
+            resolution_semantics: h.resolution_semantics,
+            block_compression: h.block_compression,
+            blocks_x: h.blocks_x,
+            blocks_y: h.blocks_y,
+            no_data: h.no_data,
+            source: h.source,
+            sha_expected: h.sha_expected,
+            index,
+            store: Store::Mem(bytes.to_vec()),
+            cache: Mutex::new(BlockCache::default()),
+        })
+    }
+
+    /// 全量 SHA-256 校验（数据部分 = 块索引区起）。开发期/导入后用；发布默认不调
+    /// （open 仅结构校验，O(1)）。数据损坏 → `AppError::Data`。
+    pub fn verify_sha(&self) -> Result<(), AppError> {
+        let idx_start = HEADER_SIZE + 32;
+        let mut hasher = Sha256::new();
+        match &self.store {
+            Store::Mem(b) => hasher.update(&b[idx_start..]),
+            Store::Mmap(m) => hasher.update(&m[idx_start..]),
+        }
+        let digest = hasher.finalize();
+        if digest.as_slice() != self.sha_expected {
+            return Err(AppError::Data("arpack sha256 mismatch (corrupt data)".into()));
+        }
+        Ok(())
     }
 
     pub fn data_version(&self) -> u32 {
@@ -280,12 +427,10 @@ impl BuiltinSource {
         }
     }
 
-    /// 加载并还原一个块（raw / zstd）。
+    /// 加载并还原一个块（raw / zstd）。块数据按需从 store（mmap/内存）读取。
     fn load_block(&self, bidx: usize) -> Option<Vec<i16>> {
         let (offset, len) = *self.index.get(bidx)?;
-        let start = (offset as usize).checked_sub(HEADER_SIZE + 32)?;
-        let end = start.checked_add(len as usize)?;
-        let raw = self.data.get(start..end)?;
+        let raw = self.store.get(offset as usize, len as usize)?;
         let block_n = BLOCK_SIZE as usize * BLOCK_SIZE as usize;
         let mut out = match self.block_compression {
             COMPRESSION_RAW => {
@@ -719,5 +864,85 @@ mod tests {
         assert!(s.height_at(116.198, 39.297).is_some());
         // 空洞 → None
         assert!(s.height_at(116.199, 39.299).is_none());
+    }
+
+    // ---- mmap 按需打开（2026-08-07 主管拍板：大型 ARPK1 打开 O(1) + 块按需） ----
+
+    /// mmap open 与 parse 内存路径 bit-exact 一致（全网格采样 + 越界 + 空洞）。
+    #[test]
+    fn open_mmap_matches_parse() {
+        let (bytes, _h) = pack_fixture();
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("arpk_mmap_test_{}.arpack", std::process::id()));
+        std::fs::write(&path, &bytes).unwrap();
+        let result = (|| -> Result<(), AppError> {
+            let s = BuiltinSource::open(&path)?;
+            s.verify_sha()?;
+            let p = BuiltinSource::parse(&bytes).unwrap();
+            assert_eq!(s.rows, p.rows);
+            assert_eq!(s.cols, p.cols);
+            assert_eq!(s.origin_lon, p.origin_lon);
+            assert_eq!(s.origin_lat, p.origin_lat);
+            assert_eq!(s.cell_lon_deg, p.cell_lon_deg);
+            assert_eq!(s.cell_lat_deg, p.cell_lat_deg);
+            assert_eq!(s.blocks_x, p.blocks_x);
+            assert_eq!(s.blocks_y, p.blocks_y);
+            assert_eq!(s.no_data, p.no_data);
+            assert_eq!(s.source, p.source);
+            // 全网格采样 bit-exact
+            for r in 0..s.rows {
+                for c in 0..s.cols {
+                    let lon = s.origin_lon + c as f64 * s.cell_lon_deg + s.cell_lon_deg / 2.0;
+                    let lat = s.origin_lat + r as f64 * s.cell_lat_deg + s.cell_lat_deg / 2.0;
+                    assert_eq!(s.sample(lon, lat), p.sample(lon, lat), "mismatch r={r} c={c}");
+                }
+            }
+            // 越界 / 空洞语义一致
+            assert!(s.height_at(116.2, 39.3).is_none());
+            assert!(s.height_at(116.199, 39.299).is_none());
+            Ok(())
+        })();
+        let _ = std::fs::remove_file(&path);
+        result.unwrap();
+    }
+
+    /// mmap open 仅结构校验（O(1)）：块数据流内破坏 → open 成功 + 采样可用，
+    /// 全量校验 `verify_sha` 才报错（发布默认不调；开发期/导入后用）。
+    #[test]
+    fn open_mmap_structural_ok_sha_fails() {
+        let (mut bytes, _) = pack_fixture();
+        let n = bytes.len();
+        bytes[n - 1] ^= 0xFF; // 破坏最后一个字节（块数据流内，头部/索引结构完好）
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("arpk_mmap_corrupt_{}.arpack", std::process::id()));
+        std::fs::write(&path, &bytes).unwrap();
+        let result = (|| -> Result<(), AppError> {
+            let s = BuiltinSource::open(&path)?; // 结构校验通过
+            assert!(s.height_at(116.1, 39.1).is_some()); // 采样仍可用
+            match s.verify_sha() {
+                Err(AppError::Data(msg)) => assert!(msg.contains("sha256"), "msg={msg}"),
+                other => panic!("expected sha256 error, got {other:?}"),
+            }
+            Ok(())
+        })();
+        let _ = std::fs::remove_file(&path);
+        result.unwrap();
+    }
+
+    /// mmap open 截断：块数据流被截断 → open 结构校验失败（索引越界，O(1) 拦下）。
+    #[test]
+    fn open_mmap_truncated_fails() {
+        let (bytes, _) = pack_fixture();
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("arpk_mmap_trunc_{}.arpack", std::process::id()));
+        std::fs::write(&path, &bytes[..bytes.len() - 100]).unwrap(); // 截断 100B
+        let result = (|| -> Result<(), AppError> {
+            match BuiltinSource::open(&path) {
+                Err(AppError::Data(_)) => Ok(()),
+                other => panic!("expected truncated error, got {other:?}"),
+            }
+        })();
+        let _ = std::fs::remove_file(&path);
+        result.unwrap();
     }
 }
