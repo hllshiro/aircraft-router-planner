@@ -154,6 +154,96 @@ fn load_real() -> Option<BuiltinSource> {
     }
 }
 
+/// GMTED2010 7.5as 耗时对比（2026-08-07）：
+/// gmted2010_7p5as_global.z19.arpack 为转换失败产物（convert log: proj.db 缺失，
+/// 文件头无效 rows/cols 乱码），无法直接使用。用真实 china_dem_l12 重采样到
+/// 7.5as 网格（真实地形内容 + 真实 7.5as 块数/压缩语义），对比 field build 耗时。
+/// 注：field build 耗时由块数/解压量决定，与地形内容几乎无关，近似可靠。
+#[test]
+fn gmted_7p5as_speed_comparison() {
+    let Some(src10) = load_real() else {
+        eprintln!("[compare] SKIP: china_dem_l12.arpack not found");
+        return;
+    };
+    eprintln!("[compare] 10as terrain: {}", src10.resolution_desc());
+    let (min_lon, min_lat, span) = zigzag11_region();
+    let cell_75 = 7.5 / 3600.0; // 0.0020833°
+    let n = (span / cell_75).ceil() as usize; // ~6370
+    eprintln!(
+        "[compare] 7.5as grid: {n}x{n} = {} cells (vs 10as {:.0} cells)",
+        n * n,
+        (span / (10.0 / 3600.0)).powi(2)
+    );
+    // 1. 用 10as 源无锁重采样生成 7.5as 网格（真实地形内容；min_lon/min_lat/span 复用顶部）
+    let mut h = vec![0i16; n * n];
+    {
+        let local = src10.prefetch_lonlat(min_lon, min_lat, min_lon + span, min_lat + span);
+        for r in 0..n {
+            let lat = min_lat + (r as f64 + 0.5) * cell_75;
+            for c in 0..n {
+                let lon = min_lon + (c as f64 + 0.5) * cell_75;
+                h[r * n + c] = match src10.sample_local(&local, lon, lat) {
+                    Sample::Land(v) | Sample::Lake(v) => v as i16,
+                    Sample::Water => 0,
+                    Sample::NoData | Sample::OutOfBounds => -32768,
+                };
+            }
+        }
+    }
+    // 2. 写成 ARPK1（7.5as）
+    let bytes = write_pack_raw(
+        n,
+        n,
+        min_lon,
+        min_lat,
+        cell_75,
+        cell_75,
+        1.0,
+        true,
+        -32768,
+        "gmted-7p5as-synth(resampled-china)",
+        &h,
+    );
+    drop(h);
+    let src75 = BuiltinSource::parse(&bytes).expect("7.5as synth parse");
+    eprintln!("[compare] 7.5as terrain: {}", src75.resolution_desc());
+    // 3. 冷缓存公平对比：10as vs 7.5as（par_local，每轮新实例交替取 min）
+    let src10_bytes = std::fs::read(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("phase0/data/pending/china_dem_l12.arpack"),
+    )
+    .expect("re-read 10as");
+    let mut t10_best = f64::INFINITY;
+    let mut t75_best = f64::INFINITY;
+    for round in 0..3 {
+        if round % 2 == 0 {
+            let s10 = BuiltinSource::parse(&src10_bytes).expect("parse");
+            let tt = Instant::now();
+            let _ = build_par_local(&s10, min_lon, min_lat, span, 1024);
+            t10_best = t10_best.min(tt.elapsed().as_secs_f64() * 1000.0);
+            let s75 = BuiltinSource::parse(&bytes).expect("parse");
+            let tt = Instant::now();
+            let _ = build_par_local(&s75, min_lon, min_lat, span, 1024);
+            t75_best = t75_best.min(tt.elapsed().as_secs_f64() * 1000.0);
+        } else {
+            let s75 = BuiltinSource::parse(&bytes).expect("parse");
+            let tt = Instant::now();
+            let _ = build_par_local(&s75, min_lon, min_lat, span, 1024);
+            t75_best = t75_best.min(tt.elapsed().as_secs_f64() * 1000.0);
+            let s10 = BuiltinSource::parse(&src10_bytes).expect("parse");
+            let tt = Instant::now();
+            let _ = build_par_local(&s10, min_lon, min_lat, span, 1024);
+            t10_best = t10_best.min(tt.elapsed().as_secs_f64() * 1000.0);
+        }
+    }
+    eprintln!(
+        "[compare] field build (1024x1024, cold-cache, par+local): 10as={:.1}ms 7.5as={:.1}ms 增加={:.1}ms ({:.1}%)",
+        t10_best,
+        t75_best,
+        t75_best - t10_best,
+        (t75_best / t10_best - 1.0) * 100.0
+    );
+}
+
 /// 合成 ARPK1 数据（512×512，cell 0.01°，正弦地形 + NoData 空洞；单块 raw）。
 fn synth_source() -> BuiltinSource {
     let (rows, cols) = (512usize, 512usize);
