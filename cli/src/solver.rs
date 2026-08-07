@@ -716,7 +716,10 @@ fn join_paths(segs: &[Path]) -> Path {
 /// 按段高度采样判定（高度沿线段线性插值，区间外可穿越）。
 /// 雷达威胁：直连"深穿"任一雷达（归一化深度 < 0.7，即深入有效半径 70% 以内）
 /// → 拒绝拉直（保住 FMM 绕行决策——P_cross 只是验收阈值，不得因调高 P_cross
-/// 而把绕行弧拉直成穿雷达区的直线；主管 2026-08-06：航路必须绕开雷达探测区域）；
+/// 而把绕行弧拉直成穿雷达区的直线；主管 2026-08-06：航路必须绕开雷达探测区域）。
+/// **例外**：段两端点任一已在深区（目标/必经点本身在雷达探测区内，绕不开）→
+/// 允许拉直（雷达软约束由 verify 记录；无条件拒绝会让最后接近段无法拉直 →
+/// 交付 FMM 网格伪影，主管 2026-08-06 37 点场景）。
 /// 低概率边缘（≥0.7，即有效半径外）允许拉直 → 绕行路径可平滑。
 /// 线段合法性检查（Theta* 去锯齿拉直用）。
 /// Zone 水平判定：NoFly/Obstacle 全高度墙——段到 Zone 水平净距 < inflation_km 即拒绝
@@ -725,7 +728,10 @@ fn join_paths(segs: &[Path]) -> Path {
 /// Restricted 保持"水平相交 + 段高度采样"（M2 高度层语义，不膨胀）。
 /// 雷达威胁：直连"深穿"任一雷达（归一化深度 < 0.7，即深入有效半径 70% 以内）
 /// → 拒绝拉直（保住 FMM 绕行决策——P_cross 只是验收阈值，不得因调高 P_cross
-/// 而把绕行弧拉直成穿雷达区的直线；主管 2026-08-06：航路必须绕开雷达探测区域）；
+/// 而把绕行弧拉直成穿雷达区的直线；主管 2026-08-06：航路必须绕开雷达探测区域）。
+/// **例外**：段两端点任一已在深区（目标/必经点本身在雷达探测区内，绕不开）→
+/// 允许拉直（雷达软约束由 verify 记录；无条件拒绝会让最后接近段无法拉直 →
+/// 交付 FMM 网格伪影，主管 2026-08-06 37 点场景）。
 /// 低概率边缘（≥0.7，即有效半径外）允许拉直 → 绕行路径可平滑。
 fn make_segment_check<'a>(
     zones: &'a [Zone],
@@ -783,13 +789,23 @@ fn make_segment_check<'a>(
             }
         }
         if let Some(tm) = threat {
-            for i in 0..=N {
-                let t = i as f64 / N as f64;
-                let lon = lon1 + (lon2 - lon1) * t;
-                let lat = lat1 + (lat2 - lat1) * t;
-                let alt = alt1 + (alt2 - alt1) * t;
-                if tm.static_penetration(lon, lat, alt) < DEEP_RATIO {
-                    return false;
+            // 雷达：仅当**两端点都在深区外**时，直连穿深区 = 破坏 FMM 绕行决策 → 拒绝。
+            // 任一端点已在深区（目标/必经点落在雷达探测区内，无法绕开，如 2026-08-06
+            // 主管 37 点场景 target 距雷达 61km < 0.7×100km）→ 允许拉直——该端点深穿
+            // 不可避免，拉直只简化 FMM 网格伪影，不引入新的"绕行决策破坏"；雷达是软
+            // 约束，最终由 verify 记录 P_cross（此前无条件拒绝深穿 → Theta* 无法拉直
+            // 最后接近段 → 交付密集网格点伪影）。
+            let deep_a = tm.static_penetration(lon1, lat1, alt1) < DEEP_RATIO;
+            let deep_b = tm.static_penetration(lon2, lat2, alt2) < DEEP_RATIO;
+            if !deep_a && !deep_b {
+                for i in 0..=N {
+                    let t = i as f64 / N as f64;
+                    let lon = lon1 + (lon2 - lon1) * t;
+                    let lat = lat1 + (lat2 - lat1) * t;
+                    let alt = alt1 + (alt2 - alt1) * t;
+                    if tm.static_penetration(lon, lat, alt) < DEEP_RATIO {
+                        return false;
+                    }
                 }
             }
         }
@@ -1906,6 +1922,37 @@ mod tests {
             .any(|s| s.contains("radar: cumulative detection p") && s.contains("> threshold"));
         assert!(!over, "绕行后探测概率应 <0.1: warnings={:?} degradations={:?}",
             out.vehicles[0].warnings, out.stats.degradations);
+    }
+
+    #[test]
+    fn m3_target_in_radar_deep_zone_straightens_approach() {
+        // 主管 2026-08-06 37 点场景：target 落在雷达深区（距圆心 61km < 0.7×100km），
+        // Theta* check 无条件拒绝"直连穿深区"→ 最后接近段无法拉直 → 交付 FMM 网格
+        // 伪影（33 点共线等距，总路径 37 点）。修复：段两端点任一已在深区（目标/必经
+        // 点本身在雷达探测区内，绕不开）→ 允许拉直；雷达软约束由 verify 记录 P_cross。
+        // 本用例：target 在 100km 雷达深区内，start 在深区外 → 路径应平滑（无网格伪影）。
+        let s = r#"{
+            "schema_version":"0.20",
+            "mission":{
+                "start":{"lon":118.0,"lat":42.0,"alt_m":3000},
+                "target":{"lon":111.26,"lat":43.83,"alt_m":3000},
+                "terrain":{"source":"none"},
+                "red_forces":{"radars":[{"id":"r1","lon":111.0,"lat":44.0,"radar_type":"early_warning","radius_km":100}]}
+            }
+        }"#;
+        let out = solve(&parse(s), &SolveParams::default(), 0).unwrap();
+        assert_eq!(out.vehicles[0].status, "planned");
+        // 平滑：接近段必须拉直（修复前 Theta* 拒深区直连 → 数十~上百点网格伪影）
+        assert!(
+            out.vehicles[0].path.len() <= 12,
+            "深区 target 接近段应拉直平滑，点数 {}",
+            out.vehicles[0].path.len()
+        );
+        assert!(
+            !out.vehicles[0].warnings.iter().any(|w| w.contains("smoothing_failed")),
+            "不应 smoothing_failed: {:?}",
+            out.vehicles[0].warnings
+        );
     }
 
     #[test]

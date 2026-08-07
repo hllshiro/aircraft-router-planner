@@ -1,0 +1,138 @@
+{
+  "schema_version": "0.20",
+  "mission": {
+    "start": {
+      "lon": 124.08488491093874,
+      "lat": 34.66470606380233,
+      "alt_m": 1000
+    },
+    "target": {
+      "lon": 111.25990351543102,
+      "lat": 43.82628474871892,
+      "alt_m": 3000
+    },
+    "vehicles": [
+      {
+        "id": "v1",
+        "profile": {
+          "aircraft_type": "FIXED_WING",
+          "cruise_speed_mps": 250,
+          "min_turn_radius_m": 442,
+          "max_climb_angle_deg": 15
+        },
+        "start_pose": {
+          "lon": 124.08488491093874,
+          "lat": 34.66470606380233,
+          "alt_m": 3000,
+          "heading_deg": 45
+        },
+        "mid_waypoints": []
+      }
+    ],
+    "red_forces": {
+      "radars": [
+        {
+          "id": "radar_1786063356956",
+          "lon": 115.6498350771603,
+          "lat": 37.68989197419215,
+          "radar_type": "early_warning",
+          "radius_km": 100,
+          "alt_m": 10
+        },
+        {
+          "id": "radar_1786063384876",
+          "lon": 110.52918130809387,
+          "lat": 44.003539599684515,
+          "radar_type": "early_warning",
+          "radius_km": 100,
+          "alt_m": 10
+        }
+      ]
+    },
+    "no_fly_zones": [
+      {
+        "id": "zone_1786063133308",
+        "zone_type": "no_fly",
+        "shape": "polygon",
+        "geometry": {
+          "vertices": [
+            [
+              119.03378392060324,
+              39.51662545451961
+            ],
+            [
+              118.25768091127134,
+              38.49706114765016
+            ],
+            [
+              118.83165472542605,
+              37.53293384107337
+            ],
+            [
+              119.31402164807555,
+              38.8285329659029
+            ]
+          ]
+        },
+        "alt_min_m": 0,
+        "alt_max_m": 12000,
+        "height_semantics": "msl"
+      },
+      {
+        "id": "zone_1786063230260",
+        "zone_type": "no_fly",
+        "shape": "circle",
+        "geometry": {
+          "center": [
+            116.90756719146172,
+            38.533724933795455
+          ],
+          "radius_km": 50
+        },
+        "alt_min_m": 0,
+        "alt_max_m": 12000,
+        "height_semantics": "msl"
+      }
+    ],
+    "restricted_zones": [
+      {
+        "id": "rz_1786063218180",
+        "zone_type": "restricted",
+        "shape": "circle",
+        "geometry": {
+          "center": [
+            120.29800331610701,
+            37.12685669255434
+          ],
+          "radius_km": 50
+        },
+        "alt_min_m": 0,
+        "alt_max_m": 5000,
+        "height_semantics": "msl"
+      },
+      {
+        "id": "rz_1786063238380",
+        "zone_type": "restricted",
+        "shape": "circle",
+        "geometry": {
+          "center": [
+            121.83301142374432,
+            36.93013916982642
+          ],
+          "radius_km": 50
+        },
+        "alt_min_m": 6000,
+        "alt_max_m": 12000,
+        "height_semantics": "msl"
+      }
+    ],
+    "obstacles": [],
+    "terrain": {
+      "source": "path",
+      "path": "phase0/data/pending/china_dem_l12.arpack"
+    },
+    "parameters": {
+      "p_cross": 0.9
+    }
+  }
+}
