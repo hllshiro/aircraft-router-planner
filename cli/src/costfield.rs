@@ -133,6 +133,71 @@ where
     f
 }
 
+/// 语义代价场并行构建（候选优化，2026-08-07 对比验证）。
+/// 与 `build_semantic_cost_field` **数值逐位一致**：每格采样独立，仅行遍历并行化。
+/// 地形源块缓存（Mutex）天然线程安全：解压在锁外进行，多线程并发解压不同块
+/// （zstd 解压是 field_build 主成本——zigzag11 实测 field_build 1266ms 占 80%）。
+/// 线程数 = available_parallelism，上限 16；行数过少回退串行。
+pub fn build_semantic_cost_field_par<F>(
+    rows: usize,
+    cols: usize,
+    sample: &F,
+    nodata_mult: f32,
+) -> CostField
+where
+    F: Fn(usize, usize) -> Sample + Sync + Send,
+{
+    let nthreads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .clamp(1, 16);
+    if nthreads <= 1 || rows < 64 {
+        let mut f = CostField::new(rows, cols);
+        for r in 0..rows {
+            for c in 0..cols {
+                let i = r * cols + c;
+                f.cost[i] = sample(r, c).base_cost(nodata_mult);
+            }
+        }
+        return f;
+    }
+    // 行分块；每线程构建子行段（行优先），按块序 join 拼接——顺序与串行一致。
+    // scoped threads：借用非 'static 的 sample 引用，无需 Arc。
+    let chunk = rows.div_ceil(nthreads);
+    let mut f = CostField::new(rows, cols);
+    std::thread::scope(|scope| {
+        let mut ranges: Vec<(usize, usize)> = Vec::new();
+        let mut handles = Vec::new();
+        for t in 0..nthreads {
+            let r0 = t * chunk;
+            if r0 >= rows {
+                break;
+            }
+            let r1 = (r0 + chunk).min(rows);
+            ranges.push((r0, r1));
+            let s = sample;
+            handles.push(scope.spawn(move || {
+                let n = (r1 - r0) * cols;
+                let mut sub = vec![0f32; n];
+                for r in r0..r1 {
+                    let base = (r - r0) * cols;
+                    for c in 0..cols {
+                        sub[base + c] = s(r, c).base_cost(nodata_mult);
+                    }
+                }
+                sub
+            }));
+        }
+        let mut offset = 0;
+        for (h, (_r0, r1)) in handles.into_iter().zip(&ranges) {
+            let sub = h.join().unwrap_or_else(|_| vec![0.0; (r1 - _r0) * cols]);
+            f.cost[offset..offset + sub.len()].copy_from_slice(&sub);
+            offset += sub.len();
+        }
+    });
+    f
+}
+
 /// 窄带堆元素（按到达时间小优先；tie-break 用 idx 保证确定性）。
 #[derive(Clone, Copy)]
 struct HeapEntry {
