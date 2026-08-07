@@ -195,6 +195,26 @@ fn phase0_feedback_inputs_regression() {
             );
         }
 
+        // zigzag12（2026-08-07 主管）：start 黄海→target 内蒙，双 100km 雷达 +
+        // no_fly 多边形 + no_fly 圆 + 双 restricted（rz1 0-5000 顶部绕飞）。raw 1893
+        // 点网格楼梯回退（smoothing_failed）。根因：rz1 顶部剖面 out→climb 过渡直线
+        // (119.75,37.27)→(117.16,37.30) 穿 no_fly 多边形（clearance=0）——剖面段穿
+        // 硬墙从未检测（need_wall 恒 false）→ 拼接后终检拒 → 全链回退。修复：过渡
+        // 直线（desc_in/out_climb）做硬墙净距检查 → need_wall → 画墙水平绕行兜底 →
+        // 6 点平滑交付。强断言防锯齿复发。
+        if name == "zigzag12.json" {
+            let v = &out.vehicles[0];
+            assert!(
+                v.path.len() < 30,
+                "{name}: still staircase dense ({} pts), profile-through-wall regression",
+                v.path.len()
+            );
+            assert!(
+                !v.warnings.iter().any(|w| w.contains("smoothing_failed")),
+                "{name}: smoothing_failed re-appeared"
+            );
+        }
+
         eprintln!("[regress] {name}: status={} vehicles={}", out.status, out.vehicles.len());
     }
 }

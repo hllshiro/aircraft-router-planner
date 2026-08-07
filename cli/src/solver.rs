@@ -453,6 +453,26 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                 pts = joined.points;
                 warnings = seg_warnings.clone();
             } else {
+                if std::env::var_os("ARP_DEBUG_SMOOTH").is_some() {
+                    eprintln!(
+                        "[smooth-dbg] FINAL VERIFY FAIL points={} issues={} warnings={}",
+                        joined.points.len(),
+                        final_rep.issues.len(),
+                        final_rep.warnings.len()
+                    );
+                    for (pi, pp) in joined.points.iter().enumerate() {
+                        eprintln!(
+                            "[smooth-dbg]   pt{pi}: lon={:.6} lat={:.6} alt={:.0}",
+                            pp.lon, pp.lat, pp.alt_m
+                        );
+                    }
+                    for iss in final_rep.issues.iter().take(10) {
+                        eprintln!("[smooth-dbg]   final issue: {iss}");
+                    }
+                    for (si, seg) in smooth_segs.iter().enumerate() {
+                        eprintln!("[smooth-dbg]   seg{si}: {} pts", seg.points.len());
+                    }
+                }
                 // 终检失败 → 回退未平滑拼接（必经点保留，宁丑勿违）
                 pts = raw_joined.points;
                 let msg = "smoothing_failed: no smoothed stage passed full verification";
@@ -1017,7 +1037,9 @@ fn line_hits_wall_km(
 /// （`restricted_detour_required`），raw 不穿它，此处自动跳过。
 ///
 /// 返回 (切分段, 段掩码 true=跳过平滑, need_wall_fallback)。
-/// 剖面段 = raw 子段（FMM 已避硬墙）→ need_wall 恒 false（保留签名供调用方兜底）。
+/// 剖面段 = raw 子段（FMM 已避硬墙）+ 新构造过渡直线；过渡直线（desc_in/out_climb）
+/// 可能穿硬墙（组合机动锚点伸到墙另一侧）→ need_wall=true → 画墙水平绕行兜底。
+/// 2026-08-07 主管 zigzag12：rz1 顶部剖面 out→climb 直线穿 no_fly 多边形。
 #[allow(clippy::too_many_arguments)]
 fn build_restricted_profiles(
     seg: &Path,
@@ -1234,6 +1256,30 @@ fn build_restricted_profiles(
                     break;
                 }
             }
+        }
+        // 切分 5 段前：过渡直线可能穿硬墙（组合机动 out→climb 直线从 rz 出口伸到
+        // 墙另一侧，如 2026-08-07 主管 zigzag12：rz1 顶部剖面 out→climb 直线
+        // (119.75,37.27)→(117.16,37.30) 穿 no_fly 多边形，clearance=0 → 拼接后
+        // 终检拒 → 回退 1893 点网格楼梯）。desc_in / out_climb 是新构造直线（非
+        // raw 子段），必须做硬墙净距检查；任一穿墙 → need_wall → 画墙水平绕行兜底。
+        let desc_line_hits = line_hits_wall_km(
+            tail.points[i_desc].lon,
+            tail.points[i_desc].lat,
+            pin2.lon,
+            pin2.lat,
+            zones,
+            inflation_km,
+        );
+        let climb_line_hits = line_hits_wall_km(
+            pout2.lon,
+            pout2.lat,
+            tail.points[i_climb].lon,
+            tail.points[i_climb].lat,
+            zones,
+            inflation_km,
+        );
+        if desc_line_hits || climb_line_hits {
+            return (vec![seg.clone()], vec![false], true);
         }
         // 切分 5 段：
         //  [首段 raw[0..=i_desc]@alt_m, 过渡直线 desc→in(mask=true 跳过平滑,15°),

@@ -3,7 +3,7 @@
 来源：`phase0_out/`（Phase 0 调试产物目录，已 gitignore）中**输入型 mission JSON**——
 历史上主管反馈 bug 的原始输入。复制至此作为正式回归用例，防止错误复现。
 
-## 用例清单（18 个）
+## 用例清单（19 个）
 
 | 用例文件 | 对应历史 bug（memory 锚点） |
 |---|---|
@@ -15,6 +15,8 @@
 | `real_rz_polygon.json` | restricted 多边形形态 |
 | `test_trap.json` | 禁飞区陷阱（多边形） |
 | `test_twin.json` / `test_twin7.json` | 双禁飞区（圆+多边形） |
+| `zigzag11.json` | 段边界入口航向约束（commit 44aad43） |
+| `zigzag12.json` | 剖面过渡直线穿硬墙 → need_wall 画墙兜底（2026-08-07） |
 
 ## 回归语义
 

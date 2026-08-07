@@ -1065,6 +1065,20 @@ pub fn smooth_path_chain<'a>(
             best = Some((idx, stage));
         }
         // 该阶段复验失败 → 跳过
+        if std::env::var_os("ARP_DEBUG_SMOOTH").is_some() {
+            let status = if rep.ok { "OK" } else { "FAIL" };
+            eprintln!(
+                "[smooth-dbg] stage={} points={} status={} issues={} warnings={}",
+                _name,
+                stage.points.len(),
+                status,
+                rep.issues.len(),
+                rep.warnings.len()
+            );
+            for iss in rep.issues.iter().take(6) {
+                eprintln!("[smooth-dbg]   issue: {iss}");
+            }
+        }
     }
     if let Some((idx, stage)) = best {
         let applied: Vec<String> = stages[1..=idx].iter().map(|(n, _)| n.clone()).collect();
