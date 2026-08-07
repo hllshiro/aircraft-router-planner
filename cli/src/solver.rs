@@ -863,10 +863,15 @@ fn make_segment_check<'a>(
                     return false;
                 }
             } else if let crate::config::ZoneShape::Circle { center, radius_km } = &z.shape {
-                // restricted 圆：与 verify 完全同口径——解析二次方程得到穿圆参数区间
-                // [t1,t2]，**区间内**采样高度（0..N 等距采样会漏掉浅穿/短弦：段擦圆
-                // 边缘穿入仅 0.03 宽，16 个等距点可能全在圆外 → check 放行 verify
-                // 会拒的穿区段，2026-08-06 zigzag9 theta_star 拉直段擦过 restricted 圆）。
+                // restricted 圆：与 verify 完全同口径，**两层**判定都做——
+                // 1) 解析二次方程得到穿圆参数区间 [t1,t2]，**区间内**采样高度
+                //    （0..N 等距采样会漏掉浅穿/短弦：段擦圆边缘穿入仅 0.03 宽，
+                //    16 个等距点可能全在圆外 → check 放行 verify 会拒的穿区段，
+                //    2026-08-06 zigzag9 theta_star 拉直段擦过 restricted 圆）；
+                // 2) 整段等距采样 + haversine 点判定（verify 层 2 同口径）——解析
+                //    区间用等距投影（固定中纬 cos），点判定用 Geo::distance_m（大圆），
+                //    半径 100km 边缘偏差 ~±2% 可翻转"穿/不穿"，边缘浅穿场景 check
+                //    放行 verify 拒（2026-08-07 zigzag16 restricted 圆心东移）。
                 if let Some((t1, t2)) = crate::smooth::segment_circle_intersect_t(
                     lon1,
                     lat1,
@@ -885,6 +890,18 @@ fn make_segment_check<'a>(
                             if zone_contains_at(z, &g, alt, None) {
                                 return false;
                             }
+                        }
+                    }
+                }
+                // 层 2：整段等距采样（与 verify 的 sample inside zone 完全同口径）
+                for i in 0..=N {
+                    let t = i as f64 / N as f64;
+                    let lon = lon1 + (lon2 - lon1) * t;
+                    let lat = lat1 + (lat2 - lat1) * t;
+                    let alt = alt1 + (alt2 - alt1) * t;
+                    if let Ok(g) = Geo::new(lon, lat) {
+                        if zone_contains_at(z, &g, alt, None) {
+                            return false;
                         }
                     }
                 }
