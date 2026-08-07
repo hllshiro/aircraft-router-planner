@@ -217,6 +217,7 @@ export default function App() {
           ]}
           results={result?.vehicles ?? null}
           terrainData={terrainData}
+          bounds={sceneBounds(config)}
           onGroundClick={handleGroundClick}
           onRadarMove={handleRadarMove}
           onZoneMove={handleZoneMove}

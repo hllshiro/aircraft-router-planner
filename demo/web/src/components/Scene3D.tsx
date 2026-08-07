@@ -20,6 +20,8 @@ interface Scene3DProps {
   zones: Zone[];
   results: VehicleOutput[] | null;
   terrainData: TerrainInfo | null;
+  /** 场景包围盒 [minLon, minLat, maxLon, maxLat]（sceneBounds；与地形网格/相机视野一致） */
+  bounds: [number, number, number, number];
   onGroundClick: (wp: Waypoint) => void;
   onRadarMove: (id: string, lon: number, lat: number) => void;
   onZoneMove: (id: string, dLon: number, dLat: number) => void;
@@ -57,11 +59,13 @@ function GroundClickPlane({
   onClick,
   geoRef,
   suppressUntil,
+  bounds,
 }: {
   active: boolean;
   onClick: (wp: Waypoint) => void;
   geoRef: GeoRef;
   suppressUntil: number;
+  bounds: [number, number, number, number];
 }) {
   // 同位置防抖：r3f 事件重复触发/StrictMode 重绑定时，同一位置 400ms 内只生效一次
   const last = useRef<{ x: number; y: number; t: number } | null>(null);
@@ -90,11 +94,26 @@ function GroundClickPlane({
     [active, onClick, geoRef, suppressUntil],
   );
 
+  // 点击平面 = sceneBounds（与地形网格/相机视野一致的可见范围）：
+  // 固定 ±600km 平面比场景显示范围大得多（近距场景最小 2.5°×2.2°≈±135km），
+  // 多边形顶点可点在视野外/地形外 → 添加看不见的顶点（主管 2026-08-07：
+  // 顶点点击范围应与场景范围一致）。以 geoRef(start) 为原点换算局部坐标。
+  const kx = 111320 * Math.cos((geoRef.lat * Math.PI) / 180);
+  const ky = 110574;
+  const [minLon, minLat, maxLon, maxLat] = bounds;
+  const width = (maxLon - minLon) * kx;
+  const height = (maxLat - minLat) * ky;
+  const cx = ((minLon + maxLon) / 2 - geoRef.lon) * kx;
+  const cz = ((minLat + maxLat) / 2 - geoRef.lat) * ky;
+
   return (
-    <mesh rotation={[-Math.PI / 2, 0, 0]} visible={active} onClick={handleClick}>
-      {/* 点击平面 ±600km（相对 start 原点）：500×500 太小，start→target 超 250km
-          时 target 附近点不到（主管 2026-08-06） */}
-      <planeGeometry args={[1200000, 1200000]} />
+    <mesh
+      rotation={[-Math.PI / 2, 0, 0]}
+      position={[cx, 0, cz]}
+      visible={active}
+      onClick={handleClick}
+    >
+      <planeGeometry args={[width, height]} />
       <meshBasicMaterial visible={false} />
     </mesh>
   );
@@ -115,6 +134,7 @@ export function Scene3D({
   zones,
   results,
   terrainData,
+  bounds,
   onGroundClick,
   onRadarMove,
   onZoneMove,
@@ -277,6 +297,7 @@ export function Scene3D({
         onClick={onGroundClick}
         geoRef={geoRef}
         suppressUntil={dragSuppressUntil}
+        bounds={bounds}
       />
     </Canvas>
   );
