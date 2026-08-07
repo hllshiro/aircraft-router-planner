@@ -28,6 +28,7 @@ serde_json.workspace = true
 thiserror.workspace = true
 # 数据源（发布版必含，技术方案 3.2 C）
 geotiff = "0.1"
+tiff = "0.9"
 dted2 = "1.0.0"
 ruzstd = "0.7"
 geo-types = "0.7"
