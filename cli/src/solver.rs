@@ -244,8 +244,12 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
     // 实测切角 0.70×cell 边界通过，加补偿会变 8 格挤窄缝隙）；大跨度场景 cell 1.9km
     // 时 ceil 余量不足（3 格 5.67km − 切角 1.34km = 4.33km < 5.52km）。因此仅
     // span>2.5° 补理论切角 0.71×cell（2000km 场景 3→4 格触发修复）。
+    // 2026-08-07 zigzag17：多边形**尖角顶点**（poly3 西南角 (116.198,37.111)）处
+    // 格点墙角是钝的（墙格在顶点东北），FMM 路径从顶点西侧绕过时离**几何边**
+    // 1.33km < inflation 2km——0.71×cell 切角补偿不够（ceil((2000+0.71×1953)/1953)=2
+    // 格，路径离几何边 = 2×1953−偏差 ≈1.4km）。大区域再 +1 格兜底尖角偏差。
     let inflation_cells = if region.span_deg > 2.5 {
-        ((inflation_m + 0.71 * cell_m) / cell_m.max(1.0)).ceil() as usize
+        ((inflation_m + 0.71 * cell_m) / cell_m.max(1.0)).ceil() as usize + 1
     } else {
         (inflation_m / cell_m.max(1.0)).ceil() as usize
     };

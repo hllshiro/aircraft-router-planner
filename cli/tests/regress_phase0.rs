@@ -240,6 +240,25 @@ fn phase0_feedback_inputs_regression() {
             );
         }
 
+        // zigzag17（2026-08-07 主管第 4 版场景）：3 no_fly 多边形 + restricted 圆
+        // （0-6000m）。raw 1140 点网格楼梯回退（smoothing_failed）。根因：多边形
+        // **尖角顶点**（poly3 西南角 (116.198,37.111)）处 FMM 格点墙角是钝的（墙格在
+        // 顶点东北），路径从顶点西侧绕过时离**几何边** 1.33km < inflation 2km——
+        // 0.71×cell 切角补偿（ceil((2000+0.71×1953)/1953)=2 格）不够 → verify 拒 →
+        // 平滑链全失败。修复：span>2.5° 时膨胀格数再 +1 兜底尖角偏差 → 11 点平滑交付。
+        if name == "zigzag17.json" {
+            let v = &out.vehicles[0];
+            assert!(
+                v.path.len() < 30,
+                "{name}: still staircase dense ({} pts), polygon corner clearance regression",
+                v.path.len()
+            );
+            assert!(
+                !v.warnings.iter().any(|w| w.contains("smoothing_failed")),
+                "{name}: smoothing_failed re-appeared"
+            );
+        }
+
         eprintln!("[regress] {name}: status={} vehicles={}", out.status, out.vehicles.len());
     }
 }
