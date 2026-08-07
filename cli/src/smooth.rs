@@ -174,12 +174,12 @@ pub fn theta_star_smooth(
     Path::new(out)
 }
 
-/// 两点航向（度，0=东，逆时针，局部等距投影）。
+/// 两点航向（度，真北 0..360；大圆初始方位角）。
+/// 必须与 verify 的 `Path::segment_heading_deg`（大圆 bearing）**完全同口径**——
+/// 2026-08-07 zigzag15：Theta* 用等距投影检查转角放行 59.99°，verify 大圆算出
+/// 60.66° > 60° 拒 → 该阶段被拒、后续链从 raw 继续全失败 → 回退 1978 点密集锯齿。
 fn heading_deg_pts(a: &crate::path::PathPoint, b: &crate::path::PathPoint) -> f64 {
-    let proj = LocalProjection::new(a.lon, a.lat);
-    let (ax, ay) = proj.to_xy(a.lon, a.lat);
-    let (bx, by) = proj.to_xy(b.lon, b.lat);
-    (by - ay).atan2(bx - ax).to_degrees().rem_euclid(360.0)
+    crate::path::bearing_deg(a.lon, a.lat, b.lon, b.lat)
 }
 
 /// Chaikin 角切割平滑：每段取 1/4、3/4 插值点，保持端点。

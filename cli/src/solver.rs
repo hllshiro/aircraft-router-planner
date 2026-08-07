@@ -2149,8 +2149,9 @@ mod tests {
         });
         assert!(near_mid, "应经过必经点 (115.3,39.8): {:?}",
             out.vehicles[0].path.iter().map(|p| format!("({:.2},{:.2})", p.x, p.y)).take(6).collect::<Vec<_>>());
-        // 北侧绕行 → 距离显著大于直线 164km
-        assert!(out.vehicles[0].distance_m > 200_000.0, "dist {}", out.vehicles[0].distance_m);
+        // 北侧绕行 → 距离显著大于直线 164km（2026-08-07 Theta* 改大圆口径后
+        // 拉直更彻底，4 点 196km；阈值 180km 保留"显著大于直线"语义）
+        assert!(out.vehicles[0].distance_m > 180_000.0, "dist {}", out.vehicles[0].distance_m);
     }
 
     #[test]
