@@ -414,4 +414,49 @@ mod tests {
         let (nd, oob) = semantic_degradation_ratios(&s, 4);
         assert!(nd.is_nan() && oob.is_nan());
     }
+
+    /// 最小 UHL-only DTED 文件（目录分发只读 UHL 建索引，不读片数据）。
+    fn write_uhl_only_dted(path: &std::path::Path, lon: u32, lat: u32) -> std::io::Result<()> {
+        use std::io::Write;
+        let uhl = format!(
+            "UHL1{:03}0000E{:03}0000N030003000005{:<15}{:04}{:04}{:<25}",
+            lon, lat, "", 121, 121, ""
+        );
+        debug_assert_eq!(uhl.len(), 80);
+        let mut f = std::fs::File::create(path)?;
+        f.write_all(uhl.as_bytes())
+    }
+
+    #[test]
+    fn open_source_dir_dispatches_dted() {
+        let dir = std::env::temp_dir().join("open_source_dted");
+        std::fs::create_dir_all(&dir).unwrap();
+        write_uhl_only_dted(&dir.join("N42E015.dt0"), 15, 42).unwrap();
+        write_uhl_only_dted(&dir.join("N42E016.dt0"), 16, 42).unwrap();
+        let s = open_source(&dir).unwrap();
+        assert!(s.resolution_desc().starts_with("dted dir"), "desc={}", s.resolution_desc());
+        let b = s.bounds().unwrap();
+        assert!((b.min_lon - 15.0).abs() < 1e-9 && (b.max_lon - 17.0).abs() < 1e-9);
+        drop(std::fs::remove_dir_all(&dir));
+    }
+
+    #[test]
+    fn open_source_dir_geotiff_errors() {
+        let dir = std::env::temp_dir().join("open_source_geotiff");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.tif"), b"not really a tif").unwrap();
+        match open_source(&dir) {
+            Err(e) => assert!(e.to_string().contains("GeoTIFF"), "err={e}"),
+            Ok(_) => panic!("expected GeoTIFF dir error"),
+        }
+        drop(std::fs::remove_dir_all(&dir));
+    }
+
+    #[test]
+    fn open_source_dir_empty_errors() {
+        let dir = std::env::temp_dir().join("open_source_empty");
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(open_source(&dir).is_err());
+        drop(std::fs::remove_dir_all(&dir));
+    }
 }
