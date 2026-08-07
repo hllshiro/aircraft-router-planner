@@ -137,7 +137,8 @@ fn run(args: &Args) -> Result<(), AppError> {
     // 2. 解析（畸形 JSON → input_invalid: malformed_json，合法输出不崩溃）
     let input: Input = match Input::from_json_str(&input_str) {
         Ok(i) => i,
-        Err(_) => {
+        Err(e) => {
+            eprintln!("[debug] serde error: {e}");
             let out = Output::failure(
                 "input_invalid",
                 ErrorBody::input_invalid(InputInvalidReason::MalformedJson, "malformed JSON input"),

@@ -152,7 +152,10 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
     // 墙半径，不敏感，zigzag5 grid300 即通过）。
     // 小区域（≤2.5°）保持默认 grid——细网格会让 5c2 软罚带物理宽度变窄 → FMM 贴墙
     // 更近 → 绕行 clearance 余量不足（双禁飞区 real_bad 256 成功、301 失败）。
-    // 上限 1024 防 OOM。
+    // 上限 1024 防 OOM。2026-08-07 主管 2000km 场景（span 17.4° 含多边形，auto_grid
+    // 3228 被 clamp → cell 1.89km）锯齿根因不是网格粗，而是膨胀墙未补偿 8 邻域楼梯
+    // 切角 → FMM 路径离原始墙 < verify 要求的 inflation → 平滑链全失败回退锯齿；
+    // 已由 inflation_cells +1.0×cell 补偿修复（1024/2048 均通过，保持 1024 上限）。
     let span_km = region.span_deg * 111.32;
     let has_poly_wall = input
         .mission
@@ -233,7 +236,18 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
 
     // 5c. 禁飞区墙向外膨胀 + 过渡带软罚（见 apply_inflation_and_band）
     let cell_m = region.span_deg * 111_320.0 / grid as f64;
-    let inflation_cells = (inflation_m / cell_m.max(1.0)).ceil() as usize;
+    // 2026-08-07 主管 2000km 场景根因：FMM 8 邻域楼梯沿膨胀墙走时对角线切角
+    // ~0.71×cell，路径离原始墙 = inflation_cells×cell − 0.71×cell < verify 要求的
+    // inflation_m → 平滑链全失败回退锯齿。切角危害随 cell 增大：小区域（span≤2.5°，
+    // 默认 grid 256，cell≤0.9km）原膨胀 ceil 后余量刚好盖过切角（双禁飞区 7 格
+    // 实测切角 0.70×cell 边界通过，加补偿会变 8 格挤窄缝隙）；大跨度场景 cell 1.9km
+    // 时 ceil 余量不足（3 格 5.67km − 切角 1.34km = 4.33km < 5.52km）。因此仅
+    // span>2.5° 补理论切角 0.71×cell（2000km 场景 3→4 格触发修复）。
+    let inflation_cells = if region.span_deg > 2.5 {
+        ((inflation_m + 0.71 * cell_m) / cell_m.max(1.0)).ceil() as usize
+    } else {
+        (inflation_m / cell_m.max(1.0)).ceil() as usize
+    };
     apply_inflation_and_band(&mut field, inflation_cells, cell_m);
 
     // 5b. 雷达静态代价（Phase 4 M3）：膨胀半径内 cost ×(1+coef·(几何并集概率 + 深穿惩罚))

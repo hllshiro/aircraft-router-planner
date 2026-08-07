@@ -215,6 +215,31 @@ fn phase0_feedback_inputs_regression() {
             );
         }
 
+        // zigzag13（2026-08-07 主管 2000km 大跨度）：青岛黄海→俄境（lon 120.89→113.12,
+        // lat 36.06→53.00, span 17.4°），no_fly 多边形 + 2 no_fly 圆 + 3 restricted +
+        // 3 雷达，v=250m/s 固定翼（r_phys=11035m 钳制）。raw 1605 点网格楼梯回退
+        // （smoothing_failed）。根因：FMM 8 邻域楼梯沿膨胀墙走对角线切角 ~0.71×cell
+        // → 路径离原始墙 < verify 要求的 inflation（cell 1.89km 时 3 格膨胀 5.67km −
+        // 切角 1.34km = 4.33km < 5.52km）→ 平滑链全失败。修复：span>2.5° 时膨胀距离
+        // 补 0.71×cell（3→4 格）→ 3 点平滑交付。强断言防锯齿复发。
+        if name == "zigzag13.json" {
+            let v = &out.vehicles[0];
+            assert!(
+                v.path.len() < 30,
+                "{name}: still staircase dense ({} pts), inflation corner-cut regression",
+                v.path.len()
+            );
+            assert!(
+                !v.warnings.iter().any(|w| w.contains("smoothing_failed")),
+                "{name}: smoothing_failed re-appeared"
+            );
+            assert!(
+                v.distance_m < 2_500_000.0,
+                "{name}: detour too long ({} km), inflation regression",
+                v.distance_m / 1000.0
+            );
+        }
+
         eprintln!("[regress] {name}: status={} vehicles={}", out.status, out.vehicles.len());
     }
 }
