@@ -6,6 +6,7 @@
 //! 经纬度（度）为源级查询键，投影平面射线经反投影后逐点查询（调用方负责）。
 
 pub mod builtin;
+pub mod convert;
 pub mod dted;
 pub mod geotiff;
 pub mod mask;

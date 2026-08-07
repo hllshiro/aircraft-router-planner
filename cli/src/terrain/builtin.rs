@@ -53,11 +53,11 @@ pub const FORMAT_VERSION: u32 = 1;
 pub const HEADER_SIZE: usize = 288;
 pub const BLOCK_SIZE: u32 = 256;
 
-const VDATUM_ELLIPSOID: u8 = 0;
-const VDATUM_EGM96: u8 = 1;
-const SEMANTICS_EQUIANGULAR: u8 = 0;
-const COMPRESSION_RAW: u8 = 0;
-const COMPRESSION_ZSTD: u8 = 1;
+pub(crate) const VDATUM_ELLIPSOID: u8 = 0;
+pub(crate) const VDATUM_EGM96: u8 = 1;
+pub(crate) const SEMANTICS_EQUIANGULAR: u8 = 0;
+pub(crate) const COMPRESSION_RAW: u8 = 0;
+pub(crate) const COMPRESSION_ZSTD: u8 = 1;
 
 /// 已解压块缓存上限（FIFO 淘汰）。
 /// 256² 块 ≈ 131KB → 2048 块 ≈ 256MB，防止无界缓存在大文件随机访问时膨胀内存
