@@ -74,6 +74,12 @@
 6. **坐标点均为经纬高定义**：输入/输出坐标点统一 WGS84 经纬度（度）+ MSL 高度（米）；输出 PathPoint 的 x=经度、y=纬度、alt_m=MSL（注释已更新）；无投影/ENU 混合语义。
 
 
+## 主管决策 2026-08-08（三项，A1_TERRAIN_PACKAGE）
+
+1. **默认地形 = GMTED2010 东亚 7.5as 压缩版（east_asia_7p5as.arpack 497MB）**：取代 china_dem_l12 默认地位；terrain source=path/builtin 且未给路径时，solver 依次尝试 exe 同目录 / 工作目录 / phase0/data / pending/east_asia_crop 下的 `east_asia_7p5as.arpack`（commit 29adf33 接线）。
+2. **海岸掩膜随默认地形提供（east_asia_7p5as.mask 4.5MB）**：GSHHG 窗口裁剪生成（gshhg_mask.py 支持 r0/c0/win_cols + lon0/lat0）；solver `default_mask_candidates()` 自动探测，`TerrainConfig.mask_path` 可显式覆盖。
+3. **内置纯 Rust 压缩编码器（COMPRESSION_DEFLATE=2，commit 8780d4e）**：成熟纯 Rust zstd 编码器不存在（ruzstd 仅解码；zstd-pure-rs immature 有数据损坏风险），经主管确认采用 miniz_oxide deflate（flate2 官方 rust 后端，零 C 红线）；POC 实测真实地形差分块压缩比 4.06:1 ≥ zstd 3.98:1。convert 输出自动压缩（索引动态记录 + finish 回填 + 流式重读算 SHA，与 Python convert 语义一致）。
+
 ## 崩溃测试套件（B9，CI 一票否决）
 - Phase 0：`tests/crash_suite.rs` 13 用例 + 单元 9 = **22 测试全过**；FMM 越界源/空网格、Dubins NaN/零半径/极端坐标、Terrain 出界/NaN、rstar 空树均不 panic
 - Phase 1（cli）：`cli/tests/crash_suite.rs` **20 用例**（config 畸形/非法坐标/退化、coord NaN/极端反算、terrain 垃圾字节/截断/零维度、spatial 空树+NaN 查询、costfield 退化网格/不可达回溯、输出序列化）+ 单元 **42** = **62 测试全过**
