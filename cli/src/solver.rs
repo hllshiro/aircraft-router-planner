@@ -22,6 +22,7 @@ use crate::path::{Path, PathPoint as RouterPoint};
 use crate::smooth::{default_chain, segment_circle_intersect_t, smooth_path_chain, VerifyContext};
 use crate::spatial::{CircleEntry, CircleIndex};
 use crate::terrain::builtin::BuiltinSource;
+use crate::terrain::mask::{GeoMask, MaskedSource};
 use crate::terrain::{BulkPrefetch, Sample, TerrainSource};
 use crate::threat::{SphericalRadarThreat, ThreatModel, ThreatParams};
 
@@ -29,6 +30,8 @@ use crate::threat::{SphericalRadarThreat, ThreatModel, ThreatParams};
 #[derive(Debug, Clone)]
 pub struct SolveParams {
     pub terrain_path: Option<PathBuf>,
+    /// 海岸掩膜文件（GSHHG 3 态；None 时自动探测默认掩膜 east_asia_7p5as.mask）
+    pub mask_path: Option<PathBuf>,
     pub grid: usize,
 }
 
@@ -36,7 +39,34 @@ impl Default for SolveParams {
     fn default() -> Self {
         Self {
             terrain_path: None,
+            mask_path: None,
             grid: 256,
+        }
+    }
+}
+
+/// 地形句柄：无地形 / 纯 ARPK1 / 掩膜包装。
+/// 掩膜包装（Phase 2 水体判定）：海洋 → Sample::Water（0 高程）、内陆湖 → Sample::Lake(DEM)、
+/// 陆地 → 委托内层；平滑链/代价场统一走 TerrainSource/BulkPrefetch 抽象。
+enum TerrainHandle {
+    None,
+    Plain(BuiltinSource),
+    Masked(MaskedSource<BuiltinSource>),
+}
+
+impl TerrainHandle {
+    fn as_source(&self) -> Option<&dyn TerrainSource> {
+        match self {
+            Self::None => None,
+            Self::Plain(t) => Some(t),
+            Self::Masked(t) => Some(t),
+        }
+    }
+    fn as_bulk(&self) -> Option<&(dyn BulkPrefetch + Sync)> {
+        match self {
+            Self::None => None,
+            Self::Plain(t) => Some(t),
+            Self::Masked(t) => Some(t),
         }
     }
 }
@@ -65,42 +95,76 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
     // 1. 地形源（none = 无地形平面；path/builtin = ARPK1 文件）。
     //    具体类型 BuiltinSource（solver 仅用 ARPK1）：field build 可走 BulkPrefetch
     //    并行无锁预取（候选③，3.71×，对比测试验证）。
-    let terrain: Option<BuiltinSource> = match input.mission.terrain.source {
-        TerrainSourceType::None => None,
+    let terrain: TerrainHandle = match input.mission.terrain.source {
+        TerrainSourceType::None => TerrainHandle::None,
         _ => {
             let p = params
                 .terrain_path
                 .clone()
                 .or_else(|| input.mission.terrain.path.clone().map(PathBuf::from));
-            match p {
-                Some(p) => Some(BuiltinSource::open(&p)?),
+            let inner = match p {
+                Some(p) => BuiltinSource::open(&p)?,
                 None => {
-                    // 主管决策 2026-08-05：默认低精度地形 = 量化中国数据（china_dem_l12.arpack）。
-                    // 候选：exe 同目录 / exe 上溯 workspace 根 / 工作目录相对路径。
+                    // 主管决策 2026-08-08：默认地形 = 7.5as 东亚压缩版（east_asia_7p5as.arpack）。
+                    // 候选：exe 同目录 / 工作目录 / phase0/data / 开发暂存目录。
                     let mut candidates = vec![
-                        PathBuf::from("china_dem_l12.arpack"),
-                        PathBuf::from("phase0/data/pending/china_dem_l12.arpack"),
-                        PathBuf::from("../phase0/data/pending/china_dem_l12.arpack"),
+                        PathBuf::from("east_asia_7p5as.arpack"),
+                        PathBuf::from("phase0/data/east_asia_7p5as.arpack"),
+                        PathBuf::from("phase0/data/pending/east_asia_crop/east_asia_7p5as.arpack"),
+                        PathBuf::from("../phase0/data/pending/east_asia_crop/east_asia_7p5as.arpack"),
                     ];
                     if let Ok(exe) = std::env::current_exe() {
                         if let Some(dir) = exe.parent() {
-                            candidates.insert(0, dir.join("china_dem_l12.arpack"));
+                            candidates.insert(0, dir.join("east_asia_7p5as.arpack"));
                             // 上溯 3 层（target/release → target → workspace 根），逐层试开发路径
                             for anc in dir.ancestors().skip(1).take(3) {
-                                candidates.push(anc.join("phase0/data/pending/china_dem_l12.arpack"));
+                                candidates.push(anc.join("phase0/data/east_asia_7p5as.arpack"));
+                                candidates.push(
+                                    anc.join("phase0/data/pending/east_asia_crop/east_asia_7p5as.arpack"),
+                                );
                             }
                         }
                     }
                     if let Some(c) = candidates.iter().find(|c| c.exists()) {
-                        Some(BuiltinSource::open(c)?)
+                        BuiltinSource::open(c)?
                     } else {
                         return Err(AppError::Data(
-                            "terrain.source=path/builtin 但未提供地形文件，且默认低精度地形 \
-                             (china_dem_l12.arpack) 未找到（--terrain / terrain.path / exe 同目录 / phase0/data/pending）"
+                            "terrain.source=path/builtin 但未提供地形文件，且默认地形 \
+                             (east_asia_7p5as.arpack) 未找到（--terrain / terrain.path / exe 同目录 / phase0/data）"
                                 .into(),
                         ));
                     }
                 }
+            };
+            // 海岸掩膜（主管 2026-08-08 默认提供）：
+            // - 显式 --mask / terrain.mask_path：必须存在，始终套用；
+            // - 未显式指定掩膜时：仅**默认地形**（未显式 --terrain/path）自动探测默认掩膜，
+            //   显式地形不自动套（用户明确选数据 → 掩膜也应显式，避免语义意外变化）。
+            let mask = params
+                .mask_path
+                .clone()
+                .or_else(|| input.mission.terrain.mask_path.clone().map(PathBuf::from));
+            let explicit_terrain = params.terrain_path.is_some()
+                || input.mission.terrain.path.is_some();
+            match mask {
+                Some(mp) => {
+                    if !mp.exists() {
+                        return Err(AppError::Data(format!(
+                            "mask file not found: {}（--mask / terrain.mask_path）",
+                            mp.display()
+                        )));
+                    }
+                    let gm = GeoMask::open(&mp)?;
+                    TerrainHandle::Masked(MaskedSource::new(inner, gm))
+                }
+                None if !explicit_terrain => match default_mask_candidates() {
+                    Some(mp) => {
+                        let gm = GeoMask::open(&mp)?;
+                        TerrainHandle::Masked(MaskedSource::new(inner, gm))
+                    }
+                    None => TerrainHandle::Plain(inner),
+                },
+                None => TerrainHandle::Plain(inner),
             }
         }
     };
@@ -217,7 +281,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
     };
     let mut field = match &terrain {
         // 候选③：并行 + 无锁批量预取（3.71× vs 串行，对比测试 9504381 之后验证）
-        Some(t) => build_semantic_cost_field_par_local(
+        TerrainHandle::Plain(t) => build_semantic_cost_field_par_local(
             t,
             region.min_lon,
             region.min_lat,
@@ -226,7 +290,16 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
             5.0,
             &walled,
         ),
-        None => build_semantic_cost_field(grid, grid, |r, c| {
+        TerrainHandle::Masked(t) => build_semantic_cost_field_par_local(
+            t,
+            region.min_lon,
+            region.min_lat,
+            region.span_deg,
+            grid,
+            5.0,
+            &walled,
+        ),
+        TerrainHandle::None => build_semantic_cost_field(grid, grid, |r, c| {
             let (lon, lat) = cell_lonlat(r, c, &region, grid);
             if walled(lon, lat) {
                 return Sample::OutOfBounds;
@@ -311,7 +384,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                         z,
                         v.alt_m,
                         v.profile.ceiling_m,
-                        terrain.as_ref().map(|t| t as &dyn TerrainSource),
+                        terrain.as_source(),
                         &v.start,
                         &target,
                         opts.max_climb_deg,
@@ -393,7 +466,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                     v.alt_m,
                     opts.max_climb_deg,
                     v.profile.ceiling_m,
-                    terrain.as_ref().map(|t| t as &dyn TerrainSource),
+                    terrain.as_source(),
                     &v.start,
                     &target,
                     inflation_m / 1000.0,
@@ -445,7 +518,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                 inflation_km,
             );
             let ctx = VerifyContext {
-                terrain: terrain.as_ref().map(|t| t as &dyn TerrainSource),
+                terrain: terrain.as_source(),
                 nofly: Some(&nofly),
                 zones: Some(&all_zones),
                 threat: Some(&threat),
@@ -458,7 +531,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
             // （转弯半径 + 5km，Dubins 弧偏出 raw 的量级）补一次批量预取：块进全局 LRU，
             // 之后 height_at 全部命中缓存。region 本身不动——扩大会粗化 FMM 网格 cell
             // （小区域固定 256 格），有锯齿风险。
-            if let Some(t) = terrain.as_ref() {
+            if let Some(t) = terrain.as_bulk() {
                 let slack_deg = (phys_min_radius_m + 5_000.0) / 111_320.0;
                 let mut min_lon = f64::INFINITY;
                 let mut min_lat = f64::INFINITY;
@@ -779,6 +852,25 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
 }
 
 // ==================== 辅助 ====================
+
+/// 默认海岸掩膜候选（主管 2026-08-08：掩膜随默认地形提供）。
+/// 与默认地形同目录/工作目录/phase0/data；未找到 → None（纯地形，无掩膜分层）。
+fn default_mask_candidates() -> Option<PathBuf> {
+    let mut candidates = vec![
+        PathBuf::from("east_asia_7p5as.mask"),
+        PathBuf::from("phase0/data/east_asia_7p5as.mask"),
+        PathBuf::from("../phase0/data/east_asia_7p5as.mask"),
+    ];
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            candidates.insert(0, dir.join("east_asia_7p5as.mask"));
+            for anc in dir.ancestors().skip(1).take(3) {
+                candidates.push(anc.join("phase0/data/east_asia_7p5as.mask"));
+            }
+        }
+    }
+    candidates.into_iter().find(|c| c.exists())
+}
 
 /// 任务区域：所有起点 + target 的方形包围盒 + 0.15° 缓冲（保证源/目标不贴边）。
 fn region_of(specs: &[VehicleSpec], target: &Geo) -> Region {

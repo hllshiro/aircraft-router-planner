@@ -62,17 +62,18 @@ def norm_x(x: float) -> float:
     return x % 360.0
 
 
-def add_edge(edges, x1, y1, x2, y2, res_deg, pidx=-1):
+def add_edge(edges, x1, y1, x2, y2, res_deg, pidx=-1, r0=0, r_end=86400):
     """边 (x1,y1)-(x2,y2)（度，x∈[0,360)）加入边表。
     行范围用闭区间 [r_lo, r_hi]（含上界行），y 半开区间过滤在扫描时做。
-    注意：不能把 yhi 所在行排除——边 [ylo, yhi) 的 yhi 行中心可能仍在边内。"""
+    注意：不能把 yhi 所在行排除——边 [ylo, yhi) 的 yhi 行中心可能仍在边内。
+    窗口模式：行裁剪到 [r0, r_end)（窗口行索引直接用全局行偏移）。"""
     if y1 == y2:
         return  # 水平边不参与扫描线交点（奇偶填充不需要水平边）
     ylo, yhi = min(y1, y2), max(y1, y2)
-    r_lo = max(0, int((ylo + 90.0) / res_deg))
+    r_lo = max(r0, int((ylo + 90.0) / res_deg))
     r_hi = int((yhi + 90.0) / res_deg) + 1  # 含上界行（半开区间在 t 过滤时处理）
-    if r_hi > 64800:
-        r_hi = 64800
+    if r_hi > r_end:
+        r_hi = r_end
     if r_lo >= r_hi:
         return
     edges.append((r_lo, r_hi, x1, y1, x2, y2, pidx))
@@ -115,19 +116,39 @@ def subtract_segs(pos, neg):
     return out
 
 
-def build(rows, cols, res_deg, polys, progress_every=20000):
+def clip_cols_to_win(segs, c0, c1):
+    """段（0-360 全局列语义）裁剪到窗口列 [c0, c1) 并转窗口列（减 c0）。"""
+    out = []
+    for a, b in segs:
+        lo = max(a, c0)
+        hi = min(b, c1)
+        if hi > lo:
+            out.append((lo - c0, hi - c0))
+    return out
+
+
+def build(rows, cols_global, res_deg, polys, progress_every=20000, r0=0, c0=0, win_cols=None):
     """逐多边形实心填充（奇偶），行内分正/负区并集，最后差集。
     正区：level 1 陆地 + 3 岛中湖 + 5/6 南极冰（陆地语义）
     负区：level 2 湖泊 + 4 pond（洞，挖空）
     —— 并列大陆多边形（欧亚/非洲/北美…）用并集合并而非全局奇偶配对，
     避免把大陆之间的海洋错误填充。
 
-    坐标系：统一输出 0-360 列语义（列 c ∈ [0, cols) ↔ 经度 c*res）。
+    坐标系：统一输出 0-360 列语义（列 c ∈ [0, cols_global) ↔ 经度 c*res，
+    cols_global = 360/res 全球列数；窗口模式列模数不变）。
     greenwich 多边形 x 已 0-360（含 360 边界点）→ 列直接 x/res；
     普通多边形 x ∈ [-180,180) → 列 (x+180)/res 转 0-360 语义（跨 0 段分裂）。
     不做全局归一化——归一化会让真实连续的多边形（如非洲 -17..51）
-    变成跨 0 环，单环奇偶填充会把内部方向弄反。"""
+    变成跨 0 环，单环奇偶填充会把内部方向弄反。
+
+    窗口模式（r0/c0/win_cols 给定）：行裁剪到 [r0, r0+rows)，列裁剪到
+    [c0, c0+win_cols) 并转窗口列语义——用于东亚 7.5as 掩膜（与地形像素对齐）。"""
     POS_LEVELS = (1, 3, 5, 6)
+    cols = cols_global
+    r_end = r0 + rows
+    if win_cols is None:
+        win_cols = cols
+    c1 = c0 + win_cols
     edges = []  # (r_lo, r_hi, x1, y1, x2, y2, pidx)
     n_poly = 0
     for pidx, (level, greenwich, pts) in enumerate(polys):
@@ -150,13 +171,13 @@ def build(rows, cols, res_deg, polys, progress_every=20000):
                 y180 = y1 + (180.0 - x1) * (y2 - y1) / (x2 - x1)
                 y_neg = y1 + (-180.0 - x1) * (y2 - y1) / (x2 - x1)
                 if x1 > x2:
-                    add_edge(edges, x1, y1, 180.0, y180, res_deg, pidx)
-                    add_edge(edges, -180.0, y_neg, x2, y2, res_deg, pidx)
+                    add_edge(edges, x1, y1, 180.0, y180, res_deg, pidx, r0, r_end)
+                    add_edge(edges, -180.0, y_neg, x2, y2, res_deg, pidx, r0, r_end)
                 else:
-                    add_edge(edges, x1, y1, -180.0, y_neg, res_deg, pidx)
-                    add_edge(edges, 180.0, y180, x2, y2, res_deg, pidx)
+                    add_edge(edges, x1, y1, -180.0, y_neg, res_deg, pidx, r0, r_end)
+                    add_edge(edges, 180.0, y180, x2, y2, res_deg, pidx, r0, r_end)
             else:
-                add_edge(edges, x1, y1, x2, y2, res_deg, pidx)
+                add_edge(edges, x1, y1, x2, y2, res_deg, pidx, r0, r_end)
             prev = pts_use[i]
         if n_poly % progress_every == 0:
             print(f"  ... 多边形 {n_poly}, 边 {len(edges)}")
@@ -166,14 +187,15 @@ def build(rows, cols, res_deg, polys, progress_every=20000):
     ei = 0
     n_edge = len(edges)
     for r in range(rows):
-        while ei < n_edge and edges[ei][0] == r:
+        gr = r0 + r  # 全局行
+        while ei < n_edge and edges[ei][0] == gr:
             _, r_hi, x1, y1, x2, y2, pidx = edges[ei]
             active.append((r_hi, x1, y1, x2, y2, pidx))
             ei += 1
-        active = [e for e in active if e[0] >= r]
+        active = [e for e in active if e[0] >= gr]
         if not active:
             continue
-        y_r = -90.0 + (r + 0.5) * res_deg
+        y_r = -90.0 + (gr + 0.5) * res_deg
         poly_xs = {}
         for r_hi, x1, y1, x2, y2, pidx in active:
             ylo, yhi = (y1, y2) if y1 < y2 else (y2, y1)
@@ -196,22 +218,25 @@ def build(rows, cols, res_deg, polys, progress_every=20000):
             # 奇偶配对 → 段（-180..180 列），再转 0-360 语义（跨 0 分裂）
             for i in range(0, len(xs) - 1, 2):
                 xa, xb = xs[i], xs[i + 1]
-                c0 = int((xa + 180.0) / res_deg)
-                c1 = int((xb + 180.0) / res_deg)
-                c0 = (c0 + cols // 2) % cols
-                c1 = (c1 + cols // 2) % cols
-                if c0 < c1:
-                    append_col(dst, c0, c1, cols)
-                elif c0 > c1:
+                c0g = int((xa + 180.0) / res_deg)
+                c1g = int((xb + 180.0) / res_deg)
+                c0g = (c0g + cols // 2) % cols
+                c1g = (c1g + cols // 2) % cols
+                if c0g < c1g:
+                    append_col(dst, c0g, c1g, cols)
+                elif c0g > c1g:
                     # 跨 0 点段分裂（0-360 语义）
-                    append_col(dst, c0, cols, cols)
-                    append_col(dst, 0, c1, cols)
+                    append_col(dst, c0g, cols, cols)
+                    append_col(dst, 0, c1g, cols)
         pos = merge_segs(pos, cols)
         neg = merge_segs(neg, cols)
         if pos:
             land = subtract_segs(pos, neg)
             lake = intersect_segs(neg, pos)
-            row_segs[r] = [(1, c0, c1) for (c0, c1) in land] + [(2, c0, c1) for (c0, c1) in lake]
+            if win_cols != cols or c0 != 0:
+                land = clip_cols_to_win(land, c0, c1)
+                lake = clip_cols_to_win(lake, c0, c1)
+            row_segs[r] = [(1, a, b) for (a, b) in land] + [(2, a, b) for (a, b) in lake]
             row_segs[r].sort()
         if r % 5000 == 0:
             n_act = len(active)
@@ -244,8 +269,8 @@ def append_col(dst, c0, c1, cols):
         dst.append((c0, c1))
 
 
-def write_mask(path, arcsec, rows, cols, row_segs):
-    res_deg = arcsec / 3600.0
+def write_mask(path, arcsec, rows, cols, row_segs, lon0=0.0, lat0=-90.0):
+    res_deg = float(arcsec) / 3600.0  # 注意：arcsec 可为 7.5（非整数）——必须 float
     with open(path, "wb") as f:
         f.write(b"\0" * HDR_SIZE)
         # 行索引表（rows+1 项 u64）
@@ -263,11 +288,11 @@ def write_mask(path, arcsec, rows, cols, row_segs):
         f.seek(0)
         f.write(MAGIC + b"\0" * (16 - len(MAGIC)))
         f.write(struct.pack(">I", 2))       # version (2 = 3态: 0海洋/1陆地/2内陆湖)
-        f.write(struct.pack(">I", arcsec))  # arcsec
+        f.write(struct.pack(">I", int(arcsec)))  # arcsec 展示（7.5as 截断 7；定位以 res_deg 为准）
         f.write(struct.pack(">I", rows))
         f.write(struct.pack(">I", cols))
-        f.write(struct.pack(">d", 0.0))     # lon0
-        f.write(struct.pack(">d", -90.0))   # lat0
+        f.write(struct.pack(">d", lon0))
+        f.write(struct.pack(">d", lat0))
         f.write(struct.pack(">d", res_deg))
         # 行索引表
         f.seek(idx_off)
@@ -318,20 +343,48 @@ def query(path, lon, lat):
 def main():
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     limit = None
-    arcsec = 10
+    arcsec = 10.0
+    lon0 = None
+    lat0 = None
+    win_cols = None
+    win_rows = None
     for i, a in enumerate(sys.argv[1:]):
         if a == "--arcsec":
-            arcsec = int(sys.argv[i + 2])
+            arcsec = float(sys.argv[i + 2])
         if a == "--limit":
             limit = int(sys.argv[i + 2])
+        if a == "--lon0":
+            lon0 = float(sys.argv[i + 2])
+        if a == "--lat0":
+            lat0 = float(sys.argv[i + 2])
+        if a == "--cols":
+            win_cols = int(sys.argv[i + 2])
+        if a == "--rows":
+            win_rows = int(sys.argv[i + 2])
     if len(args) < 2:
         print("用法: python gshhg_mask.py <gshhs_f.b> <out.mask> [--arcsec 10] [--limit N]")
+        print("      [--lon0 LON --lat0 LAT --cols C --rows R]  (窗口模式：输出窗口掩膜，与地形像素对齐)")
         sys.exit(2)
     src, out = args[0], args[1]
     res_deg = arcsec / 3600.0
-    rows = int(180.0 / res_deg)
-    cols = int(360.0 / res_deg)
-    print(f"GSHHG → 掩膜 {arcsec} 弧秒: {rows}x{cols}")
+    if lon0 is None:
+        rows = int(180.0 / res_deg)
+        cols = int(360.0 / res_deg)
+        cols_global = cols
+        r0 = 0
+        c0 = 0
+        w_lon0 = 0.0
+        w_lat0 = -90.0
+    else:
+        # 窗口模式：窗口 [lon0, lon0+win_cols*res) × [lat0, lat0+win_rows*res)
+        rows = win_rows
+        cols = win_cols
+        cols_global = int(360.0 / res_deg)
+        r0 = int((lat0 + 90.0) / res_deg)              # 窗口首行（全局行，-90 起点）
+        c0 = int((lon0 % 360.0) / res_deg)             # 窗口首列（**0-360 语义**，经度 0 起点）
+        w_lon0 = lon0
+        w_lat0 = lat0
+    print(f"GSHHG → 掩膜 {arcsec} 弧秒: {rows}x{cols} 窗口 lon0={w_lon0:.6f} lat0={w_lat0:.6f} (全局行 {r0}, 列 {c0})")
     t0 = time.time()
     polys = read_polys(src)
     print(f"解析 {len(polys)} 多边形, {time.time()-t0:.1f}s")
@@ -339,28 +392,26 @@ def main():
         polys = polys[:limit]
         print(f"[LIMIT] 仅前 {limit} 个多边形")
     t1 = time.time()
-    row_segs = build(rows, cols, res_deg, polys)
+    row_segs = build(rows, cols_global, res_deg, polys, r0=r0, c0=c0, win_cols=cols)
     print(f"光栅化完成, {time.time()-t1:.1f}s")
-    # 南极内陆补全：GSHHG 南极用接地线，接地线以南的内陆冰盖无数据。
-    # 段1：数据南界（-85.15°S）以南全部按陆地（极点冰盖）。
-    # 段2：东南极内陆缺口（接地线在东南极海岸 ~-75°S）——-75..-85.15°S, 0..160°E 按陆地，
-    #      避开罗斯海（160°E 以东）与威德尔海（-60°W 以西，即 300°E 以西）。
-    min_lat = min(min(y for _, y in pts) for lv, _, pts in polys if lv in POS_LEVELS)
-    r_pole = int((min_lat + 90.0) / res_deg)  # 行中心 < min_lat（更南）的行
-    if r_pole > 0:
-        print(f"南极补全段1: 行 0..{r_pole-1} ({min_lat:.3f}°S 以南) → 陆地")
-        for r in range(r_pole):
-            row_segs[r] = [(1, 0, cols)]
-    r_low = r_pole                  # -85.15°S
-    r_high = int((-75.0 + 90.0) / res_deg)  # -75°S
-    c_east = 0                      # 0°E
-    c_west = int(160.0 / res_deg)   # 160°E
-    if r_high > r_low:
-        print(f"南极补全段2: 行 {r_low}..{r_high-1} (-85.15..-75°S), 0..160°E → 陆地(东南极内陆)")
-        for r in range(r_low, r_high):
-            row_segs[r].append((1, c_east, c_west))
-            row_segs[r].sort()
-    size, total_segs = write_mask(out, arcsec, rows, cols, row_segs)
+    # 南极内陆补全：仅全球模式适用（窗口模式东亚窗口无南极）
+    if lon0 is None:
+        min_lat = min(min(y for _, y in pts) for lv, _, pts in polys if lv in POS_LEVELS)
+        r_pole = int((min_lat + 90.0) / res_deg)  # 行中心 < min_lat（更南）的行
+        if r_pole > 0:
+            print(f"南极补全段1: 行 0..{r_pole-1} ({min_lat:.3f}°S 以南) → 陆地")
+            for r in range(r_pole):
+                row_segs[r] = [(1, 0, cols)]
+        r_low = r_pole                  # -85.15°S
+        r_high = int((-75.0 + 90.0) / res_deg)  # -75°S
+        c_east = 0                      # 0°E
+        c_west = int(160.0 / res_deg)   # 160°E
+        if r_high > r_low:
+            print(f"南极补全段2: 行 {r_low}..{r_high-1} (-85.15..-75°S), 0..160°E → 陆地(东南极内陆)")
+            for r in range(r_low, r_high):
+                row_segs[r].append((1, c_east, c_west))
+                row_segs[r].sort()
+    size, total_segs = write_mask(out, arcsec, rows, cols, row_segs, w_lon0, w_lat0)
     print(f"掩膜写出: {out} ({size} B), 段 {total_segs}")
     print(f"总耗时 {time.time()-t0:.1f}s")
 

@@ -326,6 +326,9 @@ pub struct TerrainConfig {
     pub source: TerrainSourceType,
     #[serde(default)]
     pub path: Option<String>,
+    /// 海岸掩膜文件（GSHHG 3 态；None 时自动探测默认掩膜）
+    #[serde(default)]
+    pub mask_path: Option<String>,
     #[serde(default)]
     pub resolution_m: Option<f64>,
     #[serde(default)]

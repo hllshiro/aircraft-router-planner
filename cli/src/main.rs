@@ -39,6 +39,9 @@ struct Args {
     /// 地形文件（ARPK1；缺省用输入 terrain.path；none 源不加载）
     #[arg(long)]
     terrain: Option<PathBuf>,
+    /// 海岸掩膜文件（GSHHG 3 态；缺省自动探测默认掩膜 east_asia_7p5as.mask）
+    #[arg(long)]
+    mask: Option<PathBuf>,
     /// 粗网格分辨率（缺省 256；任务区域自适应）
     #[arg(long, default_value_t = 256)]
     grid: usize,
@@ -160,6 +163,7 @@ fn run(args: &Args) -> Result<(), AppError> {
     // 4. 解算（Phase 4 M1 接入：代价场 → FMM → 回溯 → 平滑链 → 输出契约）
     let params = SolveParams {
         terrain_path: args.terrain.clone(),
+        mask_path: args.mask.clone(),
         grid: args.grid,
     };
     let out = match solver::solve(&input, &params, started.elapsed().as_millis() as u64) {
