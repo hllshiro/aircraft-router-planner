@@ -797,7 +797,14 @@ pub(crate) fn segment_circle_intersect_t(
         return None;
     }
     let bb = -2.0 * (dx * ox + dy * oy);
-    let cc = ox * ox + oy * oy - r_km * r_km;
+    // 长段投影误差补偿（2026-08-08 主管 zigzag22）：等距投影把段当平面直线，但
+    // 实际大圆路径在北半球向极地弯曲；1200km 长段上投影与大圆偏差 ~0.5-3km，
+    // 贴圆擦过（真实穿入 0.5km）会被投影算成不穿 → verify/check 放行 → 交付穿
+    // restricted 高度带。求交用 r+slack（slack=max(1km, 段长×0.5%)）扩大搜索区间，
+    // 区间内采样点由 zone_contains_at 精确（球面距离）判定——不会误报合法贴边。
+    let seg_km = aa.sqrt();
+    let slack = (seg_km * 0.005).max(1.0);
+    let cc = ox * ox + oy * oy - (r_km + slack) * (r_km + slack);
     let disc = bb * bb - 4.0 * aa * cc;
     if disc <= 0.0 {
         return None;
@@ -927,8 +934,8 @@ pub fn verify_path(
                 else {
                     continue; // 段直线不穿圆
                 };
-                for kk in 0..=4 {
-                    let tt = t1 + (t2 - t1) * kk as f64 / 4.0;
+                for kk in 0..=8 {
+                    let tt = t1 + (t2 - t1) * kk as f64 / 8.0;
                     let (lon, lat, alt) = (
                         a.lon + (b.lon - a.lon) * tt,
                         a.lat + (b.lat - a.lat) * tt,

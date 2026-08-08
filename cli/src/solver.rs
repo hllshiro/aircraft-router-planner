@@ -492,6 +492,19 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
             // 被替代（user 硬约束），否则违反"任何平滑不得移除必经点"。
             let hard_boundary: Vec<(f64, f64)> = seg_ends.iter().map(|g| (g.lon, g.lat)).collect();
             for (idx, seg) in smooth_src.iter().enumerate() {
+                if std::env::var_os("ARP_DEBUG_SMOOTH").is_some() {
+                    eprintln!(
+                        "[smooth-dbg] SEG{idx} mask={} len={} first=({:.4},{:.4})@{} last=({:.4},{:.4})@{}",
+                        profile_mask[idx] as u8,
+                        seg.points.len(),
+                        seg.points.first().map_or(0.0, |p| p.lon),
+                        seg.points.first().map_or(0.0, |p| p.lat),
+                        seg.points.first().map_or(0.0, |p| p.alt_m),
+                        seg.points.last().map_or(0.0, |p| p.lon),
+                        seg.points.last().map_or(0.0, |p| p.lat),
+                        seg.points.last().map_or(0.0, |p| p.alt_m),
+                    );
+                }
                 let mut out_seg = if profile_mask[idx] {
                     // 受限区剖面段：已按 max_climb 生成下降/平飞/爬升，直接采用
                     seg.clone()
@@ -1440,11 +1453,34 @@ fn build_restricted_profiles(
         };
         let p0pt = tail.points[0];
         let plast = *tail.points.last().unwrap();
+        // 点是否位于**其他** restricted 圆带内（排除自身）。2026-08-08 主管 zigzag22：
+        // rz2 的 out_climb 过渡完成点选在 rz1 圆内（距圆心 41km<50km，@3000m 在 rz1
+        // 带内）→ rz1 处理时 tail 起点在圆内 → in_idx=0 → head 退化成单点带内段 →
+        // 平滑全败 → join 后 FINAL 在 rz1 处带内直穿 → 1967 点锯齿。desc/climb 锚点
+        // 都必须避开其他 restricted 圆带内点。
+        let in_other_band = |lon: f64, lat: f64| -> bool {
+            zones.iter().any(|z2| {
+                if std::ptr::eq(z2, z) || !matches!(z2.shape, ZoneShape::Circle { .. }) {
+                    return false;
+                }
+                if !restricted_blocks_alt(z2, alt_m) {
+                    return false;
+                }
+                Geo::new(lon, lat).map_or(false, |g| crate::config::zone_contains(z2, &g))
+            })
+        };
         // desc：沿路径从 i_in 向前，找直线距离 ≥ climb_base 且 start→desc 与 desc→in
         // 转角 ≤ 55° 的点（首段平滑为 start→desc 直线后连接 desc→in 过渡；55° 留 5°
-        // 余量——检查用局部投影近似，verify 用精确投影，边界会差 ~0.3°）
+        // 余量——检查用局部投影近似，verify 用精确投影，边界会差 ~0.3°）。
+        // **不做 line_hits_wall_km 前置预检**（2026-08-08 试错回退）：预检会让
+        // 候选全被拒时 i_climb 静默退化（=i_out → out_climb 零长）而非触发后置
+        // need_wall 兜底，产生单点 head 坏段；后置检查（desc_line_hits/climb_line_hits
+        // → need_wall 画墙绕行）才是"宁丑勿违"正确兜底。
         let mut i_desc = i_in;
         for i in (0..i_in).rev() {
+            if in_other_band(tail.points[i].lon, tail.points[i].lat) {
+                continue;
+            }
             if dist_km(tail.points[i].lon, tail.points[i].lat, pin2.lon, pin2.lat) >= climb_base_km {
                 let h1 = heading(p0pt.lon, p0pt.lat, tail.points[i].lon, tail.points[i].lat);
                 let h2 = heading(tail.points[i].lon, tail.points[i].lat, pin2.lon, pin2.lat);
@@ -1458,6 +1494,9 @@ fn build_restricted_profiles(
         // climb→target 转角 ≤ 55° 的点（尾段平滑为 climb→target 直线）
         let mut i_climb = i_out;
         for i in (i_out + 1)..tail.points.len() {
+            if in_other_band(tail.points[i].lon, tail.points[i].lat) {
+                continue;
+            }
             if dist_km(pout2.lon, pout2.lat, tail.points[i].lon, tail.points[i].lat) >= climb_base_km {
                 let h1 = heading(pout2.lon, pout2.lat, tail.points[i].lon, tail.points[i].lat);
                 let h2 = heading(tail.points[i].lon, tail.points[i].lat, plast.lon, plast.lat);
@@ -2646,6 +2685,94 @@ mod tests {
         let has_500 = v.path.iter().any(|p| (p.alt_m - 500.0).abs() < 1.0);
         assert!(has_6500, "rz1 顶部剖面 6500m 应保留（底部被 1496m 地形挡），实际 {:?}", v.path);
         assert!(has_500, "rz2/rz3 底部剖面 500m 应保留，实际 {:?}", v.path);
+    }
+
+    #[test]
+    fn zigzag22_adjacent_rz_climb_anchor_avoid_band() {
+        // 主管 2026-08-08 输入（China DEM L12 真实地形）：start 黄海 → target 蒙古，
+        // 2 个**相邻** restricted 圆：rz2（116.30°E r100，alt[500,4500]→顶部 5000m）
+        // 先处理，其 out_climb 过渡完成点沿 raw 落在 rz1（115.55°E r50，
+        // alt[1000,4000]）圆内（距圆心 41km<50km，@3000 在 rz1 带内）→ rz1 处理时
+        // tail 起点在圆内 → in_idx=0 → head 退化成**单点带内段** → 平滑全败 → join
+        // 后 FINAL 在 rz1 处带内直穿 → 1967 点网格楼梯（2129.9km）。
+        // 修复：desc/climb 锚点搜索拒绝位于**其他** restricted 圆带内的点（in_other_band）
+        // → 剖面方案仍无解（rz2 out_climb 起点在 rz1 圆内 + 出口直线穿 no_fly）→
+        // 后置 need_wall 画墙水平绕行兜底（宁丑勿违）→ 6 点 3000m 平滑路径 1685km。
+        // 另修复 verify/check 圆判定投影误差（segment_circle_intersect_t slack）：
+        // 1200km 长段投影偏差 ~0.5km，贴圆擦过（穿入 0.5km）被漏判交付 → 拒。
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+        let cand = root.join("phase0/data/pending/china_dem_l12.arpack");
+        if !cand.exists() {
+            eprintln!("skip zigzag22: real terrain missing ({})", cand.display());
+            return;
+        }
+        let s = r#"{
+            "schema_version":"0.20",
+            "mission":{
+                "start":{"lon":122.9207839850354,"lat":34.08860812240517,"alt_m":3000},
+                "target":{"lon":112.42397536890363,"lat":44.77935701405758,"alt_m":3000},
+                "vehicles":[{"id":"v1","profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":250,
+                    "min_turn_radius_m":442,"max_climb_angle_deg":15},
+                    "start_pose":{"lon":122.9207839850354,"lat":34.08860812240517,"alt_m":3000,"heading_deg":45},
+                    "mid_waypoints":[]}],
+                "red_forces":{"radars":[
+                    {"id":"radar_1786161064845","lon":112.831513368294,"lat":43.96813072477223,"radar_type":"early_warning","radius_km":50,"alt_m":10},
+                    {"id":"radar_1786161114205","lon":113.3041431982615,"lat":41.11010411517771,"radar_type":"tracking","radius_km":50,"alt_m":10}]},
+                "no_fly_zones":[
+                    {"id":"zone_1786160882933","zone_type":"no_fly","shape":"polygon","geometry":{"vertices":[[115.8706565717089,39.78344941000123],[114.7159667887149,38.93519569445941],[115.2867088987491,39.07797084088842]]},"alt_min_m":0,"alt_max_m":12000,"height_semantics":"msl"},
+                    {"id":"zone_1786160896845","zone_type":"no_fly","shape":"polygon","geometry":{"vertices":[[118.18296859187262,39.84855590795146],[116.61186105129381,38.74876499516125],[117.56074185629024,38.71484400273334]]},"alt_min_m":0,"alt_max_m":12000,"height_semantics":"msl"},
+                    {"id":"zone_1786160926653","zone_type":"no_fly","shape":"polygon","geometry":{"vertices":[[115.2637148745787,42.16339247467029],[113.72404261848064,41.18665997544362],[114.42958291361323,41.129943488801175],[115.10906620487548,41.58646379784794]]},"alt_min_m":0,"alt_max_m":12000,"height_semantics":"msl"}],
+                "restricted_zones":[
+                    {"id":"rz_1786160994133","zone_type":"restricted","shape":"circle","geometry":{"center":[115.55242377844469,39.53680791293585],"radius_km":50},"alt_min_m":1000,"alt_max_m":4000,"height_semantics":"msl"},
+                    {"id":"rz_1786161169725","zone_type":"restricted","shape":"circle","geometry":{"center":[116.3037514968375,38.447119717716134],"radius_km":100},"alt_min_m":500,"alt_max_m":4500,"height_semantics":"msl"}],
+                "obstacles":[],
+                "terrain":{"source":"path","path":"__P__"},
+                "parameters":{"p_cross":0.9}
+            }
+        }"#;
+        let s = s.replace("__P__", &cand.to_string_lossy().replace('\\', "\\\\"));
+        let input = parse(&s);
+        let out = solve(&input, &SolveParams::default(), 0).unwrap();
+        let v = &out.vehicles[0];
+        assert_eq!(v.status, "planned");
+        assert!(
+            v.warnings.iter().all(|w| !w.contains("smoothing_failed")),
+            "相邻 restricted 修复后不应 smoothing_failed，实际 {:?}",
+            v.warnings
+        );
+        assert!(
+            v.path.len() <= 60,
+            "应交付平滑路径（修复前 1967 点），实际 {} 点",
+            v.path.len()
+        );
+        assert!(
+            v.distance_m < 1_800_000.0,
+            "应 ≈ 平滑 1685km（画墙绕行兜底），实际 {}km",
+            v.distance_m / 1000.0
+        );
+        // 交付路径不得穿 restricted 高度带（verify 圆判定 slack 修复）：
+        // 全 3000m 平飞绕行 → 圆内采样点高度都不在 [alt_min, alt_max] 带内
+        for z in &input.mission.restricted_zones {
+            let crate::config::ZoneShape::Circle { center, radius_km } = z.shape else {
+                continue;
+            };
+            for w in v.path.windows(2) {
+                for k in 0..=20 {
+                    let u = k as f64 / 20.0;
+                    let (lon, lat) = (
+                        w[0].x + (w[1].x - w[0].x) * u,
+                        w[0].y + (w[1].y - w[0].y) * u,
+                    );
+                    let d = dist_km(lon, lat, center[0], center[1]);
+                    if d <= radius_km && w[0].alt_m >= z.alt_min_m && w[0].alt_m <= z.alt_max_m {
+                        panic!(
+                            "路径穿 restricted {} 带内 ({:.3},{:.3}) d={:.1}km alt={:.0}",
+                            z.id, lon, lat, d, w[0].alt_m
+                        );
+                    }
+                }
+            }
+        }
     }
 }
 
