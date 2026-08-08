@@ -11,7 +11,7 @@ use std::path::Path;
 use super::{GeoBounds, TerrainSource};
 
 /// 规则地形网格（经纬度坐标系，行优先：行 = 纬向、列 = 经向）。
-/// 高度值 `NaN` = 空洞/无效（如 Beijing_DEM 的 0=NoData 标记）。
+/// 高度值 `NaN` = 空洞/无效（如地形数据中的 NoData 标记）。
 pub struct Terrain {
     pub rows: usize,
     pub cols: usize,

@@ -9,7 +9,7 @@
 
 /// 规则地形网格（行优先，行 = x 方向，列 = y 方向，单位米）。
 /// 矩形 cell：`cell_mx` = 行向（x）格宽，`cell_my` = 列向（y）格宽。
-/// 高度值 `NaN` 表示空洞/无效（如 Beijing_DEM 的 0=NoData 标记）。
+/// 高度值 `NaN` 表示空洞/无效（如地形数据中的 NoData 标记）。
 pub struct Terrain {
     pub rows: usize,
     pub cols: usize,
