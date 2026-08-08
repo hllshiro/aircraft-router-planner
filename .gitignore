@@ -39,3 +39,6 @@ DEMO_TODO.md
 DEMO_UPGRADE_TODO.md 
 demo/web/dev.log 
 demo_server.log 
+
+# 发布产物（2026-08-08：构建发布版本 → install/；含 500MB+ 地形/掩膜，不入库）
+install/
