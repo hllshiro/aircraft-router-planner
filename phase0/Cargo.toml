@@ -47,11 +47,3 @@ harness = false
 [[bench]]
 name = "b5_dubins"
 harness = false
-
-[[bench]]
-name = "b6_real_dem"
-harness = false
-
-[[bench]]
-name = "b7_real_costfield_fmm"
-harness = false
