@@ -1225,12 +1225,33 @@ fn build_restricted_profiles(
     if hits.is_empty() {
         return (vec![seg.clone()], vec![false], false);
     }
+    // 多 restricted 处理顺序：按沿路径的穿行起点（第一次进入点）升序，先处理靠 start
+    // 的圆。否则按 zones 输入顺序处理时，靠后的圆（地理上更靠 start）会被先处理的
+    // 前圆切进 head，后续只搜 tail → 漏剖面（2026-08-08 主管 zigzag20：rz1（118°E）
+    // 先处理把 rz2（124°E，更靠 start）锁进 head1，rz2 在 tail1 上找不到 → 跳过 →
+    // head1 含 rz2 带内 3000m 点 → 平滑链 inside zone 全败 → 回退 599 点锯齿）。
+    let mut ordered_hits = hits;
+    ordered_hits.sort_by_key(|z| {
+        for i in 0..seg.points.len().saturating_sub(1) {
+            let pa = &seg.points[i];
+            let pb = &seg.points[i + 1];
+            let d = crate::config::zone_segment_clearance_km(pa.lon, pa.lat, pb.lon, pb.lat, z);
+            let a_in = Geo::new(pa.lon, pa.lat)
+                .map_or(false, |g| crate::config::zone_contains(z, &g));
+            let b_in = Geo::new(pb.lon, pb.lat)
+                .map_or(false, |g| crate::config::zone_contains(z, &g));
+            if d <= 1e-9 || a_in || b_in {
+                return i;
+            }
+        }
+        usize::MAX // 不穿圆 → 排最后（循环内 fallback/跳过）
+    });
     let (p0, p1) = (seg.points[0], *seg.points.last().unwrap());
     let mut out_segs: Vec<Path> = vec![seg.clone()];
     let mut out_mask: Vec<bool> = vec![false];
     let need_wall = false;
-    // 逐个 hit：在当前的尾段上找穿行区间 → 切 [首段, 剖面段, 尾段]（多 restricted 顺序处理）
-    for z in hits {
+    // 逐个 hit（已按穿行起点升序）：在当前的尾段上找穿行区间 → 切 [首段, 剖面段, 尾段]
+    for z in ordered_hits {
         let tail = out_segs.last().unwrap();
         let ZoneShape::Circle { center, radius_km } = z.shape else {
             continue;
@@ -2463,6 +2484,72 @@ mod tests {
         let has_1500 = v.path.iter().any(|p| (p.alt_m - 1500.0).abs() < 1.0);
         assert!(has_6500, "rz1 顶部剖面 6500m 应保留，实际 {:?}", v.path);
         assert!(has_1500, "rz2 底部剖面 1500m 应保留，实际 {:?}", v.path);
+    }
+
+    #[test]
+    fn zigzag20_multi_restricted_order_by_entry() {
+        // 主管 2026-08-08 输入（China DEM L12 真实地形）：start 东海上 → target 蒙古方向，
+        // 2 个 200km 大 restricted 圆：rz2（124.12°E，alt [0,4000]→顶部 4500m 绕飞）
+        // 地理上比 rz1（118.38°E，alt [2000,6000]→底部 1500m 穿行）更靠 start。
+        // 旧逻辑按 zones 输入顺序先处理 rz1，把 rz2 的穿行区间锁进 head1；rz2 再
+        // 处理时只搜 rz1 之后的 tail → 找不到 → 跳过 → head1 含 rz2 带内 3000m 点 →
+        // 平滑链 inside zone 全败 → 回退 1866 点网格楼梯（5104km）。
+        // 修复：hits 按沿路径穿行起点（第一次进入索引）升序处理 → 15 点平滑路径
+        // 4055km，剖面语义保持（rz2 顶部 4500 + rz1 底部 1500）。
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+        let cand = root.join("phase0/data/pending/china_dem_l12.arpack");
+        if !cand.exists() {
+            eprintln!("skip zigzag20: real terrain missing ({})", cand.display());
+            return;
+        }
+        let s = r#"{
+            "schema_version":"0.20",
+            "mission":{
+                "start":{"lon":133.54469934022197,"lat":28.982595684894182,"alt_m":3000},
+                "target":{"lon":105.5475988382386,"lat":52.11659079990215,"alt_m":3000},
+                "vehicles":[{"id":"v1","profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":250,
+                    "min_turn_radius_m":442,"max_climb_angle_deg":15},
+                    "start_pose":{"lon":133.54469934022197,"lat":28.982595684894182,"alt_m":3000,"heading_deg":45},
+                    "mid_waypoints":[]}],
+                "red_forces":{"radars":[
+                    {"id":"radar_1786157430304","lon":118.35049384022192,"lat":33.57842732608494,"radar_type":"tracking","radius_km":100,"alt_m":10}]},
+                "no_fly_zones":[
+                    {"id":"zone_1786156802607","zone_type":"no_fly","shape":"polygon","geometry":{"vertices":[[116.55095225290064,39.26654038392207],[111.1077737801414,33.43353915724135],[113.84863918927806,33.67080417285748]]},"alt_min_m":0,"alt_max_m":12000,"height_semantics":"msl"},
+                    {"id":"zone_1786156854743","zone_type":"no_fly","shape":"polygon","geometry":{"vertices":[[121.49414141573678,40.99160392132688],[116.82791643221975,35.71306917297765],[120.2971900795791,37.972512194254584]]},"alt_min_m":0,"alt_max_m":12000,"height_semantics":"msl"},
+                    {"id":"zone_1786156919711","zone_type":"no_fly","shape":"polygon","geometry":{"vertices":[[111.77480190856771,41.612238619264694],[117.83439789351044,47.314679291743424],[114.7349874950259,40.76891806888836]]},"alt_min_m":0,"alt_max_m":12000,"height_semantics":"msl"}],
+                "restricted_zones":[
+                    {"id":"rz_1786156953047","zone_type":"restricted","shape":"circle","geometry":{"center":[118.38073019754566,33.28713020326541],"radius_km":200},"alt_min_m":2000,"alt_max_m":6000,"height_semantics":"msl"},
+                    {"id":"rz_1786157513391","zone_type":"restricted","shape":"circle","geometry":{"center":[124.1204082392855,31.00910864469546],"radius_km":200},"alt_min_m":0,"alt_max_m":4000,"height_semantics":"msl"}],
+                "obstacles":[],
+                "terrain":{"source":"path","path":"__P__"},
+                "parameters":{"p_cross":0.9}
+            }
+        }"#;
+        let s = s.replace("__P__", &cand.to_string_lossy().replace('\\', "\\\\"));
+        let input = parse(&s);
+        let out = solve(&input, &SolveParams::default(), 0).unwrap();
+        let v = &out.vehicles[0];
+        assert_eq!(v.status, "planned");
+        assert!(
+            v.warnings.iter().all(|w| !w.contains("smoothing_failed")),
+            "多 restricted 顺序修复后不应 smoothing_failed，实际 {:?}",
+            v.warnings
+        );
+        assert!(
+            v.path.len() <= 60,
+            "应交付平滑路径（修复前 1866 点），实际 {} 点",
+            v.path.len()
+        );
+        assert!(
+            v.distance_m < 4_500_000.0,
+            "应 ≈ 平滑 4055km，实际 {}km",
+            v.distance_m / 1000.0
+        );
+        // 剖面语义保持：rz2 顶部绕飞（4500m）与 rz1 底部穿行（1500m）都应在路径中
+        let has_4500 = v.path.iter().any(|p| (p.alt_m - 4500.0).abs() < 1.0);
+        let has_1500 = v.path.iter().any(|p| (p.alt_m - 1500.0).abs() < 1.0);
+        assert!(has_4500, "rz2 顶部剖面 4500m 应保留，实际 {:?}", v.path);
+        assert!(has_1500, "rz1 底部剖面 1500m 应保留，实际 {:?}", v.path);
     }
 }
 
