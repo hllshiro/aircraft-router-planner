@@ -25,17 +25,17 @@ const TAG_GDAL_NODATA: Tag = Tag::Unknown(42113);
 
 /// 地理参考（tiepoint + pixelscale，无旋转）。
 #[derive(Debug, Clone, Copy)]
-struct GeoRef {
-    min_lon: f64,
-    min_lat: f64,
-    max_lon: f64,
-    max_lat: f64,
-    cell_lon_deg: f64,
-    cell_lat_deg: f64,
+pub(crate) struct GeoRef {
+    pub(crate) min_lon: f64,
+    pub(crate) min_lat: f64,
+    pub(crate) max_lon: f64,
+    pub(crate) max_lat: f64,
+    pub(crate) cell_lon_deg: f64,
+    pub(crate) cell_lat_deg: f64,
     /// 源像素行 0 = 北（scale_y < 0）→ 采样行翻转。
-    row_flip: bool,
+    pub(crate) row_flip: bool,
     /// 源像素列 0 = 东（scale_x < 0，罕见）→ 采样列翻转。
-    col_flip: bool,
+    pub(crate) col_flip: bool,
 }
 
 /// GeoTIFF 源（两级：全量内存网格 / chunk 按需 + LRU）。
@@ -104,19 +104,24 @@ fn lock_decoder(
 
 /// 解析地理参考（ModelTiepoint + ModelPixelScale，无旋转）。
 /// 拒绝：无 tiepoint/scale（无地理参考）、退化 cell、非仿射 Transformation。
-fn parse_georef(
+pub(crate) fn parse_georef(
     dec: &mut Decoder<std::fs::File>,
     width: u32,
     height: u32,
 ) -> Result<GeoRef, AppError> {
-    // tiepoint：[(raster_i, raster_j, model_x, model_y, model_z) ...]（doubles）
+    // tiepoint：[(raster_i, raster_j, raster_k, model_x, model_y, model_z) ...]（doubles）
     let tie = dec
         .get_tag_f64_vec(Tag::ModelTiepointTag)
         .map_err(|_| AppError::Data("geotiff missing ModelTiepoint".into()))?;
     if tie.len() < 6 {
         return Err(AppError::Data("geotiff ModelTiepoint truncated".into()));
     }
-    let (ti, tj, tx, ty) = (tie[0], tie[1], tie[2], tie[3]);
+    // 标准 GeoTIFF 语义：tie[0..3] = 栅格坐标 (raster_i, raster_j, raster_k)，
+    // tie[3..6] = 模型坐标 (model_x, model_y, model_z)。旧实现把 tie[2]/tie[3]
+    // 当 (tx, ty) 是错位（raster_k 恒 0，model_x 被吞）——2026-08-08 主管测试
+    // gdal 裁剪东亚 GeoTIFF 暴露（convert 输出 origin (0, 69.999861) 应为
+    // (70, 60)）。
+    let (ti, tj, tx, ty) = (tie[0], tie[1], tie[3], tie[4]);
     // pixelscale：[sx, sy, sz]（doubles）
     let scale = dec
         .get_tag_f64_vec(Tag::ModelPixelScaleTag)
@@ -124,10 +129,24 @@ fn parse_georef(
     if scale.len() < 2 {
         return Err(AppError::Data("geotiff ModelPixelScale truncated".into()));
     }
-    let (sx, sy) = (scale[0], scale[1]);
-    if sx == 0.0 || sy == 0.0 {
+    let (sx, sy0) = (scale[0], scale[1]);
+    if sx == 0.0 || sy0 == 0.0 {
         return Err(AppError::Data("geotiff degenerate pixelscale".into()));
     }
+    // gdal 非标准输出检测：tiepoint 在左上角（north-up 数据）但 ModelPixelScale
+    // sy > 0（正）——行向下 model_y 增大，行 bottom 纬度越界（|lat|>90）即证伪。
+    // 修正：sy 方向反置 → row_flip = true（行 0 = 北）。
+    // 标准 south-up（tiepoint 在左下角，sy>0）y1 不越界，保持不变。
+    let sy = if sy0 > 0.0 {
+        let y1_check = ty - tj * sy0 + (height as f64 - 1.0) * sy0;
+        if y1_check > 90.0 || y1_check < -90.0 {
+            -sy0
+        } else {
+            sy0
+        }
+    } else {
+        sy0
+    };
     // 像素 (0,0) 的模型坐标（仿射：x = tx + (col - ti)*sx, y = ty + (row - tj)*sy）
     let x0 = tx - ti * sx;
     let y0 = ty - tj * sy;
@@ -162,7 +181,7 @@ fn parse_georef(
 }
 
 /// GDAL_NODATA tag → 空洞值（None = 无标记；F32/F64 的 NaN 仍按空洞）。
-fn read_gdal_nodata(dec: &mut Decoder<std::fs::File>) -> Option<f32> {
+pub(crate) fn read_gdal_nodata(dec: &mut Decoder<std::fs::File>) -> Option<f32> {
     dec.get_tag_ascii_string(TAG_GDAL_NODATA)
         .ok()
         .and_then(|s| s.trim().parse::<f64>().ok())

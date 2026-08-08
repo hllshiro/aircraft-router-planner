@@ -16,7 +16,6 @@ use super::builtin::{
     BLOCK_SIZE, COMPRESSION_RAW, FORMAT_VERSION, HEADER_SIZE, MAGIC, SEMANTICS_EQUIANGULAR,
     VDATUM_EGM96, VDATUM_ELLIPSOID,
 };
-use super::GeoBounds;
 use crate::error::AppError;
 
 /// 转换选项。
@@ -105,70 +104,156 @@ pub fn convert_file(
 
 // ==================== 输入网格 ====================
 
-/// GeoTIFF 输入（geotiff crate 全量；tile 流式随 M3 替换）。
+/// GeoTIFF 输入（tiff crate 直读 + 大 Limits，支持 >512MB 大文件；内存 O(网格)）。
+///
+/// 2026-08-08 主管测试：gdal_translate 裁剪的东亚 GeoTIFF（38400×28800 int16，
+/// 2.2GB）走 convert 报 "Decoder limits are exceeded"——geotiff crate 内部 tiff
+/// 默认 Limits（max_alloc 512MB）拒绝大图。改用 tiff crate 直读并调大 Limits
+/// （max_alloc/max_bytes 16GB）；行翻转按 GeoRef.row_flip（GeoTIFF 北朝上 →
+/// ARPK1 行 0 = 南）。
 struct GeoTiffGrid {
-    tiff: geotiff::GeoTiff,
-    bounds: GeoBounds,
+    data: Vec<i16>,
+    rows: usize,
+    cols: usize,
+    origin_lon: f64,
+    origin_lat: f64,
     cell_lon_deg: f64,
     cell_lat_deg: f64,
+    no_data: Option<i16>,
 }
 
 impl GeoTiffGrid {
     fn open(path: &Path) -> Result<Self, AppError> {
+        use super::geotiff;
+        use tiff::decoder::{DecodingResult, Decoder};
+        use tiff::tags::Tag;
+
         let f = std::fs::File::open(path)?;
-        let tiff = geotiff::GeoTiff::read(f)
-            .map_err(|e| AppError::Data(format!("geotiff read failed: {e}")))?;
-        if tiff.num_samples == 0 {
-            return Err(AppError::Data("geotiff has zero samples".into()));
+        let mut dec = Decoder::new(f)
+            .map_err(|e| AppError::Data(format!("geotiff decode failed: {e}")))?
+            // 大文件支持：tiff 默认 Limits.decoding_buffer_size=256MiB，2GB+ GeoTIFF
+            // read_image 全图超限 → "Decoder limits are exceeded"（2026-08-08 主管
+            // 测试 gdal 裁剪东亚 GeoTIFF 38400×28800 int16 复现）；unlimited 放开，
+            // 内存由调用方承诺（机器 16GB 可扛 2.2GB 网格 + 流式块写）。
+            .with_limits(tiff::decoder::Limits::unlimited());
+        let (width, height) = dec
+            .dimensions()
+            .map_err(|e| AppError::Data(format!("geotiff dimensions failed: {e}")))?;
+        if width == 0 || height == 0 {
+            return Err(AppError::Data("geotiff zero dimensions".into()));
         }
-        let ext = tiff.model_extent();
-        let (min_x, min_y, max_x, max_y) = (ext.min().x, ext.min().y, ext.max().x, ext.max().y);
-        if min_x.abs() < 1e-9 && min_y.abs() < 1e-9 && (max_x - tiff.raster_width as f64).abs() < 1e-9 {
-            return Err(AppError::Data(
-                "geotiff has no georeferencing (model extent == pixel range)".into(),
-            ));
+        let geo = geotiff::parse_georef(&mut dec, width, height)?;
+        let samples = dec
+            .find_tag_unsigned::<u16>(Tag::SamplesPerPixel)
+            .ok()
+            .flatten()
+            .unwrap_or(1) as usize;
+        let no_data = geotiff::read_gdal_nodata(&mut dec).map(|v| v.round() as i16);
+        let result = dec
+            .read_image()
+            .map_err(|e| AppError::Data(format!("geotiff read_image failed: {e}")))?;
+        // DecodingResult → i16 网格（多波段取 band 0；NaN/非有限 → i16::MIN 空洞）
+        let raw: Vec<i16> = match result {
+            DecodingResult::U8(v) => v.into_iter().map(|x| x as i16).collect(),
+            DecodingResult::U16(v) => v.into_iter().map(|x| x as i16).collect(),
+            DecodingResult::U32(v) => v
+                .into_iter()
+                .map(|x| x.min(i16::MAX as u32) as i16)
+                .collect(),
+            DecodingResult::I8(v) => v.into_iter().map(|x| x as i16).collect(),
+            DecodingResult::I16(v) => v,
+            DecodingResult::I32(v) => v
+                .into_iter()
+                .map(|x| x.clamp(i16::MIN as i32, i16::MAX as i32) as i16)
+                .collect(),
+            DecodingResult::F32(v) => v
+                .into_iter()
+                .map(|x| if x.is_finite() { x.round() as i16 } else { i16::MIN })
+                .collect(),
+            DecodingResult::F64(v) => v
+                .into_iter()
+                .map(|x| if x.is_finite() { x.round() as i16 } else { i16::MIN })
+                .collect(),
+            _ => {
+                return Err(AppError::Data(
+                    "geotiff unsupported sample type (u64/i64)".into(),
+                ))
+            }
+        };
+        let n = (width as usize) * (height as usize);
+        if raw.len() < n {
+            return Err(AppError::Data("geotiff image data truncated".into()));
         }
-        let cell_lon_deg = (max_x - min_x) / tiff.raster_width as f64;
-        let cell_lat_deg = (max_y - min_y) / tiff.raster_height as f64;
-        if cell_lon_deg <= 0.0 || cell_lat_deg <= 0.0 {
-            return Err(AppError::Data("geotiff degenerate cell size".into()));
+        let take = |i: usize| -> i16 {
+            // samples>1 时 read_image 返回 chunky interleaved（每像素 samples 个值）
+            let idx = i * samples;
+            if idx < raw.len() {
+                raw[idx]
+            } else {
+                i16::MIN
+            }
+        };
+        let (rows, cols) = (height as usize, width as usize);
+        let mut data = Vec::with_capacity(n);
+        if geo.row_flip {
+            // GeoTIFF 行 0 = 北 → ARPK1 行 0 = 南
+            for r in 0..rows {
+                let src_row = rows - 1 - r;
+                for c in 0..cols {
+                    let src_c = if geo.col_flip { cols - 1 - c } else { c };
+                    data.push(take(src_row * cols + src_c));
+                }
+            }
+        } else {
+            for r in 0..rows {
+                for c in 0..cols {
+                    let src_c = if geo.col_flip { cols - 1 - c } else { c };
+                    data.push(take(r * cols + src_c));
+                }
+            }
         }
         Ok(Self {
-            tiff,
-            bounds: GeoBounds { min_lon: min_x, min_lat: min_y, max_lon: max_x, max_lat: max_y },
-            cell_lon_deg,
-            cell_lat_deg,
+            data,
+            rows,
+            cols,
+            origin_lon: geo.min_lon,
+            origin_lat: geo.min_lat,
+            cell_lon_deg: geo.cell_lon_deg,
+            cell_lat_deg: geo.cell_lat_deg,
+            no_data,
         })
     }
 }
 
 impl GridSource for GeoTiffGrid {
     fn dims(&self) -> (usize, usize) {
-        (self.tiff.raster_height, self.tiff.raster_width)
+        (self.rows, self.cols)
     }
     fn origin(&self) -> (f64, f64) {
-        (self.bounds.min_lon, self.bounds.min_lat)
+        (self.origin_lon, self.origin_lat)
     }
     fn cell(&self) -> (f64, f64) {
         (self.cell_lon_deg, self.cell_lat_deg)
     }
     fn height(&self, r: usize, c: usize) -> Option<i16> {
-        if r >= self.tiff.raster_height || c >= self.tiff.raster_width {
+        if r >= self.rows || c >= self.cols {
             return None;
         }
-        // cell 中心模型坐标（get_value_at 按坐标取整 → 返回该 cell 原值；1:1 转换）
-        let lon = self.bounds.min_lon + (c as f64 + 0.5) * self.cell_lon_deg;
-        let lat = self.bounds.min_lat + (r as f64 + 0.5) * self.cell_lat_deg;
-        let v = self.tiff.get_value_at::<f64>(&geo_types::Coord { x: lon, y: lat }, 0)?;
-        if !v.is_finite() {
+        let v = self.data[r * self.cols + c];
+        if v == i16::MIN {
             return None; // NaN/非有限 → 空洞
         }
-        Some(v.round() as i16)
+        if let Some(nd) = self.no_data {
+            if v == nd {
+                return None;
+            }
+        }
+        Some(v)
     }
     fn source_desc(&self) -> String {
         format!(
             "GeoTIFF {}x{} cell {:.6}deg x {:.6}deg",
-            self.tiff.raster_width, self.tiff.raster_height, self.cell_lon_deg, self.cell_lat_deg
+            self.cols, self.rows, self.cell_lon_deg, self.cell_lat_deg
         )
     }
 }
