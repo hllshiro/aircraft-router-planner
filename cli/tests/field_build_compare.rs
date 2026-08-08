@@ -146,7 +146,7 @@ fn build_par_local<B: BulkPrefetch + Sync + Send>(
 fn load_real() -> Option<BuiltinSource> {
     let p = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
-        .join("phase0/data/pending/china_dem_l12.arpack");
+        .join("data/china_dem_l12.arpack");
     if p.exists() {
         BuiltinSource::open(&p).ok()
     } else {
@@ -173,7 +173,7 @@ fn gmted_7p5as_speed_comparison() {
     // 文件不存在（未转换/被删）→ fallback：china_dem_l12 重采样 7.5as 合成近似。
     let gmted_path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
-        .join("phase0/data/pending/gmted2010_7p5as_global.z19.arpack");
+        .join("data/gmted2010_7p5as_global.z19.arpack");
     // 仅用于 if 分支内打印 res；对比循环每轮用 bytes 重新 parse（冷缓存公平对比）
     let (_src75, bytes) = if gmted_path.exists() {
         let bytes = std::fs::read(&gmted_path).expect("read real gmted2010");
@@ -230,7 +230,7 @@ fn gmted_7p5as_speed_comparison() {
     };
     // 3. 冷缓存公平对比：10as vs 7.5as（par_local，每轮新实例交替取 min）
     let src10_bytes = std::fs::read(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("phase0/data/pending/china_dem_l12.arpack"),
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("data/china_dem_l12.arpack"),
     )
     .expect("re-read 10as");
     let mut t10_best = f64::INFINITY;
@@ -427,7 +427,7 @@ fn field_build_real_data() {
     // 每轮交替 A/B 各用新解析实例（cache 空），取各自 min——消除预热/顺序偏差。
     let (min_lon, min_lat, span) = zigzag11_region();
     let bytes = std::fs::read(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("phase0/data/pending/china_dem_l12.arpack"),
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("data/china_dem_l12.arpack"),
     )
     .expect("re-read real arpack");
     let mut s_best = f64::INFINITY;

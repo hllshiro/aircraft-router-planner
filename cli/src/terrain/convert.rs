@@ -769,7 +769,7 @@ mod tests {
     /// GeoTIFF 转换（项目内 `_test_small.tif`）：产物采样 = 原 GeoTIFF 源采样（±1m 取整容差）。
     #[test]
     fn convert_geotiff_roundtrip() {
-        let tif = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../phase0/data/_test_small.tif");
+        let tif = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/_test_small.tif");
         if !tif.exists() {
             eprintln!("skip: _test_small.tif not found");
             return;

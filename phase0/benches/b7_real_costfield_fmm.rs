@@ -130,6 +130,14 @@ fn corridor_quality_stats(field: &CostField) {
 }
 
 fn criterion_benchmark(c: &mut Criterion) {
+    // 2026-08-08 主管清理 phase0/data：beijing_dem* 已删除（数据可经
+    // phase0/scripts/beijing_prep.py 再生成）→ 数据缺失时基准跳过，不 panic。
+    if !std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/data/beijing_dem_f32.raw"))
+        .exists()
+    {
+        eprintln!("[b7] SKIP: beijing_dem_f32.raw not found (cleaned 2026-08-08; regenerate via scripts/beijing_prep.py)");
+        return;
+    }
     let field = real_cost_field();
     corridor_quality_stats(&field);
 

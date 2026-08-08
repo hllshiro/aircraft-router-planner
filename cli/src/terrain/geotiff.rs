@@ -446,7 +446,7 @@ mod tests {
     /// 项目内 GeoTIFF（_test_small.tif，300×200，cell 0.001°）：路径定位。
     fn test_tif() -> Option<std::path::PathBuf> {
         let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../phase0/data/_test_small.tif");
+            .join("../../data/_test_small.tif");
         p.exists().then_some(p)
     }
 
@@ -513,12 +513,13 @@ mod tests {
     }
 
     /// LRU 路径（大文件 >64 chunks，tifffile 生成）：chunk 按需采样 = 生成公式原值。
-    /// 文件 `phase0/data/pending/lazy_test_4096.tif` 由开发期手动生成（不入库）——
+    /// 文件 `data/lazy_test_4096.tif` 由开发期手动生成（2026-08-08 清理删除，
+    /// 可按需重生成——tifffile 写 4096² 分块 tif 即可）——
     /// 不存在时跳过（逻辑由其余测试 + 代码审查覆盖）。
     #[test]
     fn lazy_large_file_sampling() {
         let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../phase0/data/pending/lazy_test_4096.tif");
+            .join("../../data/lazy_test_4096.tif");
         if !p.exists() {
             eprintln!("skip: lazy_test_4096.tif not found");
             return;

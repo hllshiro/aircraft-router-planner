@@ -10,7 +10,7 @@
 //!      no_fly/obstacle 全高度禁入，restricted 仅禁入高度带（底部/顶部剖面穿越合法）。
 //!
 //! 地形依赖（主管决策）：cases 中 terrain.path 指向
-//! `phase0/data/pending/china_dem_l12.arpack`（数据文件已 gitignore）。
+//! `data/china_dem_l12.arpack`（数据文件已 gitignore）。
 //! 运行期检测：文件存在 → 改写 path 为绝对路径使用真实地形；缺失 → terrain.source=none
 //! 合成平面（覆盖不到真实地形 bug，但保证用例在无数据环境仍可跑）。
 //!
@@ -27,10 +27,10 @@ fn cases_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/regression/cases")
 }
 
-/// 真实地形数据文件候选（workspace 根/phase0/data/pending/...）
+/// 真实地形数据文件候选（workspace 根/data/...）
 fn real_terrain_path() -> Option<PathBuf> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
-    let cand = root.join("phase0/data/pending/china_dem_l12.arpack");
+    let cand = root.join("data/china_dem_l12.arpack");
     cand.exists().then_some(cand)
 }
 

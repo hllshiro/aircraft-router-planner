@@ -1,7 +1,7 @@
 //! 开发期工具：真实 GSHHG 掩膜验证（Phase 2 掩膜集成）。
 //!
 //! 用法（workspace 根目录）：
-//!   cargo run -p aircraft-router-planner-cli --example mask_probe -- phase0/data/mask_10as.mask
+//!   cargo run -p aircraft-router-planner-cli --example mask_probe -- data/mask_10as.mask
 //!
 //! 输出：解析耗时 / 关键点分类 / 陆地·湖泊占比（与 Python 侧对照）。
 
@@ -10,7 +10,7 @@ use std::time::Instant;
 use aircraft_router_planner_cli::terrain::mask::{GeoMask, MaskClass};
 
 fn main() {
-    let path = std::env::args().nth(1).unwrap_or_else(|| "phase0/data/mask_10as.mask".into());
+    let path = std::env::args().nth(1).unwrap_or_else(|| "data/mask_10as.mask".into());
     let t0 = Instant::now();
     let m = match GeoMask::open(std::path::Path::new(&path)) {
         Ok(m) => m,

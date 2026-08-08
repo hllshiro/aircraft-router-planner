@@ -106,22 +106,17 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                 Some(p) => BuiltinSource::open(&p)?,
                 None => {
                     // 主管决策 2026-08-08：默认地形 = 7.5as 东亚压缩版（east_asia_7p5as.arpack）。
-                    // 候选：exe 同目录 / 工作目录 / phase0/data / 开发暂存目录。
+                    // 候选：exe 同目录 / 工作目录 data/（2026-08-08 数据迁移到项目根 data/）。
                     let mut candidates = vec![
                         PathBuf::from("east_asia_7p5as.arpack"),
-                        PathBuf::from("phase0/data/east_asia_7p5as.arpack"),
-                        PathBuf::from("phase0/data/pending/east_asia_crop/east_asia_7p5as.arpack"),
-                        PathBuf::from("../phase0/data/pending/east_asia_crop/east_asia_7p5as.arpack"),
+                        PathBuf::from("data/east_asia_7p5as.arpack"),
                     ];
                     if let Ok(exe) = std::env::current_exe() {
                         if let Some(dir) = exe.parent() {
                             candidates.insert(0, dir.join("east_asia_7p5as.arpack"));
-                            // 上溯 3 层（target/release → target → workspace 根），逐层试开发路径
+                            // 上溯 3 层（target/release → target → workspace 根），逐层试 data/
                             for anc in dir.ancestors().skip(1).take(3) {
-                                candidates.push(anc.join("phase0/data/east_asia_7p5as.arpack"));
-                                candidates.push(
-                                    anc.join("phase0/data/pending/east_asia_crop/east_asia_7p5as.arpack"),
-                                );
+                                candidates.push(anc.join("data/east_asia_7p5as.arpack"));
                             }
                         }
                     }
@@ -130,7 +125,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                     } else {
                         return Err(AppError::Data(
                             "terrain.source=path/builtin 但未提供地形文件，且默认地形 \
-                             (east_asia_7p5as.arpack) 未找到（--terrain / terrain.path / exe 同目录 / phase0/data）"
+                             (east_asia_7p5as.arpack) 未找到（--terrain / terrain.path / exe 同目录 / data/）"
                                 .into(),
                         ));
                     }
@@ -856,19 +851,19 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
 /// 默认海岸掩膜候选（主管 2026-08-08：默认提供和使用的掩膜为全球版本，
 /// **7.5 弧秒（mask_7p5as.mask，与默认地形 east_asia_7p5as.arpack 同分辨率）**；
 /// GSHHG 全球 V2 3 态，覆盖 360°×180°，86400×172800，30.8MB）。
-/// 候选：exe 同目录 / 工作目录 / phase0/data；未找到 → None（纯地形，无掩膜分层）。
+/// 候选：exe 同目录 / 工作目录 data/（2026-08-08 数据迁移到项目根 data/）；
+/// 未找到 → None（纯地形，无掩膜分层）。
 /// 区域窗口掩膜（east_asia_7p5as.mask 等）不自动探测——用户可显式 terrain.mask_path 指定。
 fn default_mask_candidates() -> Option<PathBuf> {
     let mut candidates = vec![
         PathBuf::from("mask_7p5as.mask"),
-        PathBuf::from("phase0/data/mask_7p5as.mask"),
-        PathBuf::from("../phase0/data/mask_7p5as.mask"),
+        PathBuf::from("data/mask_7p5as.mask"),
     ];
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             candidates.insert(0, dir.join("mask_7p5as.mask"));
             for anc in dir.ancestors().skip(1).take(3) {
-                candidates.push(anc.join("phase0/data/mask_7p5as.mask"));
+                candidates.push(anc.join("data/mask_7p5as.mask"));
             }
         }
     }
@@ -2624,7 +2619,7 @@ mod tests {
         // 1138km + smoothing_failed（密集锯齿）。
         // 修复后：NoData 降级警告 + 网格伪影直线兜底 → 平滑直线 ~784km。
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
-        let cand = root.join("phase0/data/pending/china_dem_l12.arpack");
+        let cand = root.join("data/china_dem_l12.arpack");
         if !cand.exists() {
             eprintln!("skip zigzag8: real terrain missing ({})", cand.display());
             return;
@@ -2685,7 +2680,7 @@ mod tests {
         // 与前一段输出的边界转角，超限 → arc_transition 插入过渡弧（弹出边界点、
         // 后续段起点同步到弧末点 E）→ 22 点平滑路径 2982km。
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
-        let cand = root.join("phase0/data/pending/china_dem_l12.arpack");
+        let cand = root.join("data/china_dem_l12.arpack");
         if !cand.exists() {
             eprintln!("skip zigzag19: real terrain missing ({})", cand.display());
             return;
@@ -2755,7 +2750,7 @@ mod tests {
         // 修复：hits 按沿路径穿行起点（第一次进入索引）升序处理 → 15 点平滑路径
         // 4055km，剖面语义保持（rz2 顶部 4500 + rz1 底部 1500）。
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
-        let cand = root.join("phase0/data/pending/china_dem_l12.arpack");
+        let cand = root.join("data/china_dem_l12.arpack");
         if !cand.exists() {
             eprintln!("skip zigzag20: real terrain missing ({})", cand.display());
             return;
@@ -2822,7 +2817,7 @@ mod tests {
         // 顶部 6500m 绕飞。rz2/rz3（alt[1000,4000]/[1000,5000]）穿行段地形低 →
         // 底部 500m 穿行。结果：19 点平滑路径 3992km。
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
-        let cand = root.join("phase0/data/pending/china_dem_l12.arpack");
+        let cand = root.join("data/china_dem_l12.arpack");
         if !cand.exists() {
             eprintln!("skip zigzag21: real terrain missing ({})", cand.display());
             return;
@@ -2892,7 +2887,7 @@ mod tests {
         // 另修复 verify/check 圆判定投影误差（segment_circle_intersect_t slack）：
         // 1200km 长段投影偏差 ~0.5km，贴圆擦过（穿入 0.5km）被漏判交付 → 拒。
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
-        let cand = root.join("phase0/data/pending/china_dem_l12.arpack");
+        let cand = root.join("data/china_dem_l12.arpack");
         if !cand.exists() {
             eprintln!("skip zigzag22: real terrain missing ({})", cand.display());
             return;
@@ -2979,7 +2974,7 @@ mod tests {
         // 带内，退化/零长度段也覆盖）+ 过渡段水平距离 < climb_base（爬升角超 15°）→
         // need_wall 画墙水平绕行兜底 → 6 点 3000m 平滑路径 1712km。
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
-        let cand = root.join("phase0/data/pending/china_dem_l12.arpack");
+        let cand = root.join("data/china_dem_l12.arpack");
         if !cand.exists() {
             eprintln!("skip zigzag23: real terrain missing ({})", cand.display());
             return;

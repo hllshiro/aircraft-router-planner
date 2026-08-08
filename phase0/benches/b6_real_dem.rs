@@ -67,6 +67,14 @@ fn count_blocked(t: &Terrain, rays: &[([f64; 3], [f64; 3])]) -> usize {
 }
 
 fn criterion_benchmark(c: &mut Criterion) {
+    // 2026-08-08 主管清理 phase0/data：beijing_dem* 已删除（数据可经
+    // phase0/scripts/beijing_prep.py 再生成）→ 数据缺失时基准跳过，不 panic。
+    if !std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/data/beijing_dem_f32.raw"))
+        .exists()
+    {
+        eprintln!("[b6] SKIP: beijing_dem_f32.raw not found (cleaned 2026-08-08; regenerate via scripts/beijing_prep.py)");
+        return;
+    }
     let (tf, t2, t4, (lf, mf), (l2, m2), (l4, m4)) = load();
     let rays = gen_rays(0x61, &tf);
     println!(

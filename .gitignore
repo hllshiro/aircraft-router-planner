@@ -17,6 +17,9 @@ phase0/*_analyze_out.json
 # phase0 real-DEM data (Beijing_DEM f32 raw, ~150MiB, regenerate via scripts/beijing_prep.py)
 phase0/data/
 
+# 发布/开发数据（2026-08-08 迁移：默认地形 + 掩膜 + 成品数据，不入库）
+data/
+
 # phase0 transient run logs / scratch (regenerated per run)
 phase0/recompress_z19.log
 phase0/debug_err.txt
