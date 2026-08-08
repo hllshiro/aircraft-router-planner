@@ -19,7 +19,7 @@ use crate::coord::Geo;
 use crate::costfield::{backtrack_path, build_semantic_cost_field, build_semantic_cost_field_par_local, fmm_propagate};
 use crate::error::{AppError, InputInvalidReason};
 use crate::path::{Path, PathPoint as RouterPoint};
-use crate::smooth::{default_chain, smooth_path_chain, VerifyContext};
+use crate::smooth::{default_chain, segment_circle_intersect_t, smooth_path_chain, VerifyContext};
 use crate::spatial::{CircleEntry, CircleIndex};
 use crate::terrain::builtin::BuiltinSource;
 use crate::terrain::{BulkPrefetch, Sample, TerrainSource};
@@ -1218,6 +1218,57 @@ fn line_hits_wall_km(
     })
 }
 
+/// 过渡直线（desc_in / out_climb）是否穿任一 restricted 圆高度带：
+/// 线段与圆求交区间内采样 8 点，线性高度插值落入 [alt_min, alt_max] 即命中。
+/// 用于 build 剖面段防御——进入任何 restricted 圆时高度必须已在带外/带下
+/// （2026-08-08 主管 zigzag23：rz1 的 desc1 从圆外 0.25km 处爬升，进入圆时
+/// 高度 ~3008m 在带内 [1000,4000] → 拼接后终检拒 → 回退 1967 点锯齿）。
+/// 与 verify 的圆/高度采样口径一致（含 segment_circle_intersect_t 的投影 slack）。
+/// 退化段（desc_in 起点 = in_idx 点 → 零长度，只爬高度，如 zigzag23 desc1）
+/// 求交返回 None——端点本身在圆内带内同样命中（i_desc=i_in 时 desc 起点即圆内
+/// 带内点，爬升穿带内 → 非法剖面 → need_wall）。
+fn line_hits_restricted_band_km(
+    lon1: f64,
+    lat1: f64,
+    alt1: f64,
+    lon2: f64,
+    lat2: f64,
+    alt2: f64,
+    zones: &[Zone],
+) -> bool {
+    zones.iter().any(|z| {
+        if z.zone_type != crate::config::ZoneType::Restricted {
+            return false;
+        }
+        let crate::config::ZoneShape::Circle { center, radius_km } = z.shape else {
+            return false;
+        };
+        // 端点本身在圆内带内（退化/零长度段覆盖）
+        let in_band_at = |lon: f64, lat: f64, alt: f64| -> bool {
+            match Geo::new(lon, lat) {
+                Ok(g) => crate::config::zone_contains(z, &g) && alt >= z.alt_min_m && alt <= z.alt_max_m,
+                Err(_) => false,
+            }
+        };
+        if in_band_at(lon1, lat1, alt1) || in_band_at(lon2, lat2, alt2) {
+            return true;
+        }
+        let Some((t1, t2)) =
+            segment_circle_intersect_t(lon1, lat1, lon2, lat2, center[0], center[1], radius_km)
+        else {
+            return false;
+        };
+        for kk in 0..=8 {
+            let tt = t1 + (t2 - t1) * kk as f64 / 8.0;
+            let alt = alt1 + (alt2 - alt1) * tt;
+            if alt >= z.alt_min_m && alt <= z.alt_max_m {
+                return true;
+            }
+        }
+        false
+    })
+}
+
 /// 受限区穿行剖面（主管 2026-08-06 二轮+三轮架构增强）：FMM 直穿圆形 restricted
 /// （只绕硬墙）后，沿 raw 路径找穿行区间（进入点 in / 穿出点 out）：
 /// [首段 raw[0..=i_desc]@alt_m, desc→in 过渡直线(mask=true 跳过平滑,15°),
@@ -1527,7 +1578,52 @@ fn build_restricted_profiles(
             zones,
             inflation_km,
         );
-        if desc_line_hits || climb_line_hits {
+        // 过渡直线穿 **restricted 圆高度带** 同样 need_wall（2026-08-08 主管
+        // zigzag23：rz2 圆心南移后 out_climb 不穿 no_fly → 不触发硬墙兜底 →
+        // rz1 的 desc1 从圆外 0.25km 处爬升，进入 rz1 圆时高度 ~3008m 在带内
+        // [1000,4000] → FINAL verify 拒 → 全链回退 1967 点锯齿）。desc_in /
+        // out_climb 是新构造直线，其进入任何 restricted 圆时高度必须已在带外
+        // （或降穿到带下）；区间内采样 8 点高度插值 ∈ [alt_min, alt_max] 即拒。
+        let desc_band_hits = line_hits_restricted_band_km(
+            tail.points[i_desc].lon,
+            tail.points[i_desc].lat,
+            alt_m,
+            pin2.lon,
+            pin2.lat,
+            pin2.alt_m,
+            zones,
+        );
+        let climb_band_hits = line_hits_restricted_band_km(
+            pout2.lon,
+            pout2.lat,
+            pout2.alt_m,
+            tail.points[i_climb].lon,
+            tail.points[i_climb].lat,
+            alt_m,
+            zones,
+        );
+        if desc_line_hits || climb_line_hits || desc_band_hits || climb_band_hits {
+            return (vec![seg.clone()], vec![false], true);
+        }
+        // 过渡直线水平距离不足（< climb_base → 爬升角超 15°）：desc/climb 锚点
+        // 搜索失败时 i_desc/i_climb 退化为 i_in/i_out（如 zigzag23 rz1：raw 在圆外
+        // 仅 0.05km，climb_base 7.5km 内无合法锚点 → desc1 零长度垂直爬升 3000→4500）。
+        // 零长度段本身在圆外不违例，但 join 去重（坐标相同）丢失 desc1 与 in_out 起点
+        // → pt(3000 圆外)→pt(4500 圆内) 40km 大爬升穿 restricted 带内 → final verify 拒
+        // → 回退 1967 点锯齿。过渡段必须有足够水平爬升距离，否则 need_wall 画墙兜底。
+        let desc_len_km = dist_km(
+            tail.points[i_desc].lon,
+            tail.points[i_desc].lat,
+            pin2.lon,
+            pin2.lat,
+        );
+        let climb_len_km = dist_km(
+            pout2.lon,
+            pout2.lat,
+            tail.points[i_climb].lon,
+            tail.points[i_climb].lat,
+        );
+        if desc_len_km < climb_base_km || climb_len_km < climb_base_km {
             return (vec![seg.clone()], vec![false], true);
         }
         // 切分 5 段：
@@ -2752,6 +2848,92 @@ mod tests {
         );
         // 交付路径不得穿 restricted 高度带（verify 圆判定 slack 修复）：
         // 全 3000m 平飞绕行 → 圆内采样点高度都不在 [alt_min, alt_max] 带内
+        for z in &input.mission.restricted_zones {
+            let crate::config::ZoneShape::Circle { center, radius_km } = z.shape else {
+                continue;
+            };
+            for w in v.path.windows(2) {
+                for k in 0..=20 {
+                    let u = k as f64 / 20.0;
+                    let (lon, lat) = (
+                        w[0].x + (w[1].x - w[0].x) * u,
+                        w[0].y + (w[1].y - w[0].y) * u,
+                    );
+                    let d = dist_km(lon, lat, center[0], center[1]);
+                    if d <= radius_km && w[0].alt_m >= z.alt_min_m && w[0].alt_m <= z.alt_max_m {
+                        panic!(
+                            "路径穿 restricted {} 带内 ({:.3},{:.3}) d={:.1}km alt={:.0}",
+                            z.id, lon, lat, d, w[0].alt_m
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn zigzag23_desc_anchor_no_space_need_wall() {
+        // 主管 2026-08-08 输入（China DEM L12 真实地形，zigzag22 变体）：rz2 圆心南移
+        // 至（116.044,38.196）→ rz2 out_climb 过渡直线不再穿 no_fly → 不触发硬墙兜底 →
+        // 剖面方案继续。rz1 处理时 raw 在 rz1 圆外仅 0.05km（climb_base 7.5km 内无合法
+        // desc 锚点）→ i_desc=i_in → desc1 零长度垂直爬升 3000→4500（起点在圆外不违例）。
+        // 但 join 去重（坐标相同）丢失 desc1 与 in_out1 起点 → pt(3000 圆外)→pt(4500
+        // 圆内) 40km 大爬升穿 rz1 带内 [1000,4000] → final verify 拒 → 回退 1967 点
+        // 网格楼梯（2129.9km）。
+        // 修复：desc_in/out_climb 过渡直线穿任何 restricted 圆带内（含端点本身在圆内
+        // 带内，退化/零长度段也覆盖）+ 过渡段水平距离 < climb_base（爬升角超 15°）→
+        // need_wall 画墙水平绕行兜底 → 6 点 3000m 平滑路径 1712km。
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+        let cand = root.join("phase0/data/pending/china_dem_l12.arpack");
+        if !cand.exists() {
+            eprintln!("skip zigzag23: real terrain missing ({})", cand.display());
+            return;
+        }
+        let s = r#"{
+            "schema_version":"0.20",
+            "mission":{
+                "start":{"lon":122.9207839850354,"lat":34.08860812240517,"alt_m":3000},
+                "target":{"lon":112.42397536890363,"lat":44.77935701405758,"alt_m":3000},
+                "vehicles":[{"id":"v1","profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":250,
+                    "min_turn_radius_m":442,"max_climb_angle_deg":15},
+                    "start_pose":{"lon":122.9207839850354,"lat":34.08860812240517,"alt_m":3000,"heading_deg":45},
+                    "mid_waypoints":[]}],
+                "red_forces":{"radars":[
+                    {"id":"radar_1786161064845","lon":112.831513368294,"lat":43.96813072477223,"radar_type":"early_warning","radius_km":50,"alt_m":10},
+                    {"id":"radar_1786161114205","lon":113.3041431982615,"lat":41.11010411517771,"radar_type":"tracking","radius_km":50,"alt_m":10}]},
+                "no_fly_zones":[
+                    {"id":"zone_1786160882933","zone_type":"no_fly","shape":"polygon","geometry":{"vertices":[[115.8706565717089,39.78344941000123],[114.7159667887149,38.93519569445941],[115.2867088987491,39.07797084088842]]},"alt_min_m":0,"alt_max_m":12000,"height_semantics":"msl"},
+                    {"id":"zone_1786160896845","zone_type":"no_fly","shape":"polygon","geometry":{"vertices":[[118.18296859187262,39.84855590795146],[116.61186105129381,38.74876499516125],[117.56074185629024,38.71484400273334]]},"alt_min_m":0,"alt_max_m":12000,"height_semantics":"msl"},
+                    {"id":"zone_1786160926653","zone_type":"no_fly","shape":"polygon","geometry":{"vertices":[[115.2637148745787,42.16339247467029],[113.72404261848064,41.18665997544362],[114.42958291361323,41.129943488801175],[115.10906620487548,41.58646379784794]]},"alt_min_m":0,"alt_max_m":12000,"height_semantics":"msl"}],
+                "restricted_zones":[
+                    {"id":"rz_1786160994133","zone_type":"restricted","shape":"circle","geometry":{"center":[115.55242377844469,39.53680791293585],"radius_km":50},"alt_min_m":1000,"alt_max_m":4000,"height_semantics":"msl"},
+                    {"id":"rz_1786161169725","zone_type":"restricted","shape":"circle","geometry":{"center":[116.04433455541918,38.19552566014898],"radius_km":100},"alt_min_m":500,"alt_max_m":4500,"height_semantics":"msl"}],
+                "obstacles":[],
+                "terrain":{"source":"path","path":"__P__"},
+                "parameters":{"p_cross":0.9}
+            }
+        }"#;
+        let s = s.replace("__P__", &cand.to_string_lossy().replace('\\', "\\\\"));
+        let input = parse(&s);
+        let out = solve(&input, &SolveParams::default(), 0).unwrap();
+        let v = &out.vehicles[0];
+        assert_eq!(v.status, "planned");
+        assert!(
+            v.warnings.iter().all(|w| !w.contains("smoothing_failed")),
+            "过渡段穿 restricted 带内/长度不足应 need_wall 兜底而非回退，实际 {:?}",
+            v.warnings
+        );
+        assert!(
+            v.path.len() <= 60,
+            "应交付平滑路径（修复前 1967 点），实际 {} 点",
+            v.path.len()
+        );
+        assert!(
+            v.distance_m < 1_800_000.0,
+            "应 ≈ 平滑 1712km（画墙绕行兜底），实际 {}km",
+            v.distance_m / 1000.0
+        );
+        // 交付路径不得穿 restricted 高度带（同 zigzag22 检查）
         for z in &input.mission.restricted_zones {
             let crate::config::ZoneShape::Circle { center, radius_km } = z.shape else {
                 continue;
