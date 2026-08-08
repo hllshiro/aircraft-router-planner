@@ -1052,6 +1052,7 @@ fn restricted_pass_alt(
     start: &Geo,
     target: &Geo,
     max_climb_deg: f64,
+    raw_band: Option<(&[RouterPoint], usize, usize)>,
 ) -> Option<f64> {
     let ZoneShape::Circle { center, radius_km } = z.shape else {
         return None;
@@ -1077,7 +1078,7 @@ fn restricted_pass_alt(
     let bottom_ok = bottom >= 0.0
         && bottom < z.alt_min_m
         && fit(bottom)
-        && bottom_terrain_ok(z, terrain, bottom, start, target);
+        && bottom_terrain_ok(z, terrain, bottom, start, target, raw_band);
     match (bottom_ok, top_ok) {
         (true, _) => Some(bottom), // 底部垂直机动总量更小 → 恒更优（显式代价比较结论）
         (false, true) => Some(top), // 底部不可行 → 顶部绕飞（优于水平绕行：水平距离不增加）
@@ -1091,12 +1092,17 @@ fn restricted_pass_alt(
 /// （飞机不经过）不应把底部判为不可行（圆面判据过度保守，会把"穿行带 46m、圆角落
 /// 685m"的场景错误导向顶部绕飞）。
 /// 无地形（平面 0m）→ 恒可行。顶部绕飞不查地形（高于任何地形）。
+/// 2026-08-08 主管 zigzag21：传入 raw 穿行段（raw_band=Some）时，改采样
+/// raw[i_in..=i_out] 实际穿行子段地形（FMM 绕行后的真实路径）——start→target 直线
+/// 不穿圆时旧逻辑直接放行底部，但 raw 绕行后穿圆段可能过高（rz1 穿行段地形 1496m，
+/// 1500m 剖面净空 4m < 100m → verify 拒 → 回退 157 点锯齿）。
 fn bottom_terrain_ok(
     z: &Zone,
     terrain: Option<&dyn TerrainSource>,
     bottom: f64,
     start: &Geo,
     target: &Geo,
+    raw_band: Option<(&[RouterPoint], usize, usize)>,
 ) -> bool {
     let Some(t) = terrain else {
         return true;
@@ -1104,6 +1110,20 @@ fn bottom_terrain_ok(
     let ZoneShape::Circle { center, radius_km } = z.shape else {
         return false;
     };
+    // raw 穿行段优先：底部剖面实际沿 raw 子段平飞，地形按该子段采样（含进出点）
+    if let Some((raw, i_a, i_b)) = raw_band {
+        let (lo, hi) = (i_a.min(i_b), i_a.max(i_b));
+        let mut max_terr: Option<f64> = None;
+        for k in lo..=hi {
+            if let Sample::Land(h) = t.sample_at(raw[k].lon, raw[k].lat) {
+                max_terr = Some(max_terr.map_or(h, |m: f64| m.max(h)));
+            }
+        }
+        return match max_terr {
+            Some(h) => h + 100.0 <= bottom, // 净空满足 → 底部可行
+            None => true,                    // 穿行段无陆地（水面/无数据）→ 直穿
+        };
+    }
     // 平面近似：start→target 直线与圆交点（同 build_restricted_profiles 的解析二次方程）
     let mlat = ((start.lat + target.lat) / 2.0).to_radians();
     let kx = mlat.cos() * 111.32;
@@ -1162,7 +1182,7 @@ fn restricted_detour_required(
     if !restricted_blocks_alt(z, alt_m) {
         return false;
     }
-    restricted_pass_alt(z, alt_m, ceiling_m, terrain, start, target, max_climb_deg).is_none()
+    restricted_pass_alt(z, alt_m, ceiling_m, terrain, start, target, max_climb_deg, None).is_none()
 }
 
 /// 直线段是否穿/贴任一硬墙（NoFly/Obstacle，全高度墙）：净距 ≤ 0 或 < inflation。
@@ -1304,7 +1324,7 @@ fn build_restricted_profiles(
             // fallback：start→target 直线穿圆（且直线避开全部硬墙）→ 直线参数化剖面
             // （1b1331b 旧方案；仅 raw 未穿圆时启用，主管 2026-08-06 三轮架构保留）。
             let Some(pass_alt) =
-                restricted_pass_alt(z, alt_m, ceiling_m, terrain, start, target, max_climb_deg)
+                restricted_pass_alt(z, alt_m, ceiling_m, terrain, start, target, max_climb_deg, None)
             else {
                 continue;
             };
@@ -1373,10 +1393,18 @@ fn build_restricted_profiles(
         if i_out <= i_in {
             continue;
         }
-        // 穿行高度决策（底部优先 / 顶部备选），不可行 → 已画墙绕行（raw 不穿它）
-        let Some(pass_alt) =
-            restricted_pass_alt(z, alt_m, ceiling_m, terrain, start, target, max_climb_deg)
-        else {
+        // 穿行高度决策（底部优先 / 顶部备选），不可行 → 已画墙绕行（raw 不穿它）。
+        // raw 穿行段地形参与底部判定（bottom_terrain_ok 采样 raw[i_in..=i_out]）
+        let Some(pass_alt) = restricted_pass_alt(
+            z,
+            alt_m,
+            ceiling_m,
+            terrain,
+            start,
+            target,
+            max_climb_deg,
+            Some((&tail.points, i_in, i_out)),
+        ) else {
             continue; // 底部/顶部都不可行 → 已画墙绕行（raw 不穿它）
         };
         // 过渡段基线水平距离（无裕量）：高差 → 15° 爬升角所需最小水平距离。
@@ -1781,7 +1809,7 @@ mod tests {
             cell_lat_deg: 0.05,
             h,
         };
-        let pass = restricted_pass_alt(&z, 3000.0, None, Some(&terr), &start, &target, 15.0);
+        let pass = restricted_pass_alt(&z, 3000.0, None, Some(&terr), &start, &target, 15.0, None);
         assert_eq!(
             pass,
             Some(1500.0),
@@ -1808,7 +1836,7 @@ mod tests {
         let target = Geo::new(115.28680713092322, 39.04668499383146).unwrap();
         // 无地形 → 底部 1500m 可行（垂直机动少 → 恒优）
         assert_eq!(
-            restricted_pass_alt(&z, 3000.0, None, None, &start, &target, 15.0),
+            restricted_pass_alt(&z, 3000.0, None, None, &start, &target, 15.0, None),
             Some(1500.0)
         );
         // 穿行区地形 1450m：底部 1500 − 净空100 = 1400 < 1450 → 底部不可行 → 顶部绕飞 5500m
@@ -1822,12 +1850,12 @@ mod tests {
             h: vec![1450.0f32; 100],
         };
         assert_eq!(
-            restricted_pass_alt(&z, 3000.0, None, Some(&terr), &start, &target, 15.0),
+            restricted_pass_alt(&z, 3000.0, None, Some(&terr), &start, &target, 15.0, None),
             Some(5500.0)
         );
         // 升限 5000m → 顶部 5500 超升限且底部被地形挡 → 两者不可行 → None（画墙绕行）
         assert_eq!(
-            restricted_pass_alt(&z, 3000.0, Some(5000.0), Some(&terr), &start, &target, 15.0),
+            restricted_pass_alt(&z, 3000.0, Some(5000.0), Some(&terr), &start, &target, 15.0, None),
             None
         );
         // 巡航 1500m（区间外底部通道）→ 不拦截（restricted_blocks_alt false）
@@ -1854,7 +1882,7 @@ mod tests {
         let target = Geo::new(113.93832638409175, 38.5937625849369).unwrap();
         // 无地形：底部 -500 负高 → 不可行 → 顶部 5500（不能返回 0m）
         assert_eq!(
-            restricted_pass_alt(&z, 3000.0, None, None, &start, &target, 15.0),
+            restricted_pass_alt(&z, 3000.0, None, None, &start, &target, 15.0, None),
             Some(5500.0)
         );
     }
@@ -2550,6 +2578,74 @@ mod tests {
         let has_1500 = v.path.iter().any(|p| (p.alt_m - 1500.0).abs() < 1.0);
         assert!(has_4500, "rz2 顶部剖面 4500m 应保留，实际 {:?}", v.path);
         assert!(has_1500, "rz1 底部剖面 1500m 应保留，实际 {:?}", v.path);
+    }
+
+    #[test]
+    fn zigzag21_raw_band_terrain_blocks_bottom() {
+        // 主管 2026-08-08 输入（China DEM L12 真实地形）：3 个 200km restricted 圆。
+        // rz1（116.83°E, alt[2000,6000]）的 start→target 直线不穿圆（bottom_terrain_ok
+        // 直线版 disc≤0 → 恒放行底部 1500m），但 raw FMM 绕行后实际穿行段地形高达
+        // 1496m（115.2°E,40.8°N 太行山）→ 1500m 剖面净空 4m < 100m → verify 拒 →
+        // 该段全链回退 157 点楼梯 → FINAL 184 点 89.99° 转角失败。
+        // 修复：restricted_pass_alt 传入 raw 穿行段（i_in..i_out），bottom_terrain_ok
+        // 采样 raw 实际穿行段地形（而非 start→target 直线）→ rz1 底部不可行 →
+        // 顶部 6500m 绕飞。rz2/rz3（alt[1000,4000]/[1000,5000]）穿行段地形低 →
+        // 底部 500m 穿行。结果：19 点平滑路径 3992km。
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+        let cand = root.join("phase0/data/pending/china_dem_l12.arpack");
+        if !cand.exists() {
+            eprintln!("skip zigzag21: real terrain missing ({})", cand.display());
+            return;
+        }
+        let s = r#"{
+            "schema_version":"0.20",
+            "mission":{
+                "start":{"lon":133.54469934022197,"lat":28.982595684894182,"alt_m":3000},
+                "target":{"lon":105.5475988382386,"lat":52.11659079990215,"alt_m":3000},
+                "vehicles":[{"id":"v1","profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":250,
+                    "min_turn_radius_m":442,"max_climb_angle_deg":15},
+                    "start_pose":{"lon":133.54469934022197,"lat":28.982595684894182,"alt_m":3000,"heading_deg":45},
+                    "mid_waypoints":[]}],
+                "red_forces":{"radars":[
+                    {"id":"radar_1786157430304","lon":118.06583917330154,"lat":33.561181871494504,"radar_type":"tracking","radius_km":100,"alt_m":10}]},
+                "no_fly_zones":[
+                    {"id":"zone_1786156802607","zone_type":"no_fly","shape":"polygon","geometry":{"vertices":[[116.55095225290064,39.26654038392207],[111.1077737801414,33.43353915724135],[113.84863918927806,33.67080417285748]]},"alt_min_m":0,"alt_max_m":12000,"height_semantics":"msl"},
+                    {"id":"zone_1786156854743","zone_type":"no_fly","shape":"polygon","geometry":{"vertices":[[113.4893950191135,44.67875839262406],[108.82317003559648,39.40022364427483],[112.2924436829558,41.65966666555177]]},"alt_min_m":0,"alt_max_m":12000,"height_semantics":"msl"},
+                    {"id":"zone_1786156919711","zone_type":"no_fly","shape":"polygon","geometry":{"vertices":[[116.24389610176944,36.07078913632359],[122.30349208671217,41.77322980880232],[119.20408168822763,35.22746858594726]]},"alt_min_m":0,"alt_max_m":12000,"height_semantics":"msl"}],
+                "restricted_zones":[
+                    {"id":"rz_1786156953047","zone_type":"restricted","shape":"circle","geometry":{"center":[116.8334711972108,39.45653352818413],"radius_km":200},"alt_min_m":2000,"alt_max_m":6000,"height_semantics":"msl"},
+                    {"id":"rz_1786157513391","zone_type":"restricted","shape":"circle","geometry":{"center":[124.1204082392855,31.00910864469546],"radius_km":200},"alt_min_m":1000,"alt_max_m":4000,"height_semantics":"msl"},
+                    {"id":"rz_1786158674734","zone_type":"restricted","shape":"circle","geometry":{"center":[118.66778132809462,33.70254246429722],"radius_km":200},"alt_min_m":1000,"alt_max_m":5000,"height_semantics":"msl"}],
+                "obstacles":[],
+                "terrain":{"source":"path","path":"__P__"},
+                "parameters":{"p_cross":0.9}
+            }
+        }"#;
+        let s = s.replace("__P__", &cand.to_string_lossy().replace('\\', "\\\\"));
+        let input = parse(&s);
+        let out = solve(&input, &SolveParams::default(), 0).unwrap();
+        let v = &out.vehicles[0];
+        assert_eq!(v.status, "planned");
+        assert!(
+            v.warnings.iter().all(|w| !w.contains("smoothing_failed")),
+            "raw 穿行段地形检查后不应 smoothing_failed，实际 {:?}",
+            v.warnings
+        );
+        assert!(
+            v.path.len() <= 60,
+            "应交付平滑路径（修复前 1880 点），实际 {} 点",
+            v.path.len()
+        );
+        assert!(
+            v.distance_m < 4_600_000.0,
+            "应 ≈ 平滑 3992km，实际 {}km",
+            v.distance_m / 1000.0
+        );
+        // 剖面语义保持：rz1 顶部绕飞（6500m）+ rz2/rz3 底部穿行（500m）都在路径中
+        let has_6500 = v.path.iter().any(|p| (p.alt_m - 6500.0).abs() < 1.0);
+        let has_500 = v.path.iter().any(|p| (p.alt_m - 500.0).abs() < 1.0);
+        assert!(has_6500, "rz1 顶部剖面 6500m 应保留（底部被 1496m 地形挡），实际 {:?}", v.path);
+        assert!(has_500, "rz2/rz3 底部剖面 500m 应保留，实际 {:?}", v.path);
     }
 }
 
