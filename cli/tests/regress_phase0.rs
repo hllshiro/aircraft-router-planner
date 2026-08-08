@@ -259,6 +259,27 @@ fn phase0_feedback_inputs_regression() {
             );
         }
 
+        // zigzag18（2026-08-07 主管第 5 版场景）：3 no_fly 多边形 + restricted 圆
+        // （0-6000m）。raw 2006 点网格楼梯回退（smoothing_failed）。根因：FMM 90°
+        // 楼梯角 + Theta* 无法跳远（全被墙挡）→ fallback 走相邻点产生 92° 急转弯 →
+        // 拼接后终检拒 → 全链回退。修复：Theta* fallback 插入圆弧过渡点
+        // （arc_transition）拆分急转弯（2026-08-08 修正两处几何符号：① 有向转角
+        // 应取 (h_bc−h_ab) 顺时针为正，原 (h_ab−h_bc) 致北→西左转被当右转 → 弧向东
+        // 鼓包 170° 折返；② 圆心应在 S 对侧（S−r·(sinφ0,cosφ0)），原 S+r 同侧致
+        // t=0 弧点偏移 2r）→ 8 点 theta 全过 → 12 点平滑交付。强断言防锯齿复发。
+        if name == "zigzag18.json" {
+            let v = &out.vehicles[0];
+            assert!(
+                v.path.len() < 30,
+                "{name}: still staircase dense ({} pts), theta fallback arc regression",
+                v.path.len()
+            );
+            assert!(
+                !v.warnings.iter().any(|w| w.contains("smoothing_failed")),
+                "{name}: smoothing_failed re-appeared"
+            );
+        }
+
         eprintln!("[regress] {name}: status={} vehicles={}", out.status, out.vehicles.len());
     }
 }

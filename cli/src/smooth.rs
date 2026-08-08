@@ -17,6 +17,12 @@ use crate::path::{Path, PathPoint, angle_diff_deg, point_seg_distance_m};
 /// 100m 逼近容差会误杀合法绕行；运动学/地形/禁飞仍严格复验。
 const DUBINS_CHORD_TOL_M: f64 = 1000.0;
 
+/// Catmull-Rom 样条阶段的弦高放宽值（米）：样条对"绕行折线"（含 Theta* 无法
+/// 拉直的急转弯，如多边形尖角绕行 90° 折角）的平滑代价——折角处样条内切，
+/// 弦高可达数百米（zigzag18 92° 折角 116m），100m 逼近容差会误杀合法平滑；
+/// 运动学/地形/禁飞仍严格复验。
+const CATMULL_CHORD_TOL_M: f64 = 500.0;
+
 /// 平滑器参数（Phase 0 标定前用保守初值，参数化可调；标定项见 docs/phase0_baseline.md）。
 #[derive(Debug, Clone)]
 pub struct SmoothOptions {
@@ -123,6 +129,7 @@ pub fn theta_star_smooth(
     check: &SegmentCheck,
     max_turn_deg: Option<f64>,
     entry_heading: Option<f64>,
+    min_r_m: f64,
 ) -> Path {
     if path.len() < 3 {
         return path.clone();
@@ -139,6 +146,9 @@ pub fn theta_star_smooth(
             let a = path.points[i];
             let b = path.points[j];
             if !check(a.lon, a.lat, a.alt_m, b.lon, b.lat, b.alt_m) {
+                if std::env::var_os("ARP_DEBUG_SMOOTH").is_some() && out.len() < 4 {
+                    eprintln!("[ts-dbg] i={i} j={j} reject=check ({:.4},{:.4})->({:.4},{:.4})", a.lon, a.lat, b.lon, b.lat);
+                }
                 j -= 1;
                 continue;
             }
@@ -154,7 +164,11 @@ pub fn theta_star_smooth(
                 if let Some(h0) = h0 {
                     let p_cur = out[out.len() - 1];
                     let h1 = heading_deg_pts(&p_cur, &b);
-                    if crate::path::angle_diff_deg(h0, h1).abs() > max_turn {
+                    let d = crate::path::angle_diff_deg(h0, h1).abs();
+                    if d > max_turn {
+                        if std::env::var_os("ARP_DEBUG_SMOOTH").is_some() && out.len() < 4 {
+                            eprintln!("[ts-dbg] i={i} j={j} reject=turn {d:.1}>={max_turn} h0={h0:.1} h1={h1:.1} entry={entry_heading:?} outlen={}", out.len());
+                        }
                         j -= 1;
                         continue;
                     }
@@ -164,14 +178,165 @@ pub fn theta_star_smooth(
         }
         // 保 i、j；若 j 直接是下一邻点则普通前进一步
         if j > i {
-            out.push(path.points[j]);
-            i = j;
+            let mut advanced = false;
+            if j == i + 1 {
+                // 相邻点：若转弯超限（FMM 楼梯 90° 角，绕窄通道时跳点拉直被墙挡），
+                // 插入圆弧过渡点拆分转弯（2026-08-07 zigzag18）。
+                if let (Some(max_turn), true) = (max_turn_deg, out.len() >= 2) {
+                    let a = out[out.len() - 2];
+                    let b = out[out.len() - 1];
+                    let c = path.points[i + 1];
+                    let h0 = heading_deg_pts(&a, &b);
+                    let h1 = heading_deg_pts(&b, &c);
+                    if crate::path::angle_diff_deg(h0, h1).abs() > max_turn {
+                        if let Some((pts, k)) =
+                            arc_transition(&a, &b, &c, max_turn, min_r_m, check, &path.points, i)
+                        {
+                            let npts = pts.len();
+                            // 弹出 b（急转弯点）：弧从入段线上的 S 开始，不再经过 b
+                            // （否则 b→S 是掉头 180°，verify 拒）。
+                            out.pop();
+                            for p in pts {
+                                out.push(p);
+                            }
+                            i = k;
+                            advanced = true;
+                            if std::env::var_os("ARP_DEBUG_SMOOTH").is_some() {
+                                eprintln!("[ts-dbg] arc_transition at i={i} pts={npts} k={k}");
+                            }
+                        } else if std::env::var_os("ARP_DEBUG_SMOOTH").is_some() {
+                            eprintln!(
+                                "[ts-dbg] arc_transition FAIL at i={i} turn={:.1} b=({:.4},{:.4}) c=({:.4},{:.4})",
+                                crate::path::angle_diff_deg(h0, h1).abs(),
+                                b.lon,
+                                b.lat,
+                                c.lon,
+                                c.lat
+                            );
+                        }
+                    }
+                }
+            }
+            if !advanced {
+                out.push(path.points[j]);
+                i = j;
+            }
         } else {
             i += 1;
             out.push(path.points[i.min(path.len() - 1)]);
         }
     }
     Path::new(out)
+}
+
+/// Theta* fallback 急转弯的圆弧过渡插入（2026-08-07 zigzag18）。
+/// 绕多边形窄通道（poly2 北顶点 / poly1 南边）时 FMM 楼梯 90° 角无法被跳点拉直
+/// （向北/向西都穿墙），fallback 直接保留相邻点 → 转弯 > max_turn → verify 拒 →
+/// 全链失败回退密集锯齿。这里在急转弯处用等距投影圆弧插入过渡点：从入段方向
+/// 转到出段方向，每步转弯 ≤ max_turn 且弧半径 ≥ min_r_m；插入点逐段 check
+/// （不穿墙 + 离墙净距）。成功返回 (插入点[含末点 E], 接续点索引 k)；失败返回
+/// None（调用方保持原 fallback，宁丑勿违）。
+fn arc_transition(
+    a: &crate::path::PathPoint,
+    b: &crate::path::PathPoint,
+    c: &crate::path::PathPoint,
+    max_turn_deg: f64,
+    min_r_m: f64,
+    check: &SegmentCheck,
+    path: &[crate::path::PathPoint],
+    i: usize,
+) -> Option<(Vec<crate::path::PathPoint>, usize)> {
+    use crate::path::{angle_diff_deg, bearing_deg};
+    let h_ab = heading_deg_pts(a, b);
+    let h_bc = heading_deg_pts(b, c);
+    // 有向转角：angle_diff_deg(x, y) = normalize(x − y)；取 (h_bc − h_ab) →
+    // 顺时针为正（右转 +，左转 −）。注意 2026-08-07 zigzag18 曾用 (h_ab − h_bc)
+    // 作 dir，北→西（左转 94°）被当右转 → 圆心放错侧 → 弧向东鼓包 170° 折返。
+    let signed = angle_diff_deg(h_bc, h_ab);
+    let theta = signed.abs();
+    if theta <= max_turn_deg || theta < 1e-6 {
+        return None;
+    }
+    let side = if signed > 0.0 { 1.0 } else { -1.0 }; // +1 右转（顺时针），-1 左转
+    let n = ((theta / max_turn_deg).ceil() as usize).max(2);
+    let delta = theta / n as f64;
+    // 步长（米）：保证弧半径 ≥ min_r_m，且不小于 2km（避免点过密）。
+    let half = (delta / 2.0).to_radians();
+    let step_m = (2.0 * min_r_m * half.sin()).max(2_000.0);
+    let r_m = step_m / (2.0 * half.sin()).max(1e-9);
+    let d_m = r_m * (theta / 2.0).to_radians().tan();
+    // 等距投影 dest（以 b 为中纬；弧长 ~10km 级，误差 <0.1%）。
+    let lat0 = b.lat.to_radians();
+    let kx = 111_320.0 * lat0.cos();
+    let ky = 111_320.0;
+    let dest = |lon: f64, lat: f64, h_deg: f64, dist_m: f64| -> (f64, f64) {
+        let e = dist_m * h_deg.to_radians().sin();
+        let n_ = dist_m * h_deg.to_radians().cos();
+        (lon + e / kx, lat + n_ / ky)
+    };
+    let (s_lon, s_lat) = dest(b.lon, b.lat, h_ab, -d_m);
+    let (e_lon, e_lat) = dest(b.lon, b.lat, h_bc, d_m);
+    // 半径方向（center→S）：右转圆心在入段右侧（半径 = h_ab−90，φ 随弧顺时针增），
+    // 左转圆心在入段左侧（半径 = h_ab+90，φ 逆时针减）。圆心在 S 的对面：
+    // center = S − r·(sin φ0, cos φ0)；P(t) = center + r·(sin φ(t), cos φ(t))，
+    // φ(t) = φ0 + side·t·θ —— t=0 恰为 S、t=1 恰为 E，且切线 = 入/出段航向。
+    let phi0 = h_ab - side * 90.0;
+    let (c_lon, c_lat) = dest(s_lon, s_lat, phi0 + 180.0, r_m);
+    let mut pts: Vec<crate::path::PathPoint> = Vec::with_capacity(n + 1);
+    pts.push(crate::path::PathPoint {
+        lon: s_lon,
+        lat: s_lat,
+        alt_m: b.alt_m,
+        heading_deg: None,
+    });
+    for k in 1..=n {
+        let t = k as f64 / n as f64;
+        let h_rad = (phi0 + side * t * theta).to_radians();
+        let (p_lon, p_lat) = (c_lon + r_m * h_rad.sin() / kx, c_lat + r_m * h_rad.cos() / ky);
+        pts.push(crate::path::PathPoint {
+            lon: p_lon,
+            lat: p_lat,
+            alt_m: b.alt_m,
+            heading_deg: None,
+        });
+    }
+    // 末点精确用 E。
+    pts[n] = crate::path::PathPoint {
+        lon: e_lon,
+        lat: e_lat,
+        alt_m: b.alt_m,
+        heading_deg: None,
+    };
+    // 逐段 check：入段 a→S 及弧内每段合法才接受。
+    if !check(a.lon, a.lat, a.alt_m, s_lon, s_lat, b.alt_m) {
+        return None;
+    }
+    let mut prev = pts[0];
+    for p in pts.iter().skip(1) {
+        if !check(prev.lon, prev.lat, prev.alt_m, p.lon, p.lat, p.alt_m) {
+            return None;
+        }
+        prev = *p;
+    }
+    // 从 E 找接续点 k：E→path[k] 方向与出段方向夹角 ≤ max_turn 且 check 合法。
+    // 从 i+1 开始：E 在 c 前（d_m ≤ |bc|）则 E→c 方向 = h_bc（0° 转角）自然选中；
+    // E 在 c 后则 E→c 反向（≈180°）自动被转弯约束拒掉，继续向后找。
+    let e = crate::path::PathPoint {
+        lon: e_lon,
+        lat: e_lat,
+        alt_m: b.alt_m,
+        heading_deg: None,
+    };
+    for k in (i + 1)..path.len() {
+        let pk = path[k];
+        let h_ek = bearing_deg(e.lon, e.lat, pk.lon, pk.lat);
+        if angle_diff_deg(h_bc, h_ek).abs() <= max_turn_deg
+            && check(e.lon, e.lat, e.alt_m, pk.lon, pk.lat, pk.alt_m)
+        {
+            return Some((pts, k));
+        }
+    }
+    None
 }
 
 /// 两点航向（度，真北 0..360；大圆初始方位角）。
@@ -394,7 +559,7 @@ mod base_tests {
     fn theta_star_removes_collinear() {
         // 全共线点：check 恒 true → 应压缩为两点
         let p = straight_path(20);
-        let out = theta_star_smooth(&p, &|_, _, _, _, _, _| true, None, None);
+        let out = theta_star_smooth(&p, &|_, _, _, _, _, _| true, None, None, 0.0);
         assert_eq!(out.len(), 2, "got {}", out.len());
     }
 
@@ -403,7 +568,7 @@ mod base_tests {
         // 中间点直连被 check 拒绝：保留分段
         let p = straight_path(10);
         // 只允许相邻直连（j=i+1 总是允许）
-        let out = theta_star_smooth(&p, &|_, _, _, _, _, _| false, None, None);
+        let out = theta_star_smooth(&p, &|_, _, _, _, _, _| false, None, None, 0.0);
         assert_eq!(out.len(), p.len(), "got {}", out.len());
     }
 
@@ -420,17 +585,17 @@ mod base_tests {
             PathPoint::new(0.03, 0.03, 100.0),
         ]);
         // 入航向 0°（东），首跳点方向 45°（东北）→ 45° <= 60° 允许
-        let out = theta_star_smooth(&p, &|_, _, _, _, _, _| true, Some(60.0), Some(0.0));
+        let out = theta_star_smooth(&p, &|_, _, _, _, _, _| true, Some(60.0), Some(0.0), 0.0);
         assert_eq!(out.len(), 2, "45° 首跳应允许: got {}", out.len());
         // 入航向 90°（北），首跳点方向 45° → 差 45° <= 60° 允许
-        let out = theta_star_smooth(&p, &|_, _, _, _, _, _| true, Some(60.0), Some(90.0));
+        let out = theta_star_smooth(&p, &|_, _, _, _, _, _| true, Some(60.0), Some(90.0), 0.0);
         assert_eq!(out.len(), 2, "45° 差应允许: got {}", out.len());
         // 入航向 180°（西），首跳点方向 45° → 差 135° > 60° → 拒跳，退邻点
         // （首跳被拒但后续跳点仍可拉直 → 3 点：(0,0)→(0.01,0.01)→(0.03,0.03)）
-        let out = theta_star_smooth(&p, &|_, _, _, _, _, _| true, Some(60.0), Some(180.0));
+        let out = theta_star_smooth(&p, &|_, _, _, _, _, _| true, Some(60.0), Some(180.0), 0.0);
         assert_eq!(out.len(), 3, "135° 首跳应拒: got {}", out.len());
         // 无入航向（起点段）→ 不约束首跳（保持原语义）
-        let out = theta_star_smooth(&p, &|_, _, _, _, _, _| true, Some(60.0), None);
+        let out = theta_star_smooth(&p, &|_, _, _, _, _, _| true, Some(60.0), None, 0.0);
         assert_eq!(out.len(), 2, "无入航向应直接拉直: got {}", out.len());
     }
 
@@ -924,13 +1089,21 @@ pub struct ThetaStarSmoother<'a> {
     pub max_turn_deg: Option<f64>,
     /// 段首点入航向（度，真北；None = 不约束段首）
     pub entry_heading: Option<f64>,
+    /// 圆弧过渡的最小转弯半径（米，物理约束；fallback 急转弯插入弧点用）
+    pub min_r_m: f64,
 }
 impl Smoother for ThetaStarSmoother<'_> {
     fn name(&self) -> &str {
         "theta_star"
     }
     fn smooth(&self, path: &Path) -> Option<Path> {
-        Some(theta_star_smooth(path, self.check, self.max_turn_deg, self.entry_heading))
+        Some(theta_star_smooth(
+            path,
+            self.check,
+            self.max_turn_deg,
+            self.entry_heading,
+            self.min_r_m,
+        ))
     }
 }
 
@@ -988,6 +1161,7 @@ pub fn default_chain<'a>(
         check,
         max_turn_deg: Some(opts.max_turn_deg),
         entry_heading,
+        min_r_m: opts.turn_radius_m,
     })];
     if opts.aircraft_type == AircraftType::FixedWing {
         // Catmull-Rom 过点样条：对"绕行弧线"（Theta* 拉直受深探测 check 限制只能折线逼近）
@@ -1063,6 +1237,15 @@ pub fn smooth_path_chain<'a>(
             let mut o = opts.clone();
             o.chord_tol_m = DUBINS_CHORD_TOL_M;
             verify_path(stage, Some(&reference), &o, ctx, phys_min_radius_m)
+        } else if _name == "catmull_rom" || _name == "theta_star" {
+            // Theta* 的圆弧过渡插入点偏离 raw（楼梯）是合理平滑代价（zigzag18 239m）；
+            // 运动学/地形/禁飞仍严格复验。
+            let mut o = opts.clone();
+            o.chord_tol_m = CATMULL_CHORD_TOL_M;
+            if std::env::var_os("ARP_DEBUG_SMOOTH").is_some() {
+                eprintln!("[smooth-dbg] verify {_name} chord_tol={:.0}", o.chord_tol_m);
+            }
+            verify_path(stage, Some(&reference), &o, ctx, phys_min_radius_m)
         } else {
             verify_path(stage, Some(&reference), opts, ctx, phys_min_radius_m)
         };
@@ -1083,6 +1266,20 @@ pub fn smooth_path_chain<'a>(
             for iss in rep.issues.iter().take(6) {
                 eprintln!("[smooth-dbg]   issue: {iss}");
             }
+            for (pi, pp) in stage.points.iter().enumerate().take(10) {
+                eprintln!(
+                    "[smooth-dbg]   st-pt{pi}: lon={:.6} lat={:.6} alt={:.0}",
+                    pp.lon, pp.lat, pp.alt_m
+                );
+            }
+            if std::env::var_os("ARP_DEBUG_SMOOTH_DEEP").is_some() {
+                for (pi, pp) in stage.points.iter().enumerate().skip(30).take(40) {
+                    eprintln!(
+                        "[smooth-dbg]   st-pt{pi}: lon={:.6} lat={:.6} alt={:.0}",
+                        pp.lon, pp.lat, pp.alt_m
+                    );
+                }
+            }
         }
     }
     if let Some((idx, stage)) = best {
@@ -1090,6 +1287,10 @@ pub fn smooth_path_chain<'a>(
         let verify_opts = if stages[idx].0 == "dubins" {
             let mut o = opts.clone();
             o.chord_tol_m = DUBINS_CHORD_TOL_M;
+            o
+        } else if stages[idx].0 == "catmull_rom" || stages[idx].0 == "theta_star" {
+            let mut o = opts.clone();
+            o.chord_tol_m = CATMULL_CHORD_TOL_M;
             o
         } else {
             opts.clone()
