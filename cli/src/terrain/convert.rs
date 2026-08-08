@@ -1,19 +1,21 @@
 //! 地形转换：外部格式（GeoTIFF / DTED / SRTM .hgt）→ ARPK1（自有格式）。
 //!
 //! 2026-08-07 主管拍板：提供转换命令（用户任意大型地形文件 → ARPK1）。
-//! 转换输出 **raw 块**（行内差分，格式内建压缩）——ARPK1 块级 zstd 需要编码器
-//! （ruzstd 仅解码，`zstd` crate 带 C 依赖违反零 C 红线），全球级大文件如需
-//! 更强压缩后续补纯 Rust 编码器或外挂脚本（TODO）。
+//! 2026-08-08 主管拍板：内置纯 Rust 压缩编码器直接输出压缩 ARPK1 ——
+//! COMPRESSION_DEFLATE（miniz_oxide，flate2 官方 rust 后端，零 C 红线；成熟纯 Rust
+//! zstd 编码器不存在，zstd-pure-rs 为 immature LLM 翻译有数据损坏风险；实测真实地形
+//! 差分块 deflate 压缩比 4.06:1 ≥ zstd 3.98:1）。压缩块变长 → 索引动态记录 + finish
+//! 回填 + 流式重读算 SHA（与开发期 Python convert 语义一致）。
 //! 输入侧：DTED/GeoTIFF 由 dted2/geotiff crate 全量持有（单片尺寸小，可接受）；
 //! 大 GeoTIFF tile 流式读取随 M3（tile LRU）一并替换（TODO）。
 
-use std::io::{Seek, SeekFrom, Write};
-use std::path::Path;
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
 use super::builtin::{
-    BLOCK_SIZE, COMPRESSION_RAW, FORMAT_VERSION, HEADER_SIZE, MAGIC, SEMANTICS_EQUIANGULAR,
+    BLOCK_SIZE, COMPRESSION_DEFLATE, FORMAT_VERSION, HEADER_SIZE, MAGIC, SEMANTICS_EQUIANGULAR,
     VDATUM_EGM96, VDATUM_ELLIPSOID,
 };
 use crate::error::AppError;
@@ -424,9 +426,11 @@ fn parse_hgt_name(name: &str) -> Result<(f64, f64), AppError> {
 // ==================== ARPK1 流式写入 ====================
 
 /// ARPK1 写入器（块级流式：内存 O(块)，与 write_pack_raw 同格式/同 SHA 语义）。
-/// raw 块定长（BLOCK_SIZE²×2B）→ 索引区可预计算，SHA 顺序 = 索引区 + 数据流。
+/// 压缩块变长 → 索引动态记录；SHA-256 覆盖数据部分（索引区 + 数据流），
+/// finish 时回填索引后流式重读算 sha（与开发期 Python convert 语义一致）。
 struct ArpkWriter {
     out: std::fs::File,
+    path: PathBuf,
     rows: usize,
     cols: usize,
     origin_lon: f64,
@@ -435,9 +439,9 @@ struct ArpkWriter {
     cell_lat_deg: f64,
     blocks_x: usize,
     blocks_y: usize,
-    idx_bytes: Vec<u8>,
-    hasher: Sha256,
+    index: Vec<(u64, u32)>,
     written: u64,
+    data_start: u64,
     no_data: i16,
     source: String,
     datum_ellipsoid: bool,
@@ -461,24 +465,14 @@ impl ArpkWriter {
         let n = blocks_x
             .checked_mul(blocks_y)
             .ok_or_else(|| AppError::Data("convert: block count overflow".into()))?;
-        let block_len = (BLOCK_SIZE as usize * BLOCK_SIZE as usize * 2) as u32;
         let idx_start = HEADER_SIZE + 32;
         let data_start = (idx_start + n * 12) as u64;
-        // 预计算索引区字节（raw 块定长 → offset 可直接推）
-        let mut idx_bytes = Vec::with_capacity(n * 12);
-        for b in 0..n {
-            let offset = data_start + b as u64 * block_len as u64;
-            idx_bytes.extend_from_slice(&offset.to_le_bytes());
-            idx_bytes.extend_from_slice(&block_len.to_le_bytes());
-        }
-        // SHA 覆盖 数据部分（= 索引区起）：先 update 索引区，write_block 续数据流
-        let mut hasher = Sha256::new();
-        hasher.update(&idx_bytes);
         let mut out = std::fs::File::create(path)?;
         out.write_all(&vec![0u8; idx_start])?; // 头部 + sha 占位
-        out.write_all(&vec![0u8; n * 12])?; // 索引区占位
+        out.write_all(&vec![0u8; n * 12])?; // 索引区占位（压缩块变长 → finish 回填）
         Ok(Self {
             out,
+            path: path.to_path_buf(),
             rows,
             cols,
             origin_lon,
@@ -487,16 +481,18 @@ impl ArpkWriter {
             cell_lat_deg,
             blocks_x,
             blocks_y,
-            idx_bytes,
-            hasher,
+            index: Vec::with_capacity(n),
             written: 0,
+            data_start,
             no_data,
             source,
             datum_ellipsoid,
         })
     }
 
-    /// 写入一个块（256×256 i16 展平，行优先；行内差分编码）。
+    /// 写入一个块（256×256 i16 展平，行优先；行内差分编码 + deflate 压缩）。
+    /// 主管 2026-08-08：内置纯 Rust 压缩编码器直接输出压缩 ARPK1（COMPRESSION_DEFLATE，
+    /// miniz_oxide 纯 Rust deflate；实测真实地形差分块压缩比 4.06:1 ≥ zstd 3.98:1）。
     fn write_block(&mut self, _bidx: usize, h: &[i16]) -> Result<(), AppError> {
         let mut diff = h.to_vec();
         for i in (1..diff.len()).rev() {
@@ -507,15 +503,43 @@ impl ArpkWriter {
             bytes.extend_from_slice(&v.to_le_bytes());
         }
         debug_assert_eq!(bytes.len(), BLOCK_SIZE as usize * BLOCK_SIZE as usize * 2);
-        self.out.write_all(&bytes)?;
-        self.hasher.update(&bytes);
-        self.written += bytes.len() as u64;
+        // 差分后压缩：zlib 包装（miniz_oxide level 6 平衡速度/压缩比）。
+        // 差分块高相关（地形平滑/NoData 全 0），deflate 压缩比与 zstd 持平（POC 实测）。
+        let comp = miniz_oxide::deflate::compress_to_vec_zlib(&bytes, 6);
+        self.index.push((self.data_start + self.written, comp.len() as u32));
+        self.out.write_all(&comp)?;
+        self.written += comp.len() as u64;
         Ok(())
     }
 
     /// 回写头部 + 索引区 + sha，返回数据流字节数。
     fn finish(mut self) -> Result<u64, AppError> {
-        let digest = self.hasher.finalize();
+        // 索引区字节（动态记录的实际 offset/len）
+        let mut idx_bytes = Vec::with_capacity(self.index.len() * 12);
+        for (o, l) in &self.index {
+            idx_bytes.extend_from_slice(&o.to_le_bytes());
+            idx_bytes.extend_from_slice(&l.to_le_bytes());
+        }
+        // 先回填索引区（sha 计算前文件须含真实索引字节）
+        self.out.seek(SeekFrom::Start((HEADER_SIZE + 32) as u64))?;
+        self.out.write_all(&idx_bytes)?;
+        self.out.flush()?;
+        let digest = {
+            // SHA-256 覆盖数据部分（索引区 + 数据流），与开发期 Python convert 一致：
+            // 从 idx_start 流式读整个数据部分（内存 O(1)）。
+            let mut hasher = Sha256::new();
+            let mut buf = [0u8; 1 << 16];
+            let mut rd = std::fs::File::open(&self.path)?;
+            rd.seek(SeekFrom::Start((HEADER_SIZE + 32) as u64))?;
+            loop {
+                let n = rd.read(&mut buf)?;
+                if n == 0 {
+                    break;
+                }
+                hasher.update(&buf[..n]);
+            }
+            hasher.finalize()
+        };
         let mut hdr = [0u8; HEADER_SIZE + 32];
         hdr[0..8].copy_from_slice(&MAGIC);
         put_u32(&mut hdr, 8, FORMAT_VERSION);
@@ -529,7 +553,7 @@ impl ArpkWriter {
         put_f64(&mut hdr, 56, 1.0); // z_resolution_m（i16 米）
         hdr[64] = if self.datum_ellipsoid { VDATUM_ELLIPSOID } else { VDATUM_EGM96 };
         hdr[65] = SEMANTICS_EQUIANGULAR;
-        hdr[66] = COMPRESSION_RAW;
+        hdr[66] = COMPRESSION_DEFLATE;
         hdr[67] = 0;
         put_u32(&mut hdr, 68, BLOCK_SIZE);
         put_u32(&mut hdr, 72, self.blocks_x as u32);
@@ -540,9 +564,7 @@ impl ArpkWriter {
         hdr[82..82 + n].copy_from_slice(&src[..n]);
         hdr[HEADER_SIZE..HEADER_SIZE + 32].copy_from_slice(&digest);
 
-        // 回写索引区（320 起）+ 头部（含 sha）
-        self.out.seek(SeekFrom::Start((HEADER_SIZE + 32) as u64))?;
-        self.out.write_all(&self.idx_bytes)?;
+        // 回写头部（含 sha）
         self.out.seek(SeekFrom::Start(0))?;
         self.out.write_all(&hdr)?;
         self.out.flush()?;

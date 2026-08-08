@@ -28,6 +28,7 @@ dependencies = [
  "geo-types",
  "geotiff",
  "memmap2",
+ "miniz_oxide",
  "nalgebra",
  "rand",
  "rstar",

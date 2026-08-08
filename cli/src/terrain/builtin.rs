@@ -58,6 +58,8 @@ pub(crate) const VDATUM_EGM96: u8 = 1;
 pub(crate) const SEMANTICS_EQUIANGULAR: u8 = 0;
 pub(crate) const COMPRESSION_RAW: u8 = 0;
 pub(crate) const COMPRESSION_ZSTD: u8 = 1;
+/// 块压缩：zlib(deflate) 包装（miniz_oxide 纯 Rust）。主管 2026-08-08 内置编码器输出格式。
+pub(crate) const COMPRESSION_DEFLATE: u8 = 2;
 
 /// 已解压块缓存上限（FIFO 淘汰）。
 /// 256² 块 ≈ 131KB → 2048 块 ≈ 256MB，防止无界缓存在大文件随机访问时膨胀内存
@@ -445,6 +447,15 @@ impl BuiltinSource {
                 let mut dec = ruzstd::StreamingDecoder::new(raw).ok()?;
                 let mut buf = Vec::with_capacity(block_n * 2);
                 std::io::Read::read_to_end(&mut dec, &mut buf).ok()?;
+                if buf.len() != block_n * 2 {
+                    return None;
+                }
+                buf.chunks_exact(2)
+                    .map(|b| i16::from_le_bytes([b[0], b[1]]))
+                    .collect::<Vec<i16>>()
+            }
+            COMPRESSION_DEFLATE => {
+                let buf = miniz_oxide::inflate::decompress_to_vec_zlib(raw).ok()?;
                 if buf.len() != block_n * 2 {
                     return None;
                 }
