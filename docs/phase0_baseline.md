@@ -77,7 +77,7 @@
 ## 主管决策 2026-08-08（三项，A1_TERRAIN_PACKAGE）
 
 1. **默认地形 = GMTED2010 东亚 7.5as 压缩版（east_asia_7p5as.arpack 497MB）**：取代 china_dem_l12 默认地位；terrain source=path/builtin 且未给路径时，solver 依次尝试 exe 同目录 / 工作目录 / phase0/data / pending/east_asia_crop 下的 `east_asia_7p5as.arpack`（commit 29adf33 接线）。
-2. **海岸掩膜随默认地形提供（east_asia_7p5as.mask 4.5MB）**：GSHHG 窗口裁剪生成（gshhg_mask.py 支持 r0/c0/win_cols + lon0/lat0）；solver `default_mask_candidates()` 自动探测，`TerrainConfig.mask_path` 可显式覆盖。
+2. **海岸掩膜随默认地形提供——默认提供和使用的掩膜为全球版本（mask_10as.mask）**：GSHHG 全球 10as V2 3 态定案产物（覆盖 360°×180°，22.6MB）；solver `default_mask_candidates()` 自动探测（候选名 mask_10as.mask，exe 同目录 / 工作目录 / phase0/data），`TerrainConfig.mask_path` 可显式覆盖；区域窗口掩膜（east_asia_7p5as.mask 等）不自动探测，需显式指定。
 3. **内置纯 Rust 压缩编码器（COMPRESSION_DEFLATE=2，commit 8780d4e）**：成熟纯 Rust zstd 编码器不存在（ruzstd 仅解码；zstd-pure-rs immature 有数据损坏风险），经主管确认采用 miniz_oxide deflate（flate2 官方 rust 后端，零 C 红线）；POC 实测真实地形差分块压缩比 4.06:1 ≥ zstd 3.98:1。convert 输出自动压缩（索引动态记录 + finish 回填 + 流式重读算 SHA，与 Python convert 语义一致）。
 
 ## 崩溃测试套件（B9，CI 一票否决）

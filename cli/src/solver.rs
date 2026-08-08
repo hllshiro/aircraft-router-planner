@@ -30,7 +30,7 @@ use crate::threat::{SphericalRadarThreat, ThreatModel, ThreatParams};
 #[derive(Debug, Clone)]
 pub struct SolveParams {
     pub terrain_path: Option<PathBuf>,
-    /// 海岸掩膜文件（GSHHG 3 态；None 时自动探测默认掩膜 east_asia_7p5as.mask）
+    /// 海岸掩膜文件（GSHHG 3 态；None 时自动探测默认掩膜 mask_10as.mask 全球版）
     pub mask_path: Option<PathBuf>,
     pub grid: usize,
 }
@@ -853,19 +853,21 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
 
 // ==================== 辅助 ====================
 
-/// 默认海岸掩膜候选（主管 2026-08-08：掩膜随默认地形提供）。
-/// 与默认地形同目录/工作目录/phase0/data；未找到 → None（纯地形，无掩膜分层）。
+/// 默认海岸掩膜候选（主管 2026-08-08：**默认提供和使用的掩膜为全球版本**，
+/// mask_10as.mask：GSHHG 全球 10as V2 3 态定案产物，覆盖 360°×180°）。
+/// 候选：exe 同目录 / 工作目录 / phase0/data；未找到 → None（纯地形，无掩膜分层）。
+/// 区域窗口掩膜（east_asia_7p5as.mask 等）不自动探测——用户可显式 terrain.mask_path 指定。
 fn default_mask_candidates() -> Option<PathBuf> {
     let mut candidates = vec![
-        PathBuf::from("east_asia_7p5as.mask"),
-        PathBuf::from("phase0/data/east_asia_7p5as.mask"),
-        PathBuf::from("../phase0/data/east_asia_7p5as.mask"),
+        PathBuf::from("mask_10as.mask"),
+        PathBuf::from("phase0/data/mask_10as.mask"),
+        PathBuf::from("../phase0/data/mask_10as.mask"),
     ];
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            candidates.insert(0, dir.join("east_asia_7p5as.mask"));
+            candidates.insert(0, dir.join("mask_10as.mask"));
             for anc in dir.ancestors().skip(1).take(3) {
-                candidates.push(anc.join("phase0/data/east_asia_7p5as.mask"));
+                candidates.push(anc.join("phase0/data/mask_10as.mask"));
             }
         }
     }
