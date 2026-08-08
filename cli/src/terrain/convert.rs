@@ -15,8 +15,8 @@ use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 
 use super::builtin::{
-    BLOCK_SIZE, COMPRESSION_DEFLATE, FORMAT_VERSION, HEADER_SIZE, MAGIC, SEMANTICS_EQUIANGULAR,
-    VDATUM_EGM96, VDATUM_ELLIPSOID,
+    BLOCK_SIZE, COMPRESSION_DEFLATE, COMPRESSION_RAW, COMPRESSION_ZSTD, FORMAT_VERSION,
+    HEADER_SIZE, MAGIC, SEMANTICS_EQUIANGULAR, VDATUM_EGM96, VDATUM_ELLIPSOID,
 };
 use crate::error::AppError;
 
@@ -29,11 +29,19 @@ pub struct ConvertOptions {
     pub no_data: i16,
     /// 垂直基准：true = ellipsoid（椭球高），false = egm96（默认）。
     pub datum_ellipsoid: bool,
+    /// 实验性：zstd 块压缩（ruzstd 0.9 encoding 仅 Fastest ≈ zstd level 1 可用，
+    /// 实测压缩率 3.28x < deflate 4.25x；仅 `--experimental-zstd` 开启，默认 false = deflate）。
+    pub experimental_zstd: bool,
 }
 
 impl Default for ConvertOptions {
     fn default() -> Self {
-        Self { source: String::new(), no_data: -32768, datum_ellipsoid: false }
+        Self {
+            source: String::new(),
+            no_data: -32768,
+            datum_ellipsoid: false,
+            experimental_zstd: false,
+        }
     }
 }
 
@@ -445,6 +453,8 @@ struct ArpkWriter {
     no_data: i16,
     source: String,
     datum_ellipsoid: bool,
+    /// 实验性 zstd 块压缩（默认 false = deflate）。
+    zstd: bool,
 }
 
 impl ArpkWriter {
@@ -459,6 +469,7 @@ impl ArpkWriter {
         no_data: i16,
         source: String,
         datum_ellipsoid: bool,
+        zstd: bool,
     ) -> Result<Self, AppError> {
         let blocks_x = rows.div_ceil(BLOCK_SIZE as usize);
         let blocks_y = cols.div_ceil(BLOCK_SIZE as usize);
@@ -487,12 +498,15 @@ impl ArpkWriter {
             no_data,
             source,
             datum_ellipsoid,
+            zstd,
         })
     }
 
-    /// 写入一个块（256×256 i16 展平，行优先；行内差分编码 + deflate 压缩）。
-    /// 主管 2026-08-08：内置纯 Rust 压缩编码器直接输出压缩 ARPK1（COMPRESSION_DEFLATE，
-    /// miniz_oxide 纯 Rust deflate；实测真实地形差分块压缩比 4.06:1 ≥ zstd 3.98:1）。
+    /// 写入一个块（256×256 i16 展平，行优先；行内差分编码 + 压缩）。
+    /// 默认 COMPRESSION_DEFLATE（miniz_oxide 纯 Rust deflate l6，实测真实地形差分块
+    /// 压缩比 4.25:1）；实验性 `--experimental-zstd` 用 COMPRESSION_ZSTD（ruzstd 0.9
+    /// encoding，仅 Fastest ≈ zstd level 1 可用——Default/Better/Best 未实现会 panic，
+    /// 因此写路径只允许 Fastest）。
     fn write_block(&mut self, _bidx: usize, h: &[i16]) -> Result<(), AppError> {
         let mut diff = h.to_vec();
         for i in (1..diff.len()).rev() {
@@ -503,9 +517,15 @@ impl ArpkWriter {
             bytes.extend_from_slice(&v.to_le_bytes());
         }
         debug_assert_eq!(bytes.len(), BLOCK_SIZE as usize * BLOCK_SIZE as usize * 2);
-        // 差分后压缩：zlib 包装（miniz_oxide level 6 平衡速度/压缩比）。
-        // 差分块高相关（地形平滑/NoData 全 0），deflate 压缩比与 zstd 持平（POC 实测）。
-        let comp = miniz_oxide::deflate::compress_to_vec_zlib(&bytes, 6);
+        // 差分后压缩：默认 zlib（miniz_oxide level 6）；实验性 zstd（ruzstd Fastest）。
+        let comp = if self.zstd {
+            ruzstd::encoding::compress_to_vec(
+                &bytes[..],
+                ruzstd::encoding::CompressionLevel::Fastest,
+            )
+        } else {
+            miniz_oxide::deflate::compress_to_vec_zlib(&bytes, 6)
+        };
         self.index.push((self.data_start + self.written, comp.len() as u32));
         self.out.write_all(&comp)?;
         self.written += comp.len() as u64;
@@ -553,7 +573,7 @@ impl ArpkWriter {
         put_f64(&mut hdr, 56, 1.0); // z_resolution_m（i16 米）
         hdr[64] = if self.datum_ellipsoid { VDATUM_ELLIPSOID } else { VDATUM_EGM96 };
         hdr[65] = SEMANTICS_EQUIANGULAR;
-        hdr[66] = COMPRESSION_DEFLATE;
+        hdr[66] = if self.zstd { COMPRESSION_ZSTD } else { COMPRESSION_DEFLATE };
         hdr[67] = 0;
         put_u32(&mut hdr, 68, BLOCK_SIZE);
         put_u32(&mut hdr, 72, self.blocks_x as u32);
@@ -610,6 +630,7 @@ fn write_arpk(
         opts.no_data,
         source,
         opts.datum_ellipsoid,
+        opts.experimental_zstd,
     )?;
     let blocks_x = rows.div_ceil(BLOCK_SIZE as usize);
     let blocks_y = cols.div_ceil(BLOCK_SIZE as usize);
@@ -643,6 +664,122 @@ fn write_arpk(
         source_desc: grid.source_desc(),
     })
 }
+
+/// ARPK1 重压缩：任意块压缩（raw/zstd/deflate）→ 默认 deflate（COMPRESSION_DEFLATE，
+/// 纯 Rust miniz_oxide）；`experimental_zstd = true` → COMPRESSION_ZSTD（ruzstd 0.9
+/// encoding Fastest ≈ zstd level 1，实验性：压缩率 3.28x < deflate 4.25x，默认不启用）。
+/// 逐块流式处理（内存 O(块)），语义 = 无损替换压缩层：解压结果逐字节与输入一致，
+/// 仅块压缩算法切换。输入 mmap（大文件 O(1) 打开），输出流式写 + finish 回填索引 + SHA
+/// （与 convert_file 同模式）。
+pub fn recompress_arpk1(
+    input: &Path,
+    output: &Path,
+    experimental_zstd: bool,
+) -> Result<u64, AppError> {
+    use std::io::{Read, Seek, SeekFrom, Write};
+    use memmap2::Mmap;
+    let f = std::fs::File::open(input)?;
+    let mmap = unsafe { Mmap::map(&f)? };
+    let bytes = &mmap[..];
+    // fail-fast 头校验
+    if bytes.len() < HEADER_SIZE + 32 || &bytes[0..8] != MAGIC {
+        return Err(AppError::Data("recompress: not an ARPK1 file".into()));
+    }
+    let rows = u32::from_le_bytes(bytes[16..20].try_into().unwrap()) as usize;
+    let cols = u32::from_le_bytes(bytes[20..24].try_into().unwrap()) as usize;
+    let src_compression = bytes[66];
+    let block_size = u32::from_le_bytes(bytes[68..72].try_into().unwrap()) as usize;
+    let blocks_x = u32::from_le_bytes(bytes[72..76].try_into().unwrap()) as usize;
+    let blocks_y = u32::from_le_bytes(bytes[76..80].try_into().unwrap()) as usize;
+    if block_size != BLOCK_SIZE as usize {
+        return Err(AppError::Data("recompress: unexpected block_size".into()));
+    }
+    let n = blocks_x * blocks_y;
+    let idx_start = HEADER_SIZE + 32;
+    let idx_bytes = n * 12;
+    if bytes.len() < idx_start + idx_bytes {
+        return Err(AppError::Data("recompress: truncated index".into()));
+    }
+    let block_n = BLOCK_SIZE as usize * BLOCK_SIZE as usize;
+    let data_start = (idx_start + idx_bytes) as u64;
+
+    let mut out = std::fs::File::create(output)?;
+    // 头 288B + sha 占位 32B（改 block_compression → 目标压缩）+ 索引区占位
+    let mut hdr = bytes[0..HEADER_SIZE + 32].to_vec();
+    hdr[66] = if experimental_zstd { COMPRESSION_ZSTD } else { COMPRESSION_DEFLATE };
+    out.write_all(&hdr)?;
+    out.write_all(&vec![0u8; idx_bytes])?;
+
+    let mut index: Vec<(u64, u32)> = Vec::with_capacity(n);
+    let mut written = 0u64;
+    for b in 0..n {
+        let off = u64::from_le_bytes(bytes[idx_start + b * 12..idx_start + b * 12 + 8].try_into().unwrap());
+        let len = u32::from_le_bytes(bytes[idx_start + b * 12 + 8..idx_start + b * 12 + 12].try_into().unwrap());
+        let raw = &bytes[off as usize..(off + len as u64) as usize];
+        let diff: Vec<u8> = match src_compression {
+            COMPRESSION_RAW => raw.to_vec(),
+            COMPRESSION_ZSTD => {
+                let mut dec = ruzstd::decoding::StreamingDecoder::new(raw)
+                    .map_err(|e| AppError::Data(format!("recompress: zstd init: {e}")))?;
+                let mut buf = Vec::with_capacity(block_n * 2);
+                dec.read_to_end(&mut buf)
+                    .map_err(|e| AppError::Data(format!("recompress: zstd read: {e}")))?;
+                buf
+            }
+            COMPRESSION_DEFLATE => miniz_oxide::inflate::decompress_to_vec_zlib(raw)
+                .map_err(|e| AppError::Data(format!("recompress: inflate: {e}")))?,
+            c => return Err(AppError::Data(format!("recompress: unsupported compression {c}"))),
+        };
+        if diff.len() != block_n * 2 {
+            return Err(AppError::Data("recompress: bad block length".into()));
+        }
+        // 差分字节 → 目标压缩（默认 deflate l6 与 convert write_block 一致；
+        // 实验性 zstd 用 ruzstd Fastest——Default/Better/Best 未实现会 panic，写路径只允许 Fastest）
+        let comp = if experimental_zstd {
+            ruzstd::encoding::compress_to_vec(
+                &diff[..],
+                ruzstd::encoding::CompressionLevel::Fastest,
+            )
+        } else {
+            miniz_oxide::deflate::compress_to_vec_zlib(&diff, 6)
+        };
+        index.push((data_start + written, comp.len() as u32));
+        out.write_all(&comp)?;
+        written += comp.len() as u64;
+    }
+
+    // finish：回填索引 + SHA（数据部分 = idx_start.. 流式重读，内存 O(1)）
+    out.seek(SeekFrom::Start(idx_start as u64))?;
+    for (o, l) in &index {
+        out.write_all(&o.to_le_bytes())?;
+        out.write_all(&l.to_le_bytes())?;
+    }
+    out.flush()?;
+    let digest = {
+        let mut hasher = Sha256::new();
+        let mut buf = [0u8; 1 << 16];
+        let mut rd = std::fs::File::open(output)?;
+        rd.seek(SeekFrom::Start(idx_start as u64))?;
+        loop {
+            let n = rd.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+        }
+        hasher.finalize()
+    };
+    out.seek(SeekFrom::Start(HEADER_SIZE as u64))?;
+    out.write_all(&digest)?;
+    out.sync_all()?;
+    eprintln!(
+        "recompress: {input:?} ({rows}x{cols}, {n} blocks, compression {src_compression} → {}) → {output:?} ({:.1} MiB)",
+        if experimental_zstd { "zstd (experimental)" } else { "deflate" },
+        written as f64 / (1 << 20) as f64
+    );
+    Ok(written)
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -797,6 +934,143 @@ mod tests {
             (None, None) => {}
             (a, b) => panic!("GeoTIFF roundtrip mismatch at ({lon},{lat}): {a:?} vs {b:?}"),
         }
+        let _ = std::fs::remove_file(&arpk);
+    }
+
+    /// recompress：raw/zstd 包 → deflate 重压缩，产物 = 合法 ARPK1（open + verify_sha +
+    /// 采样与原始逐点一致）+ 块压缩字段 = deflate。
+    #[test]
+    fn recompress_to_deflate_roundtrip() {
+        use crate::terrain::builtin::{write_pack_raw, COMPRESSION_DEFLATE};
+        let dir = std::env::temp_dir();
+        let id = std::process::id();
+        let src = dir.join(format!("recomp_src_{id}.arpack"));
+        let out = dir.join(format!("recomp_out_{id}.arpack"));
+        // 300×300 → 2×2 块（跨块差分语义覆盖）
+        let (rows, cols) = (300usize, 300usize);
+        let mut h = Vec::with_capacity(rows * cols);
+        for r in 0..rows {
+            for c in 0..cols {
+                h.push(((r * 37 + c * 11) % 4000 - 2000) as i16); // 变化地形（含负值/零）
+            }
+        }
+        let pack = write_pack_raw(
+            rows,
+            cols,
+            100.0,
+            30.0,
+            1.0 / 300.0,
+            1.0 / 300.0,
+            1.0,
+            false,
+            -32768,
+            "recompress-test",
+            &h,
+        );
+        std::fs::write(&src, &pack).unwrap();
+        // 源 = raw 压缩
+        let src_bytes = std::fs::read(&src).unwrap();
+        assert_eq!(src_bytes[66], 0, "source must be raw");
+
+        let written = recompress_arpk1(&src, &out, false).unwrap();
+        assert!(written > 0);
+        let out_bytes = std::fs::read(&out).unwrap();
+        assert_eq!(out_bytes[66], COMPRESSION_DEFLATE, "block_compression = deflate");
+
+        let s = BuiltinSource::open(&out).unwrap();
+        s.verify_sha().unwrap();
+        // 逐内部网格点采样一致（边缘格点无双线性邻点 → None，跳过；1/300 不精确
+        // → 采样点偏移格点 → ±1e-6 浮点容差）
+        for (r, c) in (1..rows - 1).flat_map(|r| (1..cols - 1).map(move |c| (r, c))) {
+            let v = h[r * cols + c];
+            let lon = 100.0 + c as f64 * (1.0 / 300.0);
+            let lat = 30.0 + r as f64 * (1.0 / 300.0);
+            let got = s.height_at(lon, lat);
+            assert!(
+                got.is_some() && (got.unwrap() - v as f64).abs() < 1e-6,
+                "mismatch at r{r} c{c}: {got:?} vs {v}"
+            );
+        }
+        let _ = std::fs::remove_file(&src);
+        let _ = std::fs::remove_file(&out);
+    }
+
+    /// recompress 实验性 zstd：`experimental_zstd=true` → 产物块压缩 = COMPRESSION_ZSTD，
+    /// open + verify_sha + 采样与原始逐点一致（ruzstd 0.9 Fastest 编解码 round-trip）。
+    #[test]
+    fn recompress_to_zstd_experimental_roundtrip() {
+        use crate::terrain::builtin::{write_pack_raw, COMPRESSION_ZSTD};
+        let dir = std::env::temp_dir();
+        let id = std::process::id();
+        let src = dir.join(format!("recompz_src_{id}.arpack"));
+        let out = dir.join(format!("recompz_out_{id}.arpack"));
+        let (rows, cols) = (300usize, 300usize);
+        let mut h = Vec::with_capacity(rows * cols);
+        for r in 0..rows {
+            for c in 0..cols {
+                h.push(((r * 37 + c * 11) % 4000 - 2000) as i16);
+            }
+        }
+        let pack = write_pack_raw(
+            rows,
+            cols,
+            100.0,
+            30.0,
+            1.0 / 300.0,
+            1.0 / 300.0,
+            1.0,
+            false,
+            -32768,
+            "recompress-zstd-test",
+            &h,
+        );
+        std::fs::write(&src, &pack).unwrap();
+
+        let written = recompress_arpk1(&src, &out, true).unwrap();
+        assert!(written > 0);
+        let out_bytes = std::fs::read(&out).unwrap();
+        assert_eq!(out_bytes[66], COMPRESSION_ZSTD, "block_compression = zstd");
+
+        let s = BuiltinSource::open(&out).unwrap();
+        s.verify_sha().unwrap();
+        for (r, c) in (1..rows - 1).flat_map(|r| (1..cols - 1).map(move |c| (r, c))) {
+            let v = h[r * cols + c];
+            let lon = 100.0 + c as f64 * (1.0 / 300.0);
+            let lat = 30.0 + r as f64 * (1.0 / 300.0);
+            let got = s.height_at(lon, lat);
+            assert!(
+                got.is_some() && (got.unwrap() - v as f64).abs() < 1e-6,
+                "zstd mismatch at r{r} c{c}: {got:?} vs {v}"
+            );
+        }
+        let _ = std::fs::remove_file(&src);
+        let _ = std::fs::remove_file(&out);
+    }
+
+    /// convert 实验性 zstd：`--experimental-zstd` → 产物块压缩 = COMPRESSION_ZSTD，
+    /// open + verify_sha + 采样一致（solver 读取路径 round-trip）。
+    #[test]
+    fn convert_zstd_experimental_roundtrip() {
+        use crate::terrain::builtin::COMPRESSION_ZSTD;
+        let dir = std::env::temp_dir();
+        let id = std::process::id();
+        let hgt = dir.join(format!("N39E116_{id}.hgt"));
+        let arpk = dir.join(format!("zst_conv_{id}.arpack"));
+        std::fs::write(&hgt, hgt_bytes(4, 4)).unwrap();
+        let opts = ConvertOptions {
+            source: "conv-zstd-test".into(),
+            experimental_zstd: true,
+            ..Default::default()
+        };
+        let stats = convert_file(&hgt, &arpk, &opts).unwrap();
+        assert_eq!(stats.n_blocks, 1);
+        let bytes = std::fs::read(&arpk).unwrap();
+        assert_eq!(bytes[66], COMPRESSION_ZSTD, "block_compression = zstd");
+        let s = BuiltinSource::open(&arpk).unwrap();
+        s.verify_sha().unwrap();
+        // 4×4 → cell = 1/3；(116.5,39.5) = r1.5/c1.5 插值四邻 (21,22,11,12) → 16.5
+        assert_eq!(s.height_at(116.5, 39.5), Some(16.5));
+        let _ = std::fs::remove_file(&hgt);
         let _ = std::fs::remove_file(&arpk);
     }
 }

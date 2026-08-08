@@ -444,7 +444,7 @@ impl BuiltinSource {
                     .collect::<Vec<i16>>()
             }
             COMPRESSION_ZSTD => {
-                let mut dec = ruzstd::StreamingDecoder::new(raw).ok()?;
+                let mut dec = ruzstd::decoding::StreamingDecoder::new(raw).ok()?;
                 let mut buf = Vec::with_capacity(block_n * 2);
                 std::io::Read::read_to_end(&mut dec, &mut buf).ok()?;
                 if buf.len() != block_n * 2 {

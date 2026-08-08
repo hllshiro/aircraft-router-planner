@@ -30,7 +30,7 @@ thiserror.workspace = true
 geotiff = "0.1"
 tiff = "0.9"
 dted2 = "1.0.0"
-ruzstd = "0.7"
+ruzstd = "0.9"
 # 纯 Rust deflate（miniz_oxide：flate2 官方 rust 后端，零 C 红线）。
 # 主管 2026-08-08：内置纯 Rust 压缩编码器直接输出压缩 ARPK1——成熟纯 Rust zstd 编码器
 # 不存在（ruzstd 仅解码；zstd-pure-rs 为 immature LLM 翻译有数据损坏风险），

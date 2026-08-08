@@ -67,17 +67,43 @@ enum Command {
         /// 垂直基准：ellipsoid（椭球高，缺省 egm96）
         #[arg(long)]
         ellipsoid: bool,
+        /// 实验性：zstd 块压缩（ruzstd 0.9 encoding Fastest ≈ zstd level 1；
+        /// 压缩率低于 deflate，默认不启用）
+        #[arg(long)]
+        experimental_zstd: bool,
+    },
+    /// ARPK1 重压缩：任意块压缩（raw/zstd/deflate）→ deflate（默认，内置纯 Rust 编码器）；
+    /// `--experimental-zstd` 输出 zstd 块压缩（实验性）
+    Recompress {
+        /// 输入 ARPK1 文件
+        input: PathBuf,
+        /// 输出 ARPK1 文件
+        output: PathBuf,
+        /// 实验性：zstd 块压缩（ruzstd 0.9 encoding Fastest ≈ zstd level 1；
+        /// 压缩率低于 deflate，默认不启用）
+        #[arg(long)]
+        experimental_zstd: bool,
     },
 }
 
 fn main() {
     let args = Args::parse();
     // 子命令优先（转换是独立工具形态，不走任务 JSON 契约）
-    if let Some(Command::Convert { input, output, source, no_data, ellipsoid }) = &args.cmd {
-        match run_convert(input, output, source.as_deref(), *no_data, *ellipsoid) {
+    if let Some(Command::Convert { input, output, source, no_data, ellipsoid, experimental_zstd }) = &args.cmd {
+        match run_convert(input, output, source.as_deref(), *no_data, *ellipsoid, *experimental_zstd) {
             Ok(()) => {}
             Err(e) => {
                 eprintln!("aircraft-router-planner convert: hard failure: {e}");
+                std::process::exit(2);
+            }
+        }
+        return;
+    }
+    if let Some(Command::Recompress { input, output, experimental_zstd }) = &args.cmd {
+        match run_recompress(input, output, *experimental_zstd) {
+            Ok(()) => {}
+            Err(e) => {
+                eprintln!("aircraft-router-planner recompress: hard failure: {e}");
                 std::process::exit(2);
             }
         }
@@ -100,12 +126,14 @@ fn run_convert(
     source: Option<&str>,
     no_data: i16,
     ellipsoid: bool,
+    experimental_zstd: bool,
 ) -> Result<(), AppError> {
     let started = std::time::Instant::now();
     let opts = ConvertOptions {
         source: source.unwrap_or("").to_string(),
         no_data,
         datum_ellipsoid: ellipsoid,
+        experimental_zstd,
     };
     let stats = convert::convert_file(input, output, &opts)?;
     // 转换产物自校验：mmap 打开（结构校验）+ verify_sha（全量）
@@ -127,6 +155,30 @@ fn run_convert(
         stats.bytes_written as f64 / 1e6,
         started.elapsed().as_secs_f64(),
         stats.source_desc
+    );
+    Ok(())
+}
+
+/// recompress 子命令实现：块压缩 → 默认 deflate（实验性 `--experimental-zstd` → zstd）
+/// + 产物自校验（open + verify_sha）。
+fn run_recompress(
+    input: &std::path::Path,
+    output: &std::path::Path,
+    experimental_zstd: bool,
+) -> Result<(), AppError> {
+    let started = std::time::Instant::now();
+    let bytes = convert::recompress_arpk1(input, output, experimental_zstd)?;
+    let s = aircraft_router_planner_cli::terrain::builtin::BuiltinSource::open(output)?;
+    s.verify_sha()
+        .map_err(|e| AppError::Data(format!("recompress output sha mismatch: {e}")))?;
+    println!(
+        "recompressed: {} -> {}\n  {} bytes ({} MB) in {:.1}s\n  compression: {}",
+        input.display(),
+        output.display(),
+        bytes,
+        bytes as f64 / 1e6,
+        started.elapsed().as_secs_f64(),
+        if experimental_zstd { "zstd (experimental, ruzstd Fastest)" } else { "deflate (miniz_oxide)" },
     );
     Ok(())
 }
