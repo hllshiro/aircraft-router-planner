@@ -190,7 +190,7 @@ pub fn theta_star_smooth(
                     let h1 = heading_deg_pts(&b, &c);
                     if crate::path::angle_diff_deg(h0, h1).abs() > max_turn {
                         if let Some((pts, k)) =
-                            arc_transition(&a, &b, &c, max_turn, min_r_m, check, &path.points, i)
+                            arc_transition(&a, &b, &c, max_turn, min_r_m, check, &path.points, i, true)
                         {
                             let npts = pts.len();
                             // 弹出 b（急转弯点）：弧从入段线上的 S 开始，不再经过 b
@@ -236,7 +236,9 @@ pub fn theta_star_smooth(
 /// 转到出段方向，每步转弯 ≤ max_turn 且弧半径 ≥ min_r_m；插入点逐段 check
 /// （不穿墙 + 离墙净距）。成功返回 (插入点[含末点 E], 接续点索引 k)；失败返回
 /// None（调用方保持原 fallback，宁丑勿违）。
-fn arc_transition(
+/// `find_k`：false 时跳过 E 后的接续点搜索（2026-08-08 solver 段边界修复——
+/// 只需弧点，后续段尚未拼接，k 无意义）。
+pub(crate) fn arc_transition(
     a: &crate::path::PathPoint,
     b: &crate::path::PathPoint,
     c: &crate::path::PathPoint,
@@ -245,6 +247,7 @@ fn arc_transition(
     check: &SegmentCheck,
     path: &[crate::path::PathPoint],
     i: usize,
+    find_k: bool,
 ) -> Option<(Vec<crate::path::PathPoint>, usize)> {
     use crate::path::{angle_diff_deg, bearing_deg};
     let h_ab = heading_deg_pts(a, b);
@@ -327,6 +330,9 @@ fn arc_transition(
         alt_m: b.alt_m,
         heading_deg: None,
     };
+    if !find_k {
+        return Some((pts, 0));
+    }
     for k in (i + 1)..path.len() {
         let pk = path[k];
         let h_ek = bearing_deg(e.lon, e.lat, pk.lon, pk.lat);

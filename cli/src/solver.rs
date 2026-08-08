@@ -485,24 +485,91 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
             // 入口航向：前一段输出方向，约束当前段首跳（段边界转角，否则拼接后
             // 终检暴露——2026-08-07 主管 1755 点场景 seg3 out→climb 与 seg4
             // climb→A 夹角 61.94° > 60°，climb 是段首点单段 verify 无法发现）。
-            let mut smooth_segs = Vec::new();
+            let mut smooth_segs: Vec<crate::path::Path> = Vec::new();
             let mut seg_warnings = Vec::new();
             let mut entry_heading: Option<f64> = None;
+            // 段边界硬约束点（起点/必经点/目标）：arc 修复会弹出边界点 b，必经点不得
+            // 被替代（user 硬约束），否则违反"任何平滑不得移除必经点"。
+            let hard_boundary: Vec<(f64, f64)> = seg_ends.iter().map(|g| (g.lon, g.lat)).collect();
             for (idx, seg) in smooth_src.iter().enumerate() {
-                if profile_mask[idx] {
+                let mut out_seg = if profile_mask[idx] {
                     // 受限区剖面段：已按 max_climb 生成下降/平飞/爬升，直接采用
-                    smooth_segs.push(seg.clone());
-                    entry_heading = seg.last_segment_heading();
-                    continue;
+                    seg.clone()
+                } else {
+                    let chain = default_chain(&opts, &check, entry_heading);
+                    let result = smooth_path_chain(seg, &chain, &opts, &ctx, Some(phys_min_radius_m));
+                    if let Some(w) = &result.warning {
+                        seg_warnings.push(w.clone());
+                    }
+                    seg_warnings.extend(result.verify.warnings.iter().cloned());
+                    result.path
+                };
+                // 段边界转角修复（2026-08-08 主管 china_dem_l12 场景 zigzag19）：
+                // desc_in/out_climb（mask=true 固定直线）方向不受 entry_heading 约束
+                // （entry 只约束 default_chain 段首跳），且 build 的 climb 出口约束用
+                // tail 终点方向近似、与 theta 拉直后实际首段方向偏差大 → 拼接后段边界
+                // 转角可超 max_turn（pt3 65.9° / pt4 70.5°）→ final verify 拒 → 全链
+                // 回退 raw 密集锯齿。每段（含 mask=true）push 前检查与前一段输出在
+                // 边界点 b 的转角，超限 → arc_transition 插入过渡弧（弹出 b，弧点高度
+                // = b.alt_m 平飞，逐段 check 不穿墙；E→c 仍沿出段方向，爬升角由
+                // climb_base 保证）。arc 失败（穿墙/必经点）保持原样，宁丑勿违。
+                if let Some(prev) = smooth_segs.last_mut() {
+                    let n = prev.points.len();
+                    if n >= 2 && out_seg.points.len() >= 2 {
+                        let a = prev.points[n - 2];
+                        let b = prev.points[n - 1];
+                        let c = out_seg.points[1];
+                        let h0 = crate::path::bearing_deg(a.lon, a.lat, b.lon, b.lat);
+                        let h1 = crate::path::bearing_deg(b.lon, b.lat, c.lon, c.lat);
+                        let d = crate::path::angle_diff_deg(h0, h1).abs();
+                        let is_hard = hard_boundary
+                            .iter()
+                            .any(|(lo, la)| (lo - b.lon).abs() < 1e-9 && (la - b.lat).abs() < 1e-9);
+                        if d > opts.max_turn_deg && !is_hard {
+                            if let Some((arc_pts, _k)) = crate::smooth::arc_transition(
+                                &a,
+                                &b,
+                                &c,
+                                opts.max_turn_deg,
+                                opts.turn_radius_m,
+                                &check,
+                                &prev.points,
+                                n - 1,
+                                false,
+                            ) {
+                                let arc_len = arc_pts.len();
+                                let e = *arc_pts.last().unwrap();
+                                prev.points.truncate(n - 1);
+                                prev.points.extend(arc_pts);
+                                // 后续段起点若为被弹出的 b（剖面锚点/平滑段端点，非硬约束）
+                                // → 同步到弧末点 E，否则 joined 出现 E→b 回头路
+                                // （2026-08-08 实测 E→原 pt3 转角 179.99°）。
+                                if !out_seg.points.is_empty() {
+                                    let p0 = &out_seg.points[0];
+                                    if (p0.lon - b.lon).abs() < 1e-9
+                                        && (p0.lat - b.lat).abs() < 1e-9
+                                    {
+                                        out_seg.points[0] = e;
+                                    }
+                                }
+                                if std::env::var_os("ARP_DEBUG_SMOOTH").is_some() {
+                                    eprintln!(
+                                        "[smooth-dbg] boundary arc at ({:.4},{:.4}) turn {:.1}->{} pts",
+                                        b.lon, b.lat, d, arc_len
+                                    );
+                                }
+                            } else if std::env::var_os("ARP_DEBUG_SMOOTH").is_some() {
+                                eprintln!(
+                                    "[smooth-dbg] boundary arc FAIL at ({:.4},{:.4}) turn {:.1} hard={is_hard}",
+                                    b.lon, b.lat, d
+                                );
+                            }
+                        }
+                    }
                 }
-                let chain = default_chain(&opts, &check, entry_heading);
-                let result = smooth_path_chain(seg, &chain, &opts, &ctx, Some(phys_min_radius_m));
-                if let Some(w) = &result.warning {
-                    seg_warnings.push(w.clone());
-                }
-                seg_warnings.extend(result.verify.warnings.iter().cloned());
-                smooth_segs.push(result.path.clone());
-                entry_heading = result.path.last_segment_heading();
+                let entry_next = out_seg.last_segment_heading();
+                smooth_segs.push(out_seg);
+                entry_heading = entry_next;
             }
             // 拼接 + 全路径终检（段间转角/整路径威胁在拼接后才可见）
             let joined = join_paths(&smooth_segs);
@@ -2325,6 +2392,77 @@ mod tests {
             "degradations 应含 NoData 降级，实际 {:?}",
             out.stats.degradations
         );
+    }
+
+    #[test]
+    fn zigzag19_boundary_arc_between_profile_and_cruise() {
+        // 主管 2026-08-08 输入（China DEM L12 真实地形）：start 东海上 → target 内蒙，
+        // 2 个 restricted 圆（rz1 顶部绕飞 6500m、rz2 底部穿行 1500m）+ 5 个 no_fly
+        // + 2 雷达。build_restricted_profiles 切出 desc_in/in_out/out_climb 剖面段，
+        // out_climb（mask=true 固定直线）方向只约束"out→climb vs climb→tail 终点"
+        // （build 时近似），与 in_out 平滑（Theta*）后末段方向偏差大 → 段边界
+        // pout2 处转角 65.9° 超 max_turn → final verify 拒 → 全链回退 1975 点
+        // 网格楼梯（4048km）。修复：平滑循环中每段（含 mask=true）push 前检查
+        // 与前一段输出的边界转角，超限 → arc_transition 插入过渡弧（弹出边界点、
+        // 后续段起点同步到弧末点 E）→ 22 点平滑路径 2982km。
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+        let cand = root.join("phase0/data/pending/china_dem_l12.arpack");
+        if !cand.exists() {
+            eprintln!("skip zigzag19: real terrain missing ({})", cand.display());
+            return;
+        }
+        let s = r#"{
+            "schema_version":"0.20",
+            "mission":{
+                "start":{"lon":126.56263413053458,"lat":30.32884201287228,"alt_m":3000},
+                "target":{"lon":106.37660123285819,"lat":51.14912421163358,"alt_m":3000},
+                "vehicles":[{"id":"v1","profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":250,
+                    "min_turn_radius_m":442,"max_climb_angle_deg":15},
+                    "start_pose":{"lon":126.56263413053458,"lat":30.32884201287228,"alt_m":3000,"heading_deg":45},
+                    "mid_waypoints":[]}],
+                "red_forces":{"radars":[
+                    {"id":"radar_1786151025411","lon":113.98758157631866,"lat":40.493383922561435,"radar_type":"early_warning","radius_km":100,"alt_m":10},
+                    {"id":"radar_1786151487443","lon":109.16900472287948,"lat":46.82742249911229,"radar_type":"tracking","radius_km":100,"alt_m":10}]},
+                "no_fly_zones":[
+                    {"id":"zone_1786150842284","zone_type":"no_fly","shape":"polygon","geometry":{"vertices":[[114.40468979438141,42.65722021983792],[110.62088557896168,38.988188308928834],[112.81262578575785,39.7164462210201]]},"alt_min_m":0,"alt_max_m":12000,"height_semantics":"msl"},
+                    {"id":"zone_1786150865059","zone_type":"no_fly","shape":"polygon","geometry":{"vertices":[[118.0683305776591,44.76739249108195],[114.57960742739121,41.61506064153377],[117.27464739502655,42.648718862161275]]},"alt_min_m":0,"alt_max_m":12000,"height_semantics":"msl"},
+                    {"id":"zone_1786150891051","zone_type":"no_fly","shape":"polygon","geometry":{"vertices":[[117.0676237684419,46.341013239879814],[113.7376472130683,43.26605614623792],[116.16387600630392,43.34838640726238]]},"alt_min_m":0,"alt_max_m":12000,"height_semantics":"msl"},
+                    {"id":"zone_1786151204171","zone_type":"no_fly","shape":"circle","geometry":{"center":[111.525601573293,45.97116185501782],"radius_km":50},"alt_min_m":0,"alt_max_m":12000,"height_semantics":"msl"},
+                    {"id":"zone_1786151327667","zone_type":"no_fly","shape":"circle","geometry":{"center":[107.23020272260999,49.498587971424286],"radius_km":100},"alt_min_m":0,"alt_max_m":12000,"height_semantics":"msl"}],
+                "restricted_zones":[
+                    {"id":"rz_1786150991459","zone_type":"restricted","shape":"circle","geometry":{"center":[115.86408593793746,40.956574434371106],"radius_km":100},"alt_min_m":0,"alt_max_m":6000,"height_semantics":"msl"},
+                    {"id":"rz_1786151584275","zone_type":"restricted","shape":"circle","geometry":{"center":[113.31470106587476,42.70043214171731],"radius_km":100},"alt_min_m":2000,"alt_max_m":8000,"height_semantics":"msl"}],
+                "obstacles":[],
+                "terrain":{"source":"path","path":"__P__"},
+                "parameters":{"p_cross":0.9}
+            }
+        }"#;
+        let s = s.replace("__P__", &cand.to_string_lossy().replace('\\', "\\\\"));
+        let input = parse(&s);
+        let out = solve(&input, &SolveParams::default(), 0).unwrap();
+        let v = &out.vehicles[0];
+        assert_eq!(v.status, "planned");
+        assert!(
+            v.warnings.iter().all(|w| !w.contains("smoothing_failed")),
+            "段边界弧修复后不应 smoothing_failed，实际 {:?}",
+            v.warnings
+        );
+        assert!(
+            v.path.len() <= 60,
+            "应交付平滑路径（修复前 1975 点），实际 {} 点",
+            v.path.len()
+        );
+        // 修复前 raw 楼梯 4048km；平滑交付应显著更短
+        assert!(
+            v.distance_m < 3_200_000.0,
+            "应 ≈ 平滑 2982km，实际 {}km",
+            v.distance_m / 1000.0
+        );
+        // 剖面语义保持：rz1 顶部绕飞（6500m）与 rz2 底部穿行（1500m）都应在路径中
+        let has_6500 = v.path.iter().any(|p| (p.alt_m - 6500.0).abs() < 1.0);
+        let has_1500 = v.path.iter().any(|p| (p.alt_m - 1500.0).abs() < 1.0);
+        assert!(has_6500, "rz1 顶部剖面 6500m 应保留，实际 {:?}", v.path);
+        assert!(has_1500, "rz2 底部剖面 1500m 应保留，实际 {:?}", v.path);
     }
 }
 
