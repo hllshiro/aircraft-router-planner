@@ -716,7 +716,9 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                 // 回退 raw 密集锯齿。每段（含 mask=true）push 前检查与前一段输出在
                 // 边界点 b 的转角，超限 → arc_transition 插入过渡弧（弹出 b，弧点高度
                 // = b.alt_m 平飞，逐段 check 不穿墙；E→c 仍沿出段方向，爬升角由
-                // climb_base 保证）。arc 失败（穿墙/必经点）保持原样，宁丑勿违。
+                // climb_base 保证）。arc 失败（穿墙等）保持原样，宁丑勿违；必经点
+                // （keep_b）处大转角同样插弧——物理上必经点平滑转弯必须切弧（偏差
+                // ≤ r·tan(θ/2) ≈ 0.6km，2026-08-10 zigzag25 主管输入实测）。
                 if let Some(prev) = smooth_segs.last_mut() {
                     let n = prev.points.len();
                     if n >= 2 && out_seg.points.len() >= 2 {
@@ -726,10 +728,19 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                         let h0 = crate::path::bearing_deg(a.lon, a.lat, b.lon, b.lat);
                         let h1 = crate::path::bearing_deg(b.lon, b.lat, c.lon, c.lat);
                         let d = crate::path::angle_diff_deg(h0, h1).abs();
-                        let is_hard = hard_boundary
-                            .iter()
-                            .any(|(lo, la)| (lo - b.lon).abs() < 1e-9 && (la - b.lat).abs() < 1e-9);
-                        if d > opts.max_turn_deg && !is_hard {
+                        // 段端点网格离散：FMM 终点 snap 到最近网格节点，段端点（起点/
+                        // 必经点/目标）可偏离输入坐标 ~0.5 cell（cell 818m → ~400m）。
+                        // 1e-9 精确匹配会漏判（2026-08-10 zigzag25：b 距必经点 242m
+                        // → 必经点未受保护 → 大半径弧弹出 b 且 E 越过出段节点 → 折返
+                        // 178° → final verify 拒 → 回退 471 点锯齿）。容差 = max(0.75
+                        // ×cell, 250m) 覆盖网格离散；keep_b=true → 弧用物理转弯半径
+                        // （紧贴 b，切点偏差 ≤ r·tan(θ/2) ≈ 0.6km，满足必经点容差
+                        // 0.05°≈5.5km 测试断言——物理上必经点处平滑转弯必须切弧）。
+                        let hard_tol_m = (cell_m * 0.75).max(250.0);
+                        let is_hard = hard_boundary.iter().any(|(lo, la)| {
+                            dist_km(*lo, *la, b.lon, b.lat) * 1000.0 < hard_tol_m
+                        });
+                        if d > opts.max_turn_deg {
                             if let Some((arc_pts, _k)) = crate::smooth::arc_transition(
                                 &a,
                                 &b,
@@ -740,6 +751,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                                 &prev.points,
                                 n - 1,
                                 false,
+                                is_hard,
                             ) {
                                 let arc_len = arc_pts.len();
                                 let e = *arc_pts.last().unwrap();
@@ -3327,6 +3339,79 @@ mod tests {
             v1.warnings.iter().all(|w| !w.contains("smoothing_failed")),
             "v1 不应 smoothing_failed，实际 {:?}",
             v1.warnings
+        );
+    }
+
+    #[test]
+    fn zigzag25_entry_heading_first_jump_uturn_band_arc() {
+        // 主管 2026-08-10 输入（east_asia 7.5as 真实地形）：双机独立起终点 + 必经点 +
+        // 单 tracking 雷达 50km。v2 起点（116.63,40.66）→ 必经点（116.45,39.56）→ 目标
+        // （115.50,39.58）。必经点 mid 恰在雷达盘内（距中心 49.6km<50km）→ SEG0 从
+        // 南侧绕雷达盘向北进入 mid（末段方向 0°），SEG1 需向西离开 → 首跳 88.5° 被
+        // entry_heading 60° 约束全拒 → theta_star 只能走相邻点（b→c 800m 向南）→
+        // 段边界 180° 掉头 → arc tan(90°) 发散退化 → FINAL 拒 → 回退 471 点网格楼梯。
+        // 修复三层：① theta_star 首跳 entry 约束放宽到 95°（必要大转向直接拉直，
+        // zigzag11 首跳 61.94° 场景仍受约束）→ b→target 直线（check 已通过）直接拉直；
+        // ② solver 必经点识别改容差匹配（段端点网格离散偏离必经点 ~0.5 cell，1e-9
+        // 精确匹配漏判 → 必经点被弧弹出 → E 越过出段节点折返 178°）；
+        // ③ arc_transition d_m ≤ 0.75×|bc| 截断（弧末点不越过后段下一节点），
+        // keep_b（必经点）用物理转弯半径（切点偏差 r·tan(θ/2)≈431m，满足必经点
+        // 容差 0.05°≈5.5km 测试断言）。结果：v2 471→10 点平滑，v1 5 点不变。
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+        let cand = root.join("data/east_asia_7p5as.arpack");
+        if !cand.exists() {
+            eprintln!("skip zigzag25: real terrain missing ({})", cand.display());
+            return;
+        }
+        let s = r#"{
+            "schema_version":"0.20",
+            "mission":{
+                "start":{"lon":115.9,"lat":39.8,"alt_m":3000},
+                "target":{"lon":116.8,"lat":40.3,"alt_m":3000},
+                "vehicles":[
+                    {"id":"v1","profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":250,"min_turn_radius_m":442,"max_climb_angle_deg":15},
+                     "start_pose":{"lon":116.92977366719182,"lat":40.4410563361943,"alt_m":300,"heading_deg":45},
+                     "mid_waypoints":[{"lon":116.5031580680477,"lat":39.61768508544036,"alt_m":300}],
+                     "target_ref":"115.49957776796042,39.577093261324855,3000"},
+                    {"id":"v2","profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":250,"min_turn_radius_m":442,"max_climb_angle_deg":15},
+                     "start_pose":{"lon":116.63273135458661,"lat":40.66380307890914,"alt_m":300,"heading_deg":45},
+                     "mid_waypoints":[{"lon":116.44919168873186,"lat":39.56474547305474,"alt_m":300}],
+                     "target_ref":"115.49957776796042,39.577093261324855,3000"}],
+                "red_forces":{"radars":[
+                    {"id":"radar_1786332337392","lon":116.76131203011676,"lat":39.93279959421326,"radar_type":"tracking","radius_km":50,"alt_m":10}]},
+                "no_fly_zones":[],
+                "restricted_zones":[],
+                "obstacles":[],
+                "terrain":{"source":"path","path":"__P__"},
+                "parameters":{}
+            }
+        }"#;
+        let s = s.replace("__P__", &cand.to_string_lossy().replace('\\', "\\\\"));
+        let input = parse(&s);
+        let out = solve(&input, &SolveParams::default(), 0).unwrap();
+        for (vi, v) in out.vehicles.iter().enumerate() {
+            assert_eq!(v.status, "planned", "v{} 应 planned", vi + 1);
+            assert!(
+                v.path.len() <= 20,
+                "v{} 应平滑交付（修复前 v2 471 点网格楼梯），实际 {} 点",
+                vi + 1,
+                v.path.len()
+            );
+            assert!(
+                v.warnings.iter().all(|w| !w.contains("smoothing_failed")),
+                "v{} 不应 smoothing_failed，实际 {:?}",
+                vi + 1,
+                v.warnings
+            );
+        }
+        // 必经点语义：交付路径经过必经点容差邻域（0.05°≈5.5km，同 m5 测试口径；
+        // 实测切点偏差 r·tan(θ/2)≈431m）。v2 必经点 mid=(116.4492,39.5647)。
+        let v2 = &out.vehicles[1];
+        let (mlon, mlat) = (116.44919168873186_f64, 39.56474547305474_f64);
+        assert!(
+            v2.path.iter().any(|p| (p.x - mlon).abs() < 0.05 && (p.y - mlat).abs() < 0.05),
+            "v2 路径应经过必经点邻域，实际 {:?}",
+            v2.path
         );
     }
 }

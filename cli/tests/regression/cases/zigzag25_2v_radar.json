@@ -1,0 +1,83 @@
+{
+  "schema_version": "0.20",
+  "mission": {
+    "start": {
+      "lon": 115.9,
+      "lat": 39.8,
+      "alt_m": 3000
+    },
+    "target": {
+      "lon": 116.8,
+      "lat": 40.3,
+      "alt_m": 3000
+    },
+    "vehicles": [
+      {
+        "id": "v1",
+        "profile": {
+          "aircraft_type": "FIXED_WING",
+          "cruise_speed_mps": 250,
+          "min_turn_radius_m": 442,
+          "max_climb_angle_deg": 15
+        },
+        "start_pose": {
+          "lon": 116.92977366719182,
+          "lat": 40.4410563361943,
+          "alt_m": 300,
+          "heading_deg": 45
+        },
+        "mid_waypoints": [
+          {
+            "lon": 116.5031580680477,
+            "lat": 39.61768508544036,
+            "alt_m": 300
+          }
+        ],
+        "target_ref": "115.49957776796042,39.577093261324855,3000"
+      },
+      {
+        "id": "v2",
+        "profile": {
+          "aircraft_type": "FIXED_WING",
+          "cruise_speed_mps": 250,
+          "min_turn_radius_m": 442,
+          "max_climb_angle_deg": 15
+        },
+        "start_pose": {
+          "lon": 116.63273135458661,
+          "lat": 40.66380307890914,
+          "alt_m": 300,
+          "heading_deg": 45
+        },
+        "mid_waypoints": [
+          {
+            "lon": 116.44919168873186,
+            "lat": 39.56474547305474,
+            "alt_m": 300
+          }
+        ],
+        "target_ref": "115.49957776796042,39.577093261324855,3000"
+      }
+    ],
+    "red_forces": {
+      "radars": [
+        {
+          "id": "radar_1786332337392",
+          "lon": 116.76131203011676,
+          "lat": 39.93279959421326,
+          "radar_type": "tracking",
+          "radius_km": 50,
+          "alt_m": 10
+        }
+      ]
+    },
+    "no_fly_zones": [],
+    "restricted_zones": [],
+    "obstacles": [],
+    "terrain": {
+      "source": "path",
+      "path": "data/east_asia_7p5as.arpack"
+    },
+    "parameters": {}
+  }
+}

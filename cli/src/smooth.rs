@@ -165,9 +165,23 @@ pub fn theta_star_smooth(
                     let p_cur = out[out.len() - 1];
                     let h1 = heading_deg_pts(&p_cur, &b);
                     let d = crate::path::angle_diff_deg(h0, h1).abs();
-                    if d > max_turn {
+                    // 首跳 entry 约束放宽（2026-08-10 zigzag25）：mid 恰在雷达
+                    // 盘内时，SEG0 从南侧绕入向北（末段方向 0°），SEG1 需向西
+                    // 离开（首跳 88.5°）——60° 约束把首跳全拒 → theta_star 只能
+                    // 走相邻点（b→c 800m 向南）→ 段边界 180° 掉头 → arc 病态
+                    // （tan(90°) 发散）→ FINAL 拒 → 回退 471 点锯齿。放宽到
+                    // 95°：b→target 直接拉直（check 已通过），solver boundary
+                    // arc 用标准弧切 b 处理 88.5°（r×tan(44.25°)≈431m，物理
+                    // 半径内）。zigzag11 首跳 61.94° 场景仍受约束（<95）。
+                    // >95° 的掉头仍走相邻点（宁丑勿违）。
+                    let effective_max = if out.len() == 1 && entry_heading.is_some() {
+                        (max_turn * 1.6).min(95.0)
+                    } else {
+                        max_turn
+                    };
+                    if d > effective_max {
                         if std::env::var_os("ARP_DEBUG_SMOOTH").is_some() && out.len() < 4 {
-                            eprintln!("[ts-dbg] i={i} j={j} reject=turn {d:.1}>={max_turn} h0={h0:.1} h1={h1:.1} entry={entry_heading:?} outlen={}", out.len());
+                            eprintln!("[ts-dbg] i={i} j={j} reject=turn {d:.1}>={effective_max} h0={h0:.1} h1={h1:.1} entry={entry_heading:?} outlen={}", out.len());
                         }
                         j -= 1;
                         continue;
@@ -190,7 +204,7 @@ pub fn theta_star_smooth(
                     let h1 = heading_deg_pts(&b, &c);
                     if crate::path::angle_diff_deg(h0, h1).abs() > max_turn {
                         if let Some((pts, k)) =
-                            arc_transition(&a, &b, &c, max_turn, min_r_m, check, &path.points, i, true)
+                            arc_transition(&a, &b, &c, max_turn, min_r_m, check, &path.points, i, true, false)
                         {
                             let npts = pts.len();
                             // 弹出 b（急转弯点）：弧从入段线上的 S 开始，不再经过 b
@@ -248,6 +262,7 @@ pub(crate) fn arc_transition(
     path: &[crate::path::PathPoint],
     i: usize,
     find_k: bool,
+    keep_b: bool,
 ) -> Option<(Vec<crate::path::PathPoint>, usize)> {
     use crate::path::{angle_diff_deg, bearing_deg};
     let h_ab = heading_deg_pts(a, b);
@@ -260,14 +275,43 @@ pub(crate) fn arc_transition(
     if theta <= max_turn_deg || theta < 1e-6 {
         return None;
     }
-    let side = if signed > 0.0 { 1.0 } else { -1.0 }; // +1 右转（顺时针），-1 左转
+    // +1 右转（顺时针），-1 左转。**180° 掉头边界**：angle_diff_deg 归一化
+    // 到 [-180,180) 时 x−y=180 恰返回 −180 → side=−1 → 弧从 S 沿入段切线
+    // **反向**转出（2026-08-10 zigzag25：mid 恰在雷达盘内，SEG0 从南侧绕入
+    // 向北、SEG1 向南出盘 → 段边界 180° 掉头 → 弧折返 180° → FINAL 拒）。
+    // 180° 左右转等价，强制 side=+1：弧从 S 沿入段切线方向（向 b 侧）转出，
+    // U 形弯方向正确。
+    let side = if theta > 179.999 {
+        1.0
+    } else if signed > 0.0 {
+        1.0
+    } else {
+        -1.0
+    };
     let n = ((theta / max_turn_deg).ceil() as usize).max(2);
     let delta = theta / n as f64;
     // 步长（米）：保证弧半径 ≥ min_r_m，且不小于 2km（避免点过密）。
+    // keep_b（必经点/段端点硬点）：用物理转弯半径——弧紧贴 b（切点偏差
+    // r·tan(θ/2) 小，必经点语义保留）；大半径弧会让 E 远离 b → 越过后段
+    // 下一节点 → 拼接折返（2026-08-10 zigzag25：E 距 b 2.6km > c 距 b
+    // 0.7km → E→c 反向 178°）。
     let half = (delta / 2.0).to_radians();
-    let step_m = (2.0 * min_r_m * half.sin()).max(2_000.0);
+    let step_m = if keep_b {
+        (2.0 * min_r_m * half.sin()).max(50.0)
+    } else {
+        (2.0 * min_r_m * half.sin()).max(2_000.0)
+    };
     let r_m = step_m / (2.0 * half.sin()).max(1e-9);
-    let d_m = r_m * (theta / 2.0).to_radians().tan();
+    let d_m_raw = r_m * (theta / 2.0).to_radians().tan();
+    // 弧末点 E 不得越过出段下一节点 c：E 在 c 的出段侧 → E→c 反向折返。
+    // 截断 d_m ≤ 0.75×|bc|（有效半径同步缩小，弧点转角不变）。
+    let bc_m = crate::path::haversine_m(b.lon, b.lat, c.lon, c.lat);
+    let d_m = d_m_raw.min(bc_m * 0.75);
+    let r_eff = if d_m_raw > 0.0 {
+        d_m / (theta / 2.0).to_radians().tan()
+    } else {
+        r_m
+    };
     // 等距投影 dest（以 b 为中纬；弧长 ~10km 级，误差 <0.1%）。
     let lat0 = b.lat.to_radians();
     let kx = 111_320.0 * lat0.cos();
@@ -279,12 +323,20 @@ pub(crate) fn arc_transition(
     };
     let (s_lon, s_lat) = dest(b.lon, b.lat, h_ab, -d_m);
     let (e_lon, e_lat) = dest(b.lon, b.lat, h_bc, d_m);
+    // **180° 掉头无平滑弧**：入/出段同线（S/E 必须在同一条直线上）时，
+    // 切线约束（S 处=入段方向、E 处=出段方向）与直径几何矛盾；且
+    // tan(θ/2)=tan(90°) 发散 → 标准弧退化（d_m 截断后 r_eff≈0）。
+    // theta_star 首跳 95° 放宽后（2026-08-10 zigzag25）此分支不应触发；
+    // 触发则宁丑勿违（返回 None，调用方保持原样）。
+    if theta > 179.999 {
+        return None;
+    }
     // 半径方向（center→S）：右转圆心在入段右侧（半径 = h_ab−90，φ 随弧顺时针增），
     // 左转圆心在入段左侧（半径 = h_ab+90，φ 逆时针减）。圆心在 S 的对面：
     // center = S − r·(sin φ0, cos φ0)；P(t) = center + r·(sin φ(t), cos φ(t))，
     // φ(t) = φ0 + side·t·θ —— t=0 恰为 S、t=1 恰为 E，且切线 = 入/出段航向。
     let phi0 = h_ab - side * 90.0;
-    let (c_lon, c_lat) = dest(s_lon, s_lat, phi0 + 180.0, r_m);
+    let (c_lon, c_lat) = dest(s_lon, s_lat, phi0 + 180.0, r_eff);
     let mut pts: Vec<crate::path::PathPoint> = Vec::with_capacity(n + 1);
     pts.push(crate::path::PathPoint {
         lon: s_lon,
@@ -295,7 +347,7 @@ pub(crate) fn arc_transition(
     for k in 1..=n {
         let t = k as f64 / n as f64;
         let h_rad = (phi0 + side * t * theta).to_radians();
-        let (p_lon, p_lat) = (c_lon + r_m * h_rad.sin() / kx, c_lat + r_m * h_rad.cos() / ky);
+        let (p_lon, p_lat) = (c_lon + r_eff * h_rad.sin() / kx, c_lat + r_eff * h_rad.cos() / ky);
         pts.push(crate::path::PathPoint {
             lon: p_lon,
             lat: p_lat,
