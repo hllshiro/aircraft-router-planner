@@ -1,15 +1,6 @@
 # session-local notes
 *_TODO.md
 
-# rewrite backup (v0.19 raw, pre-rewrite snapshot)
-技术方案_v0.19_raw.bak.md
-
-# archived TODO files (cleanup 2026-08-04)
-todo_archive_2026-08-04.zip
-
-# archived Phase 0 TODO files (cleanup 2026-08-04, Phase 0 completed)
-todo_archive_phase0_2026-08-04.zip
-
 # phase0 compression artifacts (terrain.zstd etc., regenerate per data source)
 phase0_out/
 phase0/*_analyze_out.json
