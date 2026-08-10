@@ -202,10 +202,9 @@ export function defaultInputConfig(): InputConfig {
       no_fly_zones: [],
       restricted_zones: [],
       obstacles: [],
-      // 默认真实地形：China_Dem_L12 ARPK1（~80MB，中国区 73.5-135.1E, 3.6-53.6N）
-      // 路径相对 workspace 根（demo-server 与 CLI 的 cwd）；2026-08-08：phase0/data/pending/
-      // 目录已清理，改指向 data/ 下现存文件
-      terrain: { source: 'path', path: 'data/china_dem_l12.arpack' },
+      // 默认真实地形：east_asia_7p5as ARPK1（~537MB，GMTED2010 东亚 7.5as，70-135E, 15-55N）
+      // 与发布版（install/）默认地形对齐；路径相对 workspace 根（demo-server 与 CLI 的 cwd）
+      terrain: { source: 'path', path: 'data/east_asia_7p5as.arpack' },
       parameters: {},
     },
   };
