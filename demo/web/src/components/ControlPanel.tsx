@@ -15,8 +15,8 @@ interface ControlPanelProps {
   onPlan: () => void;
   result: PlanResult | null;
   loading: boolean;
-  activeClickMode: 'start' | 'target' | 'polygon' | null;
-  onSetClickMode: (mode: 'start' | 'target' | 'polygon' | null) => void;
+  activeClickMode: 'start' | 'target' | 'midpoint' | 'polygon' | null;
+  onSetClickMode: (mode: 'start' | 'target' | 'midpoint' | 'polygon' | null) => void;
   editingZoneId: string | null;
   onEditingZoneId: (id: string | null) => void;
   /** 每机拾取目标下标（点击设置起/终点，2026-08-10） */
@@ -60,11 +60,6 @@ export function ControlPanel({
     onConfigChange({ ...config, ...patch });
   const updateMission = (patch: Partial<InputConfig['mission']>) =>
     update({ mission: { ...mission, ...patch } });
-
-  const updateStart = (patch: Partial<Waypoint>) =>
-    updateMission({ start: { ...mission.start, ...patch } });
-  const updateTarget = (patch: Partial<Waypoint>) =>
-    updateMission({ target: { ...mission.target, ...patch } });
 
   const updateVehicleAt = (idx: number, patch: Partial<VehicleInput>) => {
     const vehicles = [...mission.vehicles];
@@ -216,69 +211,9 @@ export function ControlPanel({
       <h2>AircraftRouterPlanner Demo</h2>
       <div className="subtitle">开发期工具 · schema 0.20</div>
 
-      {/* Start */}
-      <h3>起点（经纬高）</h3>
-      <div className="field-row">
-        <div>
-          <label>经度</label>
-          <input
-            type="number"
-            step="0.0001"
-            value={mission.start.lon}
-            onChange={(e) => updateStart({ lon: +e.target.value })}
-          />
-        </div>
-        <div>
-          <label>纬度</label>
-          <input
-            type="number"
-            step="0.0001"
-            value={mission.start.lat}
-            onChange={(e) => updateStart({ lat: +e.target.value })}
-          />
-        </div>
-        <div>
-          <label>高度 (m)</label>
-          <input
-            type="number"
-            value={mission.start.alt_m}
-            onChange={(e) => updateStart({ alt_m: +e.target.value })}
-          />
-        </div>
-      </div>
-
-      {/* Target */}
-      <h3>目标点（经纬高）</h3>
-      <div className="field-row">
-        <div>
-          <label>经度</label>
-          <input
-            type="number"
-            step="0.0001"
-            value={mission.target.lon}
-            onChange={(e) => updateTarget({ lon: +e.target.value })}
-          />
-        </div>
-        <div>
-          <label>纬度</label>
-          <input
-            type="number"
-            step="0.0001"
-            value={mission.target.lat}
-            onChange={(e) => updateTarget({ lat: +e.target.value })}
-          />
-        </div>
-        <div>
-          <label>高度 (m)</label>
-          <input
-            type="number"
-            value={mission.target.alt_m}
-            onChange={(e) => updateTarget({ alt_m: +e.target.value })}
-          />
-        </div>
-      </div>
-
-      {/* Vehicles（多机：schema 0.20 vehicles 数组，每机独立机型/起点位姿/必经点） */}
+      {/* Vehicles（多机：schema 0.20 vehicles 数组，每机独立机型/起点位姿/目标/必经点）。
+          全局起终点输入已删除（2026-08-10）：每机独立设置起终点后不再需要；
+          mission.start/target 保留在内部状态（默认值），仅作契约兜底。 */}
       <h3>飞行器 ({mission.vehicles.length})</h3>
       {mission.vehicles.map((v, idx) => (
         <div key={v.id} className="obstacle-item">
@@ -533,22 +468,31 @@ export function ControlPanel({
               </div>
             ))}
             <button
-              className="btn-small"
-              style={{ marginTop: 4, background: '#333', color: '#e0e0e0' }}
-              onClick={() =>
-                updateVehicleAt(idx, {
-                  mid_waypoints: [
-                    ...(v.mid_waypoints ?? []),
-                    {
-                      lon: (mission.start.lon + mission.target.lon) / 2,
-                      lat: (mission.start.lat + mission.target.lat) / 2,
-                      alt_m: mission.start.alt_m,
-                    },
-                  ],
-                })
+              className={
+                pickVehicleIdx === idx && activeClickMode === 'midpoint'
+                  ? 'btn-small active'
+                  : 'btn-small'
               }
+              style={{
+                marginTop: 4,
+                background:
+                  pickVehicleIdx === idx && activeClickMode === 'midpoint'
+                    ? '#3a5f0b'
+                    : '#333',
+                color: '#e0e0e0',
+              }}
+              title="点击后在地图上点选添加必经点；场景中的黄色小球可直接拖动调整位置"
+              onClick={() => {
+                if (pickVehicleIdx === idx && activeClickMode === 'midpoint') {
+                  onSetClickMode(null);
+                  onPickVehicle(null);
+                } else {
+                  onSetClickMode('midpoint');
+                  onPickVehicle(idx);
+                }
+              }}
             >
-              + 添加必经点
+              🖱 点击场景添加必经点
             </button>
           </div>
         </div>

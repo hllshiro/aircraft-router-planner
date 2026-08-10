@@ -10,6 +10,7 @@ import { RadarSphere } from './RadarSphere';
 import { NFZPrism } from './NFZPrism';
 import { PathLine } from './PathLine';
 import { TerrainMesh } from './TerrainMesh';
+import { MidpointMarker } from './MidpointMarker';
 
 interface Scene3DProps {
   geoRef: GeoRef;
@@ -25,7 +26,14 @@ interface Scene3DProps {
   onGroundClick: (wp: Waypoint) => void;
   onRadarMove: (id: string, lon: number, lat: number) => void;
   onZoneMove: (id: string, dLon: number, dLat: number) => void;
-  activeClickMode: 'start' | 'target' | 'polygon' | null;
+  /** 必经点拖动：更新某车第 index 个必经点经纬（高度保留） */
+  onMidpointMove: (
+    vehicleId: string,
+    index: number,
+    lon: number,
+    lat: number,
+  ) => void;
+  activeClickMode: 'start' | 'target' | 'midpoint' | 'polygon' | null;
 }
 
 /** 圆形 zone → 局部平面多边形（24 边近似） */
@@ -156,6 +164,7 @@ export function Scene3D({
   onGroundClick,
   onRadarMove,
   onZoneMove,
+  onMidpointMove,
   activeClickMode,
 }: Scene3DProps) {
   // 统一 z 夸张系数（地形 + 航路 + 标记 + zone 高度共用，保证同一尺度）
@@ -239,12 +248,13 @@ export function Scene3D({
     }));
   }, [results, geoRef, zScale]);
 
-  // 必经点（输入）
+  // 必经点（输入；可拖动——MidpointMarker）
   const midPoints = useMemo(
     () =>
       vehicles.flatMap((v) =>
-        (v.mid_waypoints ?? []).map((m) => ({
-          id: v.id,
+        (v.mid_waypoints ?? []).map((m, idx) => ({
+          vehicleId: v.id,
+          index: idx,
           pos: geoToLocal(m, geoRef, zScale),
         })),
       ),
@@ -360,12 +370,17 @@ export function Scene3D({
         </mesh>
       ))}
 
-      {/* 必经点（黄色小球） */}
-      {midPoints.map((m, i) => (
-        <mesh key={`mid_${i}`} position={[m.pos[0], m.pos[2], m.pos[1]]}>
-          <sphereGeometry args={[80, 16, 8]} />
-          <meshBasicMaterial color="#ffee00" />
-        </mesh>
+      {/* 必经点（黄色可拖动小球；Alt+点击新增由地面拾取层处理） */}
+      {midPoints.map((m) => (
+        <MidpointMarker
+          key={`mid_${m.vehicleId}_${m.index}`}
+          vehicleId={m.vehicleId}
+          index={m.index}
+          center={m.pos}
+          geoRef={geoRef}
+          onMidpointMove={onMidpointMove}
+          onDragStateChange={handleDragState}
+        />
       ))}
 
       {/* 车辆路径 */}

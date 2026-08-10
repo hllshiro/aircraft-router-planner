@@ -13,7 +13,7 @@ import type {
 import { defaultInputConfig } from './types';
 import { planRoute, sceneBounds, fetchTerrain } from './api';
 
-type ClickMode = 'start' | 'target' | 'polygon' | null;
+type ClickMode = 'start' | 'target' | 'midpoint' | 'polygon' | null;
 
 /** 解析 target_ref 当前目标高度（自定义坐标第 3 段；缺省回落 mission.target.alt_m） */
 function currentTargetAlt(v: { target_ref?: string } | undefined, fallback: number): number {
@@ -154,6 +154,25 @@ export default function App() {
     });
   }, []);
 
+  const handleMidpointMove = useCallback(
+    (vehicleId: string, index: number, lon: number, lat: number) => {
+      setConfig((prev) => ({
+        ...prev,
+        mission: {
+          ...prev.mission,
+          vehicles: prev.mission.vehicles.map((v) => {
+            if (v.id !== vehicleId) return v;
+            const ms = [...(v.mid_waypoints ?? [])];
+            if (!ms[index]) return v;
+            ms[index] = { ...ms[index], lon, lat };
+            return { ...v, mid_waypoints: ms };
+          }),
+        },
+      }));
+    },
+    [],
+  );
+
   const handleGroundClick = useCallback(
     (wp: Waypoint) => {
       // 每机独立起点/终点拾取（2026-08-10）：start → 该机 start_pose；target → 该机
@@ -175,6 +194,21 @@ export default function App() {
         });
         setClickMode(null);
         setPickVehicleIdx(null);
+      } else if (clickMode === 'midpoint' && pickVehicleIdx !== null) {
+        // 场景拾取添加必经点（2026-08-10）：高度取该机起点高度；保持拾取模式可连续添加
+        setConfig((prev) => {
+          const vehicles = prev.mission.vehicles.map((v, i) => {
+            if (i !== pickVehicleIdx) return v;
+            return {
+              ...v,
+              mid_waypoints: [
+                ...(v.mid_waypoints ?? []),
+                { lon: wp.lon, lat: wp.lat, alt_m: v.start_pose.alt_m },
+              ],
+            };
+          });
+          return { ...prev, mission: { ...prev.mission, vehicles } };
+        });
       } else if (clickMode === 'polygon' && editingZoneId) {
         // 向多边形禁飞区追加顶点
         setConfig((prev) => {
@@ -237,6 +271,7 @@ export default function App() {
           onGroundClick={handleGroundClick}
           onRadarMove={handleRadarMove}
           onZoneMove={handleZoneMove}
+          onMidpointMove={handleMidpointMove}
           activeClickMode={clickMode}
         />
         {terrainError && (
