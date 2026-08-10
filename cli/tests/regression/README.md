@@ -24,9 +24,10 @@
 2. 输出路径逐点**不穿任何 zone**（水平包含 + 高度带，与 `zone_contains_at` 同语义）——
    no_fly/obstacle 全高度禁入，restricted 仅禁入高度带（底部/顶部剖面穿越合法）。
 
-## 地形依赖（主管决策 2026-08-06）
+## 地形依赖（主管决策 2026-08-06 / 2026-08-10）
 
-- cases 中 `terrain.path` 指向 `phase0/data/pending/china_dem_l12.arpack`（数据已 gitignore）。
+- cases 中 `terrain.path` 指向 `data/east_asia_7p5as.arpack`（发布版默认地形，
+  数据已 gitignore；2026-08-10 起 china_dem_l12 已退出测试流程）。
 - 运行期检测：**数据存在** → 改写 path 为绝对路径使用真实地形；**数据缺失** →
   `terrain.source=none` 合成平面（覆盖不到真实地形 bug，但保证用例在无数据环境仍可跑）。
 

@@ -7,7 +7,8 @@
 //! - 候选② 无锁批量预取（BulkPrefetch::prefetch_lonlat + sample_local）：一次锁外解压
 //!   区域全部块到局部表，4M 次查表无锁；本文件验证 bit-exact + 性能。
 //!
-//! 数据：优先真实 china_dem_l12.arpack（zigzag11 同款），缺失则合成 ARPK1 数据
+//! 数据：发布版默认地形 east_asia_7p5as.arpack（主管 2026-08-10：china_dem_l12 /
+//! gmted2010 均退出测试流程，gmted 为备用地形不保证保留），缺失则合成 ARPK1 数据
 //! （write_pack_raw）只验正确性。
 
 use std::path::Path;
@@ -143,132 +144,17 @@ fn build_par_local<B: BulkPrefetch + Sync + Send>(
 }
 
 /// 真实数据（存在则返回，否则 None）。
+/// 主管 2026-08-10：发布版默认地形 = east_asia_7p5as.arpack（china_dem_l12 /
+/// gmted2010 均退出本测试流程；gmted 为备用地形不保证保留）。
 fn load_real() -> Option<BuiltinSource> {
     let p = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
-        .join("data/china_dem_l12.arpack");
+        .join("data/east_asia_7p5as.arpack");
     if p.exists() {
         BuiltinSource::open(&p).ok()
     } else {
         None
     }
-}
-
-/// GMTED2010 7.5as 耗时对比（2026-08-07）：
-/// 真实 gmted2010_7p5as_global.z19.arpack（2.311GB，64 片解码 + ARPK1 转换成功）
-/// 存在时直接用真实数据对比 field build 耗时；
-/// 文件不存在（未转换/被删）→ fallback：用真实 china_dem_l12 重采样到 7.5as
-/// 网格（真实地形内容 + 真实 7.5as 块数/压缩语义），近似可靠（field build 耗时
-/// 由块数/解压量决定，与地形内容几乎无关）。
-/// 备用地形性能对比（gmted2010 全球 7.5as，2.31GB）——**不加入默认测试流程**
-/// （主管 2026-08-10：gmted2010_7p5as_global.z19.arpack 为备用地形数据，本身
-/// 不需要加入测试流程；且每次循环读 2.31GB × 6 次拖慢全量测试 ~8min）。
-/// 需要手动验证时：`cargo test -p aircraft-router-planner-cli --test
-/// field_build_compare gmted_7p5as_speed_comparison -- --ignored`。
-#[test]
-#[ignore]
-fn gmted_7p5as_speed_comparison() {
-    let Some(src10) = load_real() else {
-        eprintln!("[compare] SKIP: china_dem_l12.arpack not found");
-        return;
-    };
-    eprintln!("[compare] 10as terrain: {}", src10.resolution_desc());
-    let (min_lon, min_lat, span) = zigzag11_region();
-    let cell_75 = 7.5 / 3600.0; // 0.0020833°
-    // 真实 GMTED2010（2026-08-07 转换成功 2.311GB）→ 优先用真实数据验证；
-    // 文件不存在（未转换/被删）→ fallback：china_dem_l12 重采样 7.5as 合成近似。
-    let gmted_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("data/gmted2010_7p5as_global.z19.arpack");
-    // 仅用于 if 分支内打印 res；对比循环每轮用 bytes 重新 parse（冷缓存公平对比）
-    let (_src75, bytes) = if gmted_path.exists() {
-        let bytes = std::fs::read(&gmted_path).expect("read real gmted2010");
-        let s = BuiltinSource::parse(&bytes).expect("parse real gmted2010");
-        eprintln!(
-            "[compare] 7.5as terrain (REAL gmted2010): {}",
-            s.resolution_desc()
-        );
-        (s, bytes)
-    } else {
-        eprintln!(
-            "[compare] gmted2010 not found -> fallback: resample china_dem_l12 to 7.5as (synth)"
-        );
-        let n = (span / cell_75).ceil() as usize; // ~6370
-        eprintln!(
-            "[compare] 7.5as grid: {n}x{n} = {} cells (vs 10as {:.0} cells)",
-            n * n,
-            (span / (10.0 / 3600.0)).powi(2)
-        );
-        // 1. 用 10as 源无锁重采样生成 7.5as 网格（真实地形内容；min_lon/min_lat/span 复用顶部）
-        let mut h = vec![0i16; n * n];
-        {
-            let local = src10.prefetch_lonlat(min_lon, min_lat, min_lon + span, min_lat + span);
-            for r in 0..n {
-                let lat = min_lat + (r as f64 + 0.5) * cell_75;
-                for c in 0..n {
-                    let lon = min_lon + (c as f64 + 0.5) * cell_75;
-                    h[r * n + c] = match src10.sample_local(&local, lon, lat) {
-                        Sample::Land(v) | Sample::Lake(v) => v as i16,
-                        Sample::Water => 0,
-                        Sample::NoData | Sample::OutOfBounds => -32768,
-                    };
-                }
-            }
-        }
-        // 2. 写成 ARPK1（7.5as）
-        let bytes = write_pack_raw(
-            n,
-            n,
-            min_lon,
-            min_lat,
-            cell_75,
-            cell_75,
-            1.0,
-            true,
-            -32768,
-            "gmted-7p5as-synth(resampled-china)",
-            &h,
-        );
-        drop(h);
-        let src75 = BuiltinSource::parse(&bytes).expect("7.5as synth parse");
-        eprintln!("[compare] 7.5as terrain: {}", src75.resolution_desc());
-        (src75, bytes)
-    };
-    // 3. 冷缓存公平对比：10as vs 7.5as（par_local，每轮新实例交替取 min）
-    let src10_bytes = std::fs::read(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("data/china_dem_l12.arpack"),
-    )
-    .expect("re-read 10as");
-    let mut t10_best = f64::INFINITY;
-    let mut t75_best = f64::INFINITY;
-    for round in 0..3 {
-        if round % 2 == 0 {
-            let s10 = BuiltinSource::parse(&src10_bytes).expect("parse");
-            let tt = Instant::now();
-            let _ = build_par_local(&s10, min_lon, min_lat, span, 1024);
-            t10_best = t10_best.min(tt.elapsed().as_secs_f64() * 1000.0);
-            let s75 = BuiltinSource::parse(&bytes).expect("parse");
-            let tt = Instant::now();
-            let _ = build_par_local(&s75, min_lon, min_lat, span, 1024);
-            t75_best = t75_best.min(tt.elapsed().as_secs_f64() * 1000.0);
-        } else {
-            let s75 = BuiltinSource::parse(&bytes).expect("parse");
-            let tt = Instant::now();
-            let _ = build_par_local(&s75, min_lon, min_lat, span, 1024);
-            t75_best = t75_best.min(tt.elapsed().as_secs_f64() * 1000.0);
-            let s10 = BuiltinSource::parse(&src10_bytes).expect("parse");
-            let tt = Instant::now();
-            let _ = build_par_local(&s10, min_lon, min_lat, span, 1024);
-            t10_best = t10_best.min(tt.elapsed().as_secs_f64() * 1000.0);
-        }
-    }
-    eprintln!(
-        "[compare] field build (1024x1024, cold-cache, par+local): 10as={:.1}ms 7.5as={:.1}ms 增加={:.1}ms ({:.1}%)",
-        t10_best,
-        t75_best,
-        t75_best - t10_best,
-        (t75_best / t10_best - 1.0) * 100.0
-    );
 }
 
 /// 合成 ARPK1 数据（512×512，cell 0.01°，正弦地形 + NoData 空洞；单块 raw）。
@@ -420,9 +306,10 @@ fn field_build_bit_exact_synthetic() {
 
 #[test]
 fn field_build_real_data() {
-    // 真实 china_dem_l12.arpack：1024² 正确性 + 性能对比（文件缺失则跳过）。
+    // 真实 east_asia_7p5as.arpack（发布版默认地形）：1024² 正确性 + 性能对比
+    // （文件缺失则跳过）。2026-08-10 起 china_dem_l12 / gmted2010 退出本测试流程。
     let Some(src) = load_real() else {
-        eprintln!("[compare] SKIP: china_dem_l12.arpack not found (CI 环境跳过性能对比)");
+        eprintln!("[compare] SKIP: east_asia_7p5as.arpack not found (CI 环境跳过性能对比)");
         return;
     };
     eprintln!("[compare] terrain: {}", src.resolution_desc());
@@ -433,7 +320,7 @@ fn field_build_real_data() {
     // 每轮交替 A/B 各用新解析实例（cache 空），取各自 min——消除预热/顺序偏差。
     let (min_lon, min_lat, span) = zigzag11_region();
     let bytes = std::fs::read(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("data/china_dem_l12.arpack"),
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("data/east_asia_7p5as.arpack"),
     )
     .expect("re-read real arpack");
     let mut s_best = f64::INFINITY;

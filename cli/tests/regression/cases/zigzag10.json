@@ -129,7 +129,7 @@
     "obstacles": [],
     "terrain": {
       "source": "path",
-      "path": "phase0/data/pending/china_dem_l12.arpack"
+      "path": "data/east_asia_7p5as.arpack"
     },
     "parameters": {
       "p_cross": 0.9

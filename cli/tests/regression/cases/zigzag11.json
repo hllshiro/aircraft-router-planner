@@ -24,7 +24,7 @@
       {"id": "rz_1786063238380", "zone_type": "restricted", "shape": "circle", "geometry": {"center": [121.26755763007444,36.45205419617851], "radius_km": 50}, "alt_min_m": 6000, "alt_max_m": 12000, "height_semantics": "msl"}
     ],
     "obstacles": [],
-    "terrain": {"source": "path", "path": "phase0/data/pending/china_dem_l12.arpack"},
+    "terrain": {"source": "path", "path": "data/east_asia_7p5as.arpack"},
     "parameters": {"p_cross": 0.9}
   }
 }

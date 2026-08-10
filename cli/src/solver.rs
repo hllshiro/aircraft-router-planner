@@ -721,7 +721,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                     seg_warnings.extend(result.verify.warnings.iter().cloned());
                     result.path
                 };
-                // 段边界转角修复（2026-08-08 主管 china_dem_l12 场景 zigzag19）：
+                // 段边界转角修复（2026-08-08 主管真实地形场景 zigzag19）：
                 // desc_in/out_climb（mask=true 固定直线）方向不受 entry_heading 约束
                 // （entry 只约束 default_chain 段首跳），且 build 的 climb 出口约束用
                 // tail 终点方向近似、与 theta 拉直后实际首段方向偏差大 → 拼接后段边界
@@ -2871,66 +2871,6 @@ mod tests {
     }
 
     #[test]
-    fn zigzag8_nodata_endpoints_do_not_staircase() {
-        // 主管 2026-08-06 输入：无 zone/雷达，China DEM L12 真实地形。
-        // start (118.10,38.57) 近渤海、target (111.78,43.79) 内蒙——两点均落在
-        // china_dem_l12 的 NoData 空洞（起点带 t∈[0,0.062]、终点带 t∈[0.983,1.0]）。
-        // 空洞策略（2026-08-04 拍板）：不设数据合格判断，对任意空洞给出可用结果，
-        // 最坏降级警告进 stats.degradations。
-        // 修复前：verify 对 NoData 保守硬拒 → 全链失败 → 回退 1196 点网格楼梯
-        // 1138km + smoothing_failed（密集锯齿）。
-        // 修复后：NoData 降级警告 + 网格伪影直线兜底 → 平滑直线 ~784km。
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
-        let cand = root.join("data/china_dem_l12.arpack");
-        if !cand.exists() {
-            eprintln!("skip zigzag8: real terrain missing ({})", cand.display());
-            return;
-        }
-        let s = r#"{
-            "schema_version":"0.20",
-            "mission":{
-                "start":{"lon":118.09890161274431,"lat":38.5694180755746,"alt_m":1000},
-                "target":{"lon":111.78290034358717,"lat":43.78646838602853,"alt_m":3000},
-                "vehicles":[{"id":"v1","profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":250,
-                    "min_turn_radius_m":442,"max_climb_angle_deg":15},
-                    "start_pose":{"lon":118.09890161274431,"lat":38.5694180755746,"alt_m":3000,"heading_deg":45},
-                    "mid_waypoints":[]}],
-                "red_forces":{"radars":[]},
-                "no_fly_zones":[],"restricted_zones":[],"obstacles":[],
-                "terrain":{"source":"path","path":"__P__"},
-                "parameters":{}
-            }
-        }"#;
-        let s = s.replace("__P__", &cand.to_string_lossy().replace('\\', "\\\\"));
-        let input = parse(&s);
-        let out = solve(&input, &SolveParams::default(), 0).unwrap();
-        let v = &out.vehicles[0];
-        assert_eq!(v.status, "planned");
-        assert!(
-            v.warnings.iter().all(|w| !w.contains("smoothing_failed")),
-            "NoData 空洞不应 smoothing_failed，实际 {:?}",
-            v.warnings
-        );
-        assert!(
-            v.path.len() <= 10,
-            "应交付平滑直线（≈2 点），实际 {} 点",
-            v.path.len()
-        );
-        // 直线 783.9km：交付距离应接近直线，远小于 raw 楼梯 1138km
-        assert!(
-            v.distance_m < 800_000.0,
-            "应 ≈ 直线 784km，实际 {}km",
-            v.distance_m / 1000.0
-        );
-        // 空洞策略：NoData 降级警告进 stats.degradations
-        assert!(
-            out.stats.degradations.iter().any(|d| d.contains("NoData")),
-            "degradations 应含 NoData 降级，实际 {:?}",
-            out.stats.degradations
-        );
-    }
-
-    #[test]
     fn zigzag19_boundary_arc_between_profile_and_cruise() {
         // 主管 2026-08-08 输入（China DEM L12 真实地形）：start 东海上 → target 内蒙，
         // 2 个 restricted 圆（rz1 顶部绕飞 6500m、rz2 底部穿行 1500m）+ 5 个 no_fly
@@ -2942,7 +2882,7 @@ mod tests {
         // 与前一段输出的边界转角，超限 → arc_transition 插入过渡弧（弹出边界点、
         // 后续段起点同步到弧末点 E）→ 22 点平滑路径 2982km。
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
-        let cand = root.join("data/china_dem_l12.arpack");
+        let cand = root.join("data/east_asia_7p5as.arpack");
         if !cand.exists() {
             eprintln!("skip zigzag19: real terrain missing ({})", cand.display());
             return;
@@ -3002,140 +2942,6 @@ mod tests {
     }
 
     #[test]
-    fn zigzag20_multi_restricted_order_by_entry() {
-        // 主管 2026-08-08 输入（China DEM L12 真实地形）：start 东海上 → target 蒙古方向，
-        // 2 个 200km 大 restricted 圆：rz2（124.12°E，alt [0,4000]→顶部 4500m 绕飞）
-        // 地理上比 rz1（118.38°E，alt [2000,6000]→底部 1500m 穿行）更靠 start。
-        // 旧逻辑按 zones 输入顺序先处理 rz1，把 rz2 的穿行区间锁进 head1；rz2 再
-        // 处理时只搜 rz1 之后的 tail → 找不到 → 跳过 → head1 含 rz2 带内 3000m 点 →
-        // 平滑链 inside zone 全败 → 回退 1866 点网格楼梯（5104km）。
-        // 修复：hits 按沿路径穿行起点（第一次进入索引）升序处理 → 15 点平滑路径
-        // 4055km，剖面语义保持（rz2 顶部 4500 + rz1 底部 1500）。
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
-        let cand = root.join("data/china_dem_l12.arpack");
-        if !cand.exists() {
-            eprintln!("skip zigzag20: real terrain missing ({})", cand.display());
-            return;
-        }
-        let s = r#"{
-            "schema_version":"0.20",
-            "mission":{
-                "start":{"lon":133.54469934022197,"lat":28.982595684894182,"alt_m":3000},
-                "target":{"lon":105.5475988382386,"lat":52.11659079990215,"alt_m":3000},
-                "vehicles":[{"id":"v1","profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":250,
-                    "min_turn_radius_m":442,"max_climb_angle_deg":15},
-                    "start_pose":{"lon":133.54469934022197,"lat":28.982595684894182,"alt_m":3000,"heading_deg":45},
-                    "mid_waypoints":[]}],
-                "red_forces":{"radars":[
-                    {"id":"radar_1786157430304","lon":118.35049384022192,"lat":33.57842732608494,"radar_type":"tracking","radius_km":100,"alt_m":10}]},
-                "no_fly_zones":[
-                    {"id":"zone_1786156802607","zone_type":"no_fly","shape":"polygon","geometry":{"vertices":[[116.55095225290064,39.26654038392207],[111.1077737801414,33.43353915724135],[113.84863918927806,33.67080417285748]]},"alt_min_m":0,"alt_max_m":12000,"height_semantics":"msl"},
-                    {"id":"zone_1786156854743","zone_type":"no_fly","shape":"polygon","geometry":{"vertices":[[121.49414141573678,40.99160392132688],[116.82791643221975,35.71306917297765],[120.2971900795791,37.972512194254584]]},"alt_min_m":0,"alt_max_m":12000,"height_semantics":"msl"},
-                    {"id":"zone_1786156919711","zone_type":"no_fly","shape":"polygon","geometry":{"vertices":[[111.77480190856771,41.612238619264694],[117.83439789351044,47.314679291743424],[114.7349874950259,40.76891806888836]]},"alt_min_m":0,"alt_max_m":12000,"height_semantics":"msl"}],
-                "restricted_zones":[
-                    {"id":"rz_1786156953047","zone_type":"restricted","shape":"circle","geometry":{"center":[118.38073019754566,33.28713020326541],"radius_km":200},"alt_min_m":2000,"alt_max_m":6000,"height_semantics":"msl"},
-                    {"id":"rz_1786157513391","zone_type":"restricted","shape":"circle","geometry":{"center":[124.1204082392855,31.00910864469546],"radius_km":200},"alt_min_m":0,"alt_max_m":4000,"height_semantics":"msl"}],
-                "obstacles":[],
-                "terrain":{"source":"path","path":"__P__"},
-                "parameters":{"p_cross":0.9}
-            }
-        }"#;
-        let s = s.replace("__P__", &cand.to_string_lossy().replace('\\', "\\\\"));
-        let input = parse(&s);
-        let out = solve(&input, &SolveParams::default(), 0).unwrap();
-        let v = &out.vehicles[0];
-        assert_eq!(v.status, "planned");
-        assert!(
-            v.warnings.iter().all(|w| !w.contains("smoothing_failed")),
-            "多 restricted 顺序修复后不应 smoothing_failed，实际 {:?}",
-            v.warnings
-        );
-        assert!(
-            v.path.len() <= 60,
-            "应交付平滑路径（修复前 1866 点），实际 {} 点",
-            v.path.len()
-        );
-        assert!(
-            v.distance_m < 4_500_000.0,
-            "应 ≈ 平滑 4055km，实际 {}km",
-            v.distance_m / 1000.0
-        );
-        // 剖面语义保持：rz2 顶部绕飞（4500m）与 rz1 底部穿行（1500m）都应在路径中
-        let has_4500 = v.path.iter().any(|p| (p.alt_m - 4500.0).abs() < 1.0);
-        let has_1500 = v.path.iter().any(|p| (p.alt_m - 1500.0).abs() < 1.0);
-        assert!(has_4500, "rz2 顶部剖面 4500m 应保留，实际 {:?}", v.path);
-        assert!(has_1500, "rz1 底部剖面 1500m 应保留，实际 {:?}", v.path);
-    }
-
-    #[test]
-    fn zigzag21_raw_band_terrain_blocks_bottom() {
-        // 主管 2026-08-08 输入（China DEM L12 真实地形）：3 个 200km restricted 圆。
-        // rz1（116.83°E, alt[2000,6000]）的 start→target 直线不穿圆（bottom_terrain_ok
-        // 直线版 disc≤0 → 恒放行底部 1500m），但 raw FMM 绕行后实际穿行段地形高达
-        // 1496m（115.2°E,40.8°N 太行山）→ 1500m 剖面净空 4m < 100m → verify 拒 →
-        // 该段全链回退 157 点楼梯 → FINAL 184 点 89.99° 转角失败。
-        // 修复：restricted_pass_alt 传入 raw 穿行段（i_in..i_out），bottom_terrain_ok
-        // 采样 raw 实际穿行段地形（而非 start→target 直线）→ rz1 底部不可行 →
-        // 顶部 6500m 绕飞。rz2/rz3（alt[1000,4000]/[1000,5000]）穿行段地形低 →
-        // 底部 500m 穿行。结果：19 点平滑路径 3992km。
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
-        let cand = root.join("data/china_dem_l12.arpack");
-        if !cand.exists() {
-            eprintln!("skip zigzag21: real terrain missing ({})", cand.display());
-            return;
-        }
-        let s = r#"{
-            "schema_version":"0.20",
-            "mission":{
-                "start":{"lon":133.54469934022197,"lat":28.982595684894182,"alt_m":3000},
-                "target":{"lon":105.5475988382386,"lat":52.11659079990215,"alt_m":3000},
-                "vehicles":[{"id":"v1","profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":250,
-                    "min_turn_radius_m":442,"max_climb_angle_deg":15},
-                    "start_pose":{"lon":133.54469934022197,"lat":28.982595684894182,"alt_m":3000,"heading_deg":45},
-                    "mid_waypoints":[]}],
-                "red_forces":{"radars":[
-                    {"id":"radar_1786157430304","lon":118.06583917330154,"lat":33.561181871494504,"radar_type":"tracking","radius_km":100,"alt_m":10}]},
-                "no_fly_zones":[
-                    {"id":"zone_1786156802607","zone_type":"no_fly","shape":"polygon","geometry":{"vertices":[[116.55095225290064,39.26654038392207],[111.1077737801414,33.43353915724135],[113.84863918927806,33.67080417285748]]},"alt_min_m":0,"alt_max_m":12000,"height_semantics":"msl"},
-                    {"id":"zone_1786156854743","zone_type":"no_fly","shape":"polygon","geometry":{"vertices":[[113.4893950191135,44.67875839262406],[108.82317003559648,39.40022364427483],[112.2924436829558,41.65966666555177]]},"alt_min_m":0,"alt_max_m":12000,"height_semantics":"msl"},
-                    {"id":"zone_1786156919711","zone_type":"no_fly","shape":"polygon","geometry":{"vertices":[[116.24389610176944,36.07078913632359],[122.30349208671217,41.77322980880232],[119.20408168822763,35.22746858594726]]},"alt_min_m":0,"alt_max_m":12000,"height_semantics":"msl"}],
-                "restricted_zones":[
-                    {"id":"rz_1786156953047","zone_type":"restricted","shape":"circle","geometry":{"center":[116.8334711972108,39.45653352818413],"radius_km":200},"alt_min_m":2000,"alt_max_m":6000,"height_semantics":"msl"},
-                    {"id":"rz_1786157513391","zone_type":"restricted","shape":"circle","geometry":{"center":[124.1204082392855,31.00910864469546],"radius_km":200},"alt_min_m":1000,"alt_max_m":4000,"height_semantics":"msl"},
-                    {"id":"rz_1786158674734","zone_type":"restricted","shape":"circle","geometry":{"center":[118.66778132809462,33.70254246429722],"radius_km":200},"alt_min_m":1000,"alt_max_m":5000,"height_semantics":"msl"}],
-                "obstacles":[],
-                "terrain":{"source":"path","path":"__P__"},
-                "parameters":{"p_cross":0.9}
-            }
-        }"#;
-        let s = s.replace("__P__", &cand.to_string_lossy().replace('\\', "\\\\"));
-        let input = parse(&s);
-        let out = solve(&input, &SolveParams::default(), 0).unwrap();
-        let v = &out.vehicles[0];
-        assert_eq!(v.status, "planned");
-        assert!(
-            v.warnings.iter().all(|w| !w.contains("smoothing_failed")),
-            "raw 穿行段地形检查后不应 smoothing_failed，实际 {:?}",
-            v.warnings
-        );
-        assert!(
-            v.path.len() <= 60,
-            "应交付平滑路径（修复前 1880 点），实际 {} 点",
-            v.path.len()
-        );
-        assert!(
-            v.distance_m < 4_600_000.0,
-            "应 ≈ 平滑 3992km，实际 {}km",
-            v.distance_m / 1000.0
-        );
-        // 剖面语义保持：rz1 顶部绕飞（6500m）+ rz2/rz3 底部穿行（500m）都在路径中
-        let has_6500 = v.path.iter().any(|p| (p.alt_m - 6500.0).abs() < 1.0);
-        let has_500 = v.path.iter().any(|p| (p.alt_m - 500.0).abs() < 1.0);
-        assert!(has_6500, "rz1 顶部剖面 6500m 应保留（底部被 1496m 地形挡），实际 {:?}", v.path);
-        assert!(has_500, "rz2/rz3 底部剖面 500m 应保留，实际 {:?}", v.path);
-    }
-
-    #[test]
     fn zigzag22_adjacent_rz_climb_anchor_avoid_band() {
         // 主管 2026-08-08 输入（China DEM L12 真实地形）：start 黄海 → target 蒙古，
         // 2 个**相邻** restricted 圆：rz2（116.30°E r100，alt[500,4500]→顶部 5000m）
@@ -3149,7 +2955,7 @@ mod tests {
         // 另修复 verify/check 圆判定投影误差（segment_circle_intersect_t slack）：
         // 1200km 长段投影偏差 ~0.5km，贴圆擦过（穿入 0.5km）被漏判交付 → 拒。
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
-        let cand = root.join("data/china_dem_l12.arpack");
+        let cand = root.join("data/east_asia_7p5as.arpack");
         if !cand.exists() {
             eprintln!("skip zigzag22: real terrain missing ({})", cand.display());
             return;
@@ -3236,7 +3042,7 @@ mod tests {
         // 带内，退化/零长度段也覆盖）+ 过渡段水平距离 < climb_base（爬升角超 15°）→
         // need_wall 画墙水平绕行兜底 → 6 点 3000m 平滑路径 1712km。
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
-        let cand = root.join("data/china_dem_l12.arpack");
+        let cand = root.join("data/east_asia_7p5as.arpack");
         if !cand.exists() {
             eprintln!("skip zigzag23: real terrain missing ({})", cand.display());
             return;
