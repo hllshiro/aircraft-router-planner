@@ -125,6 +125,24 @@ const ZONE_COLORS: Record<string, string> = {
   obstacle: '#ff4455',
 };
 
+/** 地形 z 夸张系数（与 TerrainMesh 共用，Scene3D 统一计算后传给所有含高度对象）：
+ * 无地形数据 → 1（航路绝对高度显示）；有 → 场景跨度/高度范围 × 0.08，clamp [3, 20]。
+ * 主管 2026-08-10：原 ×0.25 clamp [10,60] 过大不协调 → 降为 ×0.08 clamp [3,20]。 */
+function computeZScale(terrainData: TerrainInfo | null, geoRef: GeoRef): number {
+  if (!terrainData) return 1;
+  const hs = terrainData.heights.filter((h): h is number => h !== null);
+  if (!hs.length) return 1;
+  const minH = Math.min(...hs);
+  const maxH = Math.max(...hs);
+  const lat0 = (geoRef.lat * Math.PI) / 180;
+  const spanMeters = Math.hypot(
+    (terrainData.max_lon - terrainData.min_lon) * 111320 * Math.cos(lat0),
+    (terrainData.max_lat - terrainData.min_lat) * 110574,
+  );
+  const range = Math.max(maxH - minH, 1);
+  return Math.min(Math.max((spanMeters / range) * 0.08, 3), 20);
+}
+
 /** 每机自定义目标（target_ref = "lon,lat[,alt]"）；缺省 / "mission.target" → null */
 function parseVehicleTargetRef(
   v: VehicleInput,
@@ -158,7 +176,16 @@ export function Scene3D({
   onZoneMove,
   activeClickMode,
 }: Scene3DProps) {
-  const targetPos = useMemo(() => geoToLocal(target, geoRef), [target, geoRef]);
+  // 统一 z 夸张系数（地形 + 航路 + 标记 + zone 高度共用，保证同一尺度）
+  const zScale = useMemo(
+    () => computeZScale(terrainData, geoRef),
+    [terrainData, geoRef],
+  );
+
+  const targetPos = useMemo(
+    () => geoToLocal(target, geoRef, zScale),
+    [target, geoRef, zScale],
+  );
 
   // 拖动物体（雷达/zone）状态：拖动期间禁用 OrbitControls，结束 400ms 内抑制地面点击
   const [dragActive, setDragActive] = useState(false);
@@ -170,7 +197,7 @@ export function Scene3D({
 
   const radarMeshes = radars.map((r) => ({
     id: r.id,
-    center: geoPointToLocal(r.lon, r.lat, r.alt_m ?? 10, geoRef),
+    center: geoPointToLocal(r.lon, r.lat, r.alt_m ?? 10, geoRef, zScale),
     radiusM: r.radius_km * 1000,
   }));
 
@@ -178,8 +205,9 @@ export function Scene3D({
     id: z.id,
     color: ZONE_COLORS[z.zone_type] ?? '#ff8800',
     boundary: zoneBoundaryLocal(z, geoRef),
-    altMin: z.alt_min_m,
-    altMax: z.alt_max_m,
+    // zone 高度范围（相对海平面）乘同一 zScale，与地形/航路同尺度
+    altMin: z.alt_min_m * zScale,
+    altMax: z.alt_max_m * zScale,
   }));
 
   // 多边形 zone 顶点（可视化编辑锚点）
@@ -189,25 +217,25 @@ export function Scene3D({
         if (z.shape !== 'polygon') return [];
         return (z.geometry as { vertices: [number, number][] }).vertices.map(
           ([lon, lat]) => {
-            const p = geoPointToLocal(lon, lat, z.alt_min_m, geoRef);
+            const p = geoPointToLocal(lon, lat, z.alt_min_m, geoRef, zScale);
             return { id: `${z.id}_${lon}_${lat}`, pos: p, color: z.zone_type };
           },
         );
       }),
-    [zones, geoRef],
+    [zones, geoRef, zScale],
   );
 
-  // 车辆路径（输出，经纬高 → 局部平面）
+  // 车辆路径（输出，经纬高 → 局部平面；高度乘 zScale 贴合地形表面）
   const vehicleLines = useMemo(() => {
     if (!results) return [];
     return results.map((v) => ({
       id: v.id,
       status: v.status,
       points: v.path.map((p) =>
-        geoPointToLocal(p.x, p.y, p.alt_m, geoRef),
+        geoPointToLocal(p.x, p.y, p.alt_m, geoRef, zScale),
       ),
     }));
-  }, [results, geoRef]);
+  }, [results, geoRef, zScale]);
 
   // 必经点（输入）
   const midPoints = useMemo(
@@ -215,10 +243,10 @@ export function Scene3D({
       vehicles.flatMap((v) =>
         (v.mid_waypoints ?? []).map((m) => ({
           id: v.id,
-          pos: geoToLocal(m, geoRef),
+          pos: geoToLocal(m, geoRef, zScale),
         })),
       ),
-    [vehicles, geoRef],
+    [vehicles, geoRef, zScale],
   );
 
   // 每机自定义目标（非 mission.target 的 target_ref → 红色标记，与全局蓝色目标区分）
@@ -226,9 +254,9 @@ export function Scene3D({
     () =>
       vehicles.flatMap((v) => {
         const t = parseVehicleTargetRef(v, target);
-        return t ? [{ id: v.id, pos: geoToLocal(t, geoRef) }] : [];
+        return t ? [{ id: v.id, pos: geoToLocal(t, geoRef, zScale) }] : [];
       }),
-    [vehicles, target, geoRef],
+    [vehicles, target, geoRef, zScale],
   );
 
   return (
@@ -251,7 +279,7 @@ export function Scene3D({
         enabled={!dragActive}
       />
 
-      {terrainData && <TerrainMesh data={terrainData} geoRef={geoRef} />}
+      {terrainData && <TerrainMesh data={terrainData} geoRef={geoRef} zScale={zScale} />}
 
       <Grid
         args={[100000, 100000, 20, 20]}
@@ -275,6 +303,7 @@ export function Scene3D({
             v.start_pose.lat,
             v.start_pose.alt_m,
             geoRef,
+            zScale,
           )}
           heading={v.start_pose.heading_deg ?? 45}
         />

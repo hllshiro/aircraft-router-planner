@@ -162,15 +162,23 @@ export interface GeoRef {
   lat: number;
 }
 
-export function geoToLocal(wp: Waypoint, ref: GeoRef): Vec3 {
+export function geoToLocal(wp: Waypoint, ref: GeoRef, zScale = 1): Vec3 {
   const lat0 = (ref.lat * Math.PI) / 180;
   const x = (wp.lon - ref.lon) * 111320 * Math.cos(lat0);
   const y = (wp.lat - ref.lat) * 110574;
-  return [x, y, wp.alt_m];
+  // zScale：地形夸张系数统一作用于所有含高度对象（航路/标记/zone），
+  // 保证航路与地形表面同一尺度（否则航路绝对高度 vs 夸张地形 → 视觉钻入山中）
+  return [x, y, wp.alt_m * zScale];
 }
 
-export function geoPointToLocal(lon: number, lat: number, alt_m: number, ref: GeoRef): Vec3 {
-  return geoToLocal({ lon, lat, alt_m }, ref);
+export function geoPointToLocal(
+  lon: number,
+  lat: number,
+  alt_m: number,
+  ref: GeoRef,
+  zScale = 1,
+): Vec3 {
+  return geoToLocal({ lon, lat, alt_m }, ref, zScale);
 }
 
 export function localToGeo(v: Vec3, ref: GeoRef): Waypoint {
