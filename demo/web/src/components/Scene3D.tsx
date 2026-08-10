@@ -127,7 +127,6 @@ const ZONE_COLORS: Record<string, string> = {
 
 export function Scene3D({
   geoRef,
-  start,
   target,
   vehicles,
   radars,
@@ -140,7 +139,6 @@ export function Scene3D({
   onZoneMove,
   activeClickMode,
 }: Scene3DProps) {
-  const startPos = useMemo(() => geoToLocal(start, geoRef), [start, geoRef]);
   const targetPos = useMemo(() => geoToLocal(target, geoRef), [target, geoRef]);
 
   // 拖动物体（雷达/zone）状态：拖动期间禁用 OrbitControls，结束 400ms 内抑制地面点击
@@ -239,7 +237,19 @@ export function Scene3D({
         infiniteGrid
       />
 
-      <StartMarker position={startPos} heading={vehicles[0]?.start_pose.heading_deg ?? 45} />
+      {/* 每机独立起点 marker（vehicles[].start_pose；多机时各自位置/航向） */}
+      {vehicles.map((v) => (
+        <StartMarker
+          key={v.id}
+          position={geoPointToLocal(
+            v.start_pose.lon,
+            v.start_pose.lat,
+            v.start_pose.alt_m,
+            geoRef,
+          )}
+          heading={v.start_pose.heading_deg ?? 45}
+        />
+      ))}
       <TargetZone center={targetPos} />
 
       {radarMeshes.map((r) => (

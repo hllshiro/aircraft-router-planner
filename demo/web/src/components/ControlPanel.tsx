@@ -43,17 +43,49 @@ export function ControlPanel({
   const updateTarget = (patch: Partial<Waypoint>) =>
     updateMission({ target: { ...mission.target, ...patch } });
 
-  const updateVehicle = (patch: Partial<VehicleInput>) => {
-    const v = mission.vehicles[0];
-    if (!v) return;
+  const updateVehicleAt = (idx: number, patch: Partial<VehicleInput>) => {
     const vehicles = [...mission.vehicles];
-    vehicles[0] = { ...v, ...patch };
+    vehicles[idx] = { ...vehicles[idx], ...patch };
     updateMission({ vehicles });
   };
-  const updateProfile = (patch: Partial<VehicleInput['profile']>) => {
-    const v = mission.vehicles[0];
-    if (!v) return;
-    updateVehicle({ profile: { ...v.profile, ...patch } });
+  const updateProfileAt = (idx: number, patch: Partial<VehicleInput['profile']>) => {
+    const vehicles = [...mission.vehicles];
+    vehicles[idx] = {
+      ...vehicles[idx],
+      profile: { ...vehicles[idx].profile, ...patch },
+    };
+    updateMission({ vehicles });
+  };
+
+  // 添加飞机：id 递增（v2/v3…），起点默认 = mission.start，机型默认固定翼
+  const addVehicle = () => {
+    const n = mission.vehicles.length + 1;
+    const existing = new Set(mission.vehicles.map((x) => x.id));
+    const id = existing.has(`v${n}`) ? `v${n}_${Date.now() % 10000}` : `v${n}`;
+    const vehicle: VehicleInput = {
+      id,
+      profile: {
+        aircraft_type: 'FIXED_WING',
+        cruise_speed_mps: 250,
+        min_turn_radius_m: 442,
+        max_climb_angle_deg: 15,
+      },
+      start_pose: {
+        lon: mission.start.lon,
+        lat: mission.start.lat,
+        alt_m: mission.start.alt_m,
+        heading_deg: 45,
+      },
+      mid_waypoints: [],
+    };
+    updateMission({ vehicles: [...mission.vehicles, vehicle] });
+  };
+  // 删除飞机：至少保留 1 架
+  const removeVehicleAt = (idx: number) => {
+    if (mission.vehicles.length <= 1) return;
+    updateMission({
+      vehicles: mission.vehicles.filter((_, i) => i !== idx),
+    });
   };
 
   const addRadar = useCallback(() => {
@@ -156,8 +188,6 @@ export function ControlPanel({
       restricted_zones: mission.restricted_zones.filter((z) => z.id !== id),
     });
 
-  const v = mission.vehicles[0];
-
   return (
     <div>
       <h2>AircraftRouterPlanner Demo</h2>
@@ -246,17 +276,34 @@ export function ControlPanel({
         </div>
       </div>
 
-      {/* Vehicle */}
-      <h3>飞行器（vehicles[0]）</h3>
-      {v ? (
-        <>
+      {/* Vehicles（多机：schema 0.20 vehicles 数组，每机独立机型/起点位姿/必经点） */}
+      <h3>飞行器 ({mission.vehicles.length})</h3>
+      {mission.vehicles.map((v, idx) => (
+        <div key={v.id} className="obstacle-item">
+          <div className="obstacle-header">
+            <span>ID</span>
+            <input
+              type="text"
+              value={v.id}
+              style={{ width: 90 }}
+              onChange={(e) => updateVehicleAt(idx, { id: e.target.value })}
+            />
+            <button
+              className="btn-small btn-danger"
+              disabled={mission.vehicles.length <= 1}
+              title={mission.vehicles.length <= 1 ? '至少保留 1 架飞机' : '删除飞机'}
+              onClick={() => removeVehicleAt(idx)}
+            >
+              ✕
+            </button>
+          </div>
           <div className="field-row">
             <div>
               <label>机型</label>
               <select
                 value={v.profile.aircraft_type}
                 onChange={(e) =>
-                  updateProfile({
+                  updateProfileAt(idx, {
                     aircraft_type: e.target.value as 'FIXED_WING' | 'ROTORCRAFT',
                   })
                 }
@@ -271,7 +318,7 @@ export function ControlPanel({
                 type="number"
                 value={v.profile.cruise_speed_mps ?? 250}
                 onChange={(e) =>
-                  updateProfile({ cruise_speed_mps: +e.target.value })
+                  updateProfileAt(idx, { cruise_speed_mps: +e.target.value })
                 }
               />
             </div>
@@ -283,7 +330,7 @@ export function ControlPanel({
                 type="number"
                 value={v.profile.min_turn_radius_m ?? 442}
                 onChange={(e) =>
-                  updateProfile({ min_turn_radius_m: +e.target.value })
+                  updateProfileAt(idx, { min_turn_radius_m: +e.target.value })
                 }
               />
             </div>
@@ -293,7 +340,61 @@ export function ControlPanel({
                 type="number"
                 value={v.profile.max_climb_angle_deg ?? 15}
                 onChange={(e) =>
-                  updateProfile({ max_climb_angle_deg: +e.target.value })
+                  updateProfileAt(idx, { max_climb_angle_deg: +e.target.value })
+                }
+              />
+            </div>
+          </div>
+          <div className="field-row">
+            <div>
+              <label>起点经度</label>
+              <input
+                type="number"
+                step="0.0001"
+                value={v.start_pose.lon}
+                onChange={(e) =>
+                  updateVehicleAt(idx, {
+                    start_pose: { ...v.start_pose, lon: +e.target.value },
+                  })
+                }
+              />
+            </div>
+            <div>
+              <label>起点纬度</label>
+              <input
+                type="number"
+                step="0.0001"
+                value={v.start_pose.lat}
+                onChange={(e) =>
+                  updateVehicleAt(idx, {
+                    start_pose: { ...v.start_pose, lat: +e.target.value },
+                  })
+                }
+              />
+            </div>
+          </div>
+          <div className="field-row">
+            <div>
+              <label>起点高度 (m)</label>
+              <input
+                type="number"
+                value={v.start_pose.alt_m}
+                onChange={(e) =>
+                  updateVehicleAt(idx, {
+                    start_pose: { ...v.start_pose, alt_m: +e.target.value },
+                  })
+                }
+              />
+            </div>
+            <div>
+              <label>航向 (°)</label>
+              <input
+                type="number"
+                value={v.start_pose.heading_deg ?? 45}
+                onChange={(e) =>
+                  updateVehicleAt(idx, {
+                    start_pose: { ...v.start_pose, heading_deg: +e.target.value },
+                  })
                 }
               />
             </div>
@@ -309,7 +410,7 @@ export function ControlPanel({
                   onChange={(e) => {
                     const ms = [...(v.mid_waypoints ?? [])];
                     ms[i] = { ...ms[i], lon: +e.target.value };
-                    updateVehicle({ mid_waypoints: ms });
+                    updateVehicleAt(idx, { mid_waypoints: ms });
                   }}
                   placeholder="lon"
                 />
@@ -320,14 +421,14 @@ export function ControlPanel({
                   onChange={(e) => {
                     const ms = [...(v.mid_waypoints ?? [])];
                     ms[i] = { ...ms[i], lat: +e.target.value };
-                    updateVehicle({ mid_waypoints: ms });
+                    updateVehicleAt(idx, { mid_waypoints: ms });
                   }}
                   placeholder="lat"
                 />
                 <button
                   className="btn-small btn-danger"
                   onClick={() =>
-                    updateVehicle({
+                    updateVehicleAt(idx, {
                       mid_waypoints: (v.mid_waypoints ?? []).filter(
                         (_, j) => j !== i,
                       ),
@@ -342,7 +443,7 @@ export function ControlPanel({
               className="btn-small"
               style={{ marginTop: 4, background: '#333', color: '#e0e0e0' }}
               onClick={() =>
-                updateVehicle({
+                updateVehicleAt(idx, {
                   mid_waypoints: [
                     ...(v.mid_waypoints ?? []),
                     {
@@ -357,10 +458,15 @@ export function ControlPanel({
               + 添加必经点
             </button>
           </div>
-        </>
-      ) : (
-        <div>无飞行器定义</div>
-      )}
+        </div>
+      ))}
+      <button
+        className="btn-small"
+        onClick={addVehicle}
+        style={{ width: '100%', background: '#333', color: '#e0e0e0' }}
+      >
+        + 添加飞机
+      </button>
 
       {/* Terrain */}
       <h3>地形</h3>

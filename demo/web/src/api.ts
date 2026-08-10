@@ -26,16 +26,23 @@ export async function fetchTerrain(
   return data as TerrainInfo;
 }
 
-/** 场景包围盒：start/target 中心，跨度按 start→target 距离自适应（1.4 倍 + 最小 2.5°×2.2°），
- *  覆盖全场景 + 四周余量，避免地形网格只覆盖路径附近（主管 2026-08-06：地形块太小）。 */
+/** 场景包围盒：start/target + 各机起点（vehicles[].start_pose）包围，跨度按
+ *  start→target 距离自适应（1.4 倍 + 最小 2.5°×2.2°），覆盖全场景 + 四周余量，
+ *  避免地形网格只覆盖路径附近（主管 2026-08-06：地形块太小；2026-08-08：多机起点）。 */
 export function sceneBounds(
   config: InputConfig,
 ): [number, number, number, number] {
-  const { start, target } = config.mission;
-  const minLon = Math.min(start.lon, target.lon);
-  const maxLon = Math.max(start.lon, target.lon);
-  const minLat = Math.min(start.lat, target.lat);
-  const maxLat = Math.max(start.lat, target.lat);
+  const { start, target, vehicles } = config.mission;
+  let minLon = Math.min(start.lon, target.lon);
+  let maxLon = Math.max(start.lon, target.lon);
+  let minLat = Math.min(start.lat, target.lat);
+  let maxLat = Math.max(start.lat, target.lat);
+  for (const v of vehicles) {
+    minLon = Math.min(minLon, v.start_pose.lon);
+    maxLon = Math.max(maxLon, v.start_pose.lon);
+    minLat = Math.min(minLat, v.start_pose.lat);
+    maxLat = Math.max(maxLat, v.start_pose.lat);
+  }
   // 跨度 = max(实际距离 × 1.4, 最小 2.5°lon ≈ 220km / 2.2°lat ≈ 245km)
   const spanLon = Math.max((maxLon - minLon) * 1.4, 2.5);
   const spanLat = Math.max((maxLat - minLat) * 1.4, 2.2);
