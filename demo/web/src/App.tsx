@@ -15,11 +15,23 @@ import { planRoute, sceneBounds, fetchTerrain } from './api';
 
 type ClickMode = 'start' | 'target' | 'polygon' | null;
 
+/** 解析 target_ref 当前目标高度（自定义坐标第 3 段；缺省回落 mission.target.alt_m） */
+function currentTargetAlt(v: { target_ref?: string } | undefined, fallback: number): number {
+  if (v?.target_ref) {
+    const parts = v.target_ref.split(',').map((s) => s.trim());
+    const a = +parts[2];
+    if (parts.length >= 3 && Number.isFinite(a)) return a;
+  }
+  return fallback;
+}
+
 export default function App() {
   const [config, setConfig] = useState<InputConfig>(defaultInputConfig);
   const [result, setResult] = useState<PlanResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [clickMode, setClickMode] = useState<ClickMode>(null);
+  // 每机拾取目标下标（clickMode === 'start' | 'target' 时生效；每机独立起终点）
+  const [pickVehicleIdx, setPickVehicleIdx] = useState<number | null>(null);
   // 多边形拾取编辑目标 zone id（clickMode === 'polygon' 时生效）
   const [editingZoneId, setEditingZoneId] = useState<string | null>(null);
   // 地形网格（source=path 时按场景范围采样）
@@ -57,6 +69,14 @@ export default function App() {
     config.mission.start.lat,
     config.mission.target.lon,
     config.mission.target.lat,
+    // 每机起点/目标变化 → bbox 变化 → 地形网格刷新（2026-08-10 每机独立起终点）
+    JSON.stringify(
+      config.mission.vehicles.map((v) => [
+        v.start_pose.lon,
+        v.start_pose.lat,
+        v.target_ref ?? '',
+      ]),
+    ),
   ]);
 
   const handlePlan = async () => {
@@ -136,33 +156,25 @@ export default function App() {
 
   const handleGroundClick = useCallback(
     (wp: Waypoint) => {
-      if (clickMode === 'start') {
-        setConfig((prev) => ({
-          ...prev,
-          mission: {
-            ...prev.mission,
-            start: { ...prev.mission.start, lon: wp.lon, lat: wp.lat },
-            vehicles: prev.mission.vehicles.map((v) => ({
-              ...v,
-              start_pose: {
-                ...v.start_pose,
-                lon: wp.lon,
-                lat: wp.lat,
-              },
-            })),
-          },
-        }));
-        // 起点选定后自动退出拾取模式（避免持续拾取重复触发）
+      // 每机独立起点/终点拾取（2026-08-10）：start → 该机 start_pose；target → 该机
+      // target_ref（"lon,lat,alt" 自定义坐标，核心已支持每机独立目标）
+      if ((clickMode === 'start' || clickMode === 'target') && pickVehicleIdx !== null) {
+        setConfig((prev) => {
+          const vehicles = prev.mission.vehicles.map((v, i) => {
+            if (i !== pickVehicleIdx) return v;
+            if (clickMode === 'start') {
+              return {
+                ...v,
+                start_pose: { ...v.start_pose, lon: wp.lon, lat: wp.lat },
+              };
+            }
+            const alt = currentTargetAlt(v, prev.mission.target.alt_m);
+            return { ...v, target_ref: `${wp.lon},${wp.lat},${alt}` };
+          });
+          return { ...prev, mission: { ...prev.mission, vehicles } };
+        });
         setClickMode(null);
-      } else if (clickMode === 'target') {
-        setConfig((prev) => ({
-          ...prev,
-          mission: {
-            ...prev.mission,
-            target: { ...prev.mission.target, lon: wp.lon, lat: wp.lat },
-          },
-        }));
-        setClickMode(null);
+        setPickVehicleIdx(null);
       } else if (clickMode === 'polygon' && editingZoneId) {
         // 向多边形禁飞区追加顶点
         setConfig((prev) => {
@@ -182,8 +194,10 @@ export default function App() {
         });
       }
     },
-    [clickMode, editingZoneId],
+    [clickMode, editingZoneId, pickVehicleIdx],
   );
+
+  const bbox = sceneBounds(config);
 
   return (
     <div className="app-layout">
@@ -198,13 +212,15 @@ export default function App() {
           onSetClickMode={setClickMode}
           editingZoneId={editingZoneId}
           onEditingZoneId={setEditingZoneId}
+          pickVehicleIdx={pickVehicleIdx}
+          onPickVehicle={setPickVehicleIdx}
         />
       </div>
       <div className="canvas">
         <Scene3D
           geoRef={{
-            lon: config.mission.start.lon,
-            lat: config.mission.start.lat,
+            lon: (bbox[0] + bbox[2]) / 2,
+            lat: (bbox[1] + bbox[3]) / 2,
           }}
           start={config.mission.start}
           target={config.mission.target}

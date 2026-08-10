@@ -38,6 +38,8 @@ export interface VehicleInput {
   id: string;
   profile: VehicleProfile;
   start_pose: VehiclePose;
+  /** 目标引用：缺省 / "mission.target" = mission.target；"lon,lat[,alt]" = 自定义坐标（每机独立终点） */
+  target_ref?: string;
   mid_waypoints?: Waypoint[];
 }
 

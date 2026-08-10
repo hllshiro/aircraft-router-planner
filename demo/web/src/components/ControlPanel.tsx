@@ -19,6 +19,27 @@ interface ControlPanelProps {
   onSetClickMode: (mode: 'start' | 'target' | 'polygon' | null) => void;
   editingZoneId: string | null;
   onEditingZoneId: (id: string | null) => void;
+  /** 每机拾取目标下标（点击设置起/终点，2026-08-10） */
+  pickVehicleIdx: number | null;
+  onPickVehicle: (idx: number | null) => void;
+}
+
+/** 每机当前目标（自定义 target_ref 或 mission.target） */
+function vehicleTarget(v: VehicleInput, missionTarget: Waypoint): Waypoint {
+  const r = (v.target_ref ?? '').trim();
+  if (r && r !== 'mission.target') {
+    const parts = r.split(',').map((s) => s.trim());
+    const lon = +parts[0];
+    const lat = +parts[1];
+    if (Number.isFinite(lon) && Number.isFinite(lat)) {
+      const alt =
+        parts.length >= 3 && Number.isFinite(+parts[2])
+          ? +parts[2]
+          : missionTarget.alt_m;
+      return { lon, lat, alt_m: alt };
+    }
+  }
+  return { ...missionTarget };
 }
 
 export function ControlPanel({
@@ -31,6 +52,8 @@ export function ControlPanel({
   onSetClickMode,
   editingZoneId,
   onEditingZoneId,
+  pickVehicleIdx,
+  onPickVehicle,
 }: ControlPanelProps) {
   const mission = config.mission;
   const update = (patch: Partial<InputConfig>) =>
@@ -192,27 +215,6 @@ export function ControlPanel({
     <div>
       <h2>AircraftRouterPlanner Demo</h2>
       <div className="subtitle">开发期工具 · schema 0.20</div>
-
-      {/* Click mode toggle */}
-      <h3>场景操作（点击地图）</h3>
-      <div className="mode-buttons">
-        <button
-          className={activeClickMode === 'start' ? 'active' : ''}
-          onClick={() =>
-            onSetClickMode(activeClickMode === 'start' ? null : 'start')
-          }
-        >
-          ✈ 起点
-        </button>
-        <button
-          className={activeClickMode === 'target' ? 'active' : ''}
-          onClick={() =>
-            onSetClickMode(activeClickMode === 'target' ? null : 'target')
-          }
-        >
-          🎯 终点
-        </button>
-      </div>
 
       {/* Start */}
       <h3>起点（经纬高）</h3>
@@ -398,6 +400,97 @@ export function ControlPanel({
                 }
               />
             </div>
+          </div>
+          {/* 每机独立目标（2026-08-10：target_ref 自定义坐标；"恢复全局目标" 清除后跟 mission.target） */}
+          <div className="field-row">
+            <div>
+              <label>目标经度</label>
+              <input
+                type="number"
+                step="0.0001"
+                value={vehicleTarget(v, mission.target).lon}
+                onChange={(e) =>
+                  updateVehicleAt(idx, {
+                    target_ref: `${+e.target.value},${vehicleTarget(v, mission.target).lat},${vehicleTarget(v, mission.target).alt_m}`,
+                  })
+                }
+              />
+            </div>
+            <div>
+              <label>目标纬度</label>
+              <input
+                type="number"
+                step="0.0001"
+                value={vehicleTarget(v, mission.target).lat}
+                onChange={(e) =>
+                  updateVehicleAt(idx, {
+                    target_ref: `${vehicleTarget(v, mission.target).lon},${+e.target.value},${vehicleTarget(v, mission.target).alt_m}`,
+                  })
+                }
+              />
+            </div>
+          </div>
+          <div className="field-row">
+            <div>
+              <label>目标高度 (m)</label>
+              <input
+                type="number"
+                value={vehicleTarget(v, mission.target).alt_m}
+                onChange={(e) =>
+                  updateVehicleAt(idx, {
+                    target_ref: `${vehicleTarget(v, mission.target).lon},${vehicleTarget(v, mission.target).lat},${+e.target.value}`,
+                  })
+                }
+              />
+            </div>
+            <div style={{ alignSelf: 'flex-end' }}>
+              <button
+                className="btn-small"
+                title="恢复为全局 mission.target"
+                onClick={() => updateVehicleAt(idx, { target_ref: undefined })}
+              >
+                恢复全局目标
+              </button>
+            </div>
+          </div>
+          {/* 每机独立起终点场景拾取（原全局按钮已转移至此） */}
+          <div className="mode-buttons">
+            <button
+              className={
+                pickVehicleIdx === idx && activeClickMode === 'start'
+                  ? 'active'
+                  : ''
+              }
+              onClick={() => {
+                if (pickVehicleIdx === idx && activeClickMode === 'start') {
+                  onSetClickMode(null);
+                  onPickVehicle(null);
+                } else {
+                  onSetClickMode('start');
+                  onPickVehicle(idx);
+                }
+              }}
+            >
+              🗺 点击设置起点
+            </button>
+            <button
+              className={
+                pickVehicleIdx === idx && activeClickMode === 'target'
+                  ? 'active'
+                  : ''
+              }
+              onClick={() => {
+                if (pickVehicleIdx === idx && activeClickMode === 'target') {
+                  onSetClickMode(null);
+                  onPickVehicle(null);
+                } else {
+                  onSetClickMode('target');
+                  onPickVehicle(idx);
+                }
+              }}
+            >
+              🎯 点击设置终点
+            </button>
           </div>
           <div>
             <label>必经点（mid_waypoints）</label>

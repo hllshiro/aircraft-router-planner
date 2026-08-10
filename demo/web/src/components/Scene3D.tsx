@@ -125,6 +125,25 @@ const ZONE_COLORS: Record<string, string> = {
   obstacle: '#ff4455',
 };
 
+/** 每机自定义目标（target_ref = "lon,lat[,alt]"）；缺省 / "mission.target" → null */
+function parseVehicleTargetRef(
+  v: VehicleInput,
+  missionTarget: Waypoint,
+): Waypoint | null {
+  const r = (v.target_ref ?? '').trim();
+  if (!r || r === 'mission.target') return null;
+  const parts = r.split(',').map((s) => s.trim());
+  if (parts.length < 2) return null;
+  const lon = +parts[0];
+  const lat = +parts[1];
+  if (!Number.isFinite(lon) || !Number.isFinite(lat)) return null;
+  const alt =
+    parts.length >= 3 && Number.isFinite(+parts[2])
+      ? +parts[2]
+      : missionTarget.alt_m;
+  return { lon, lat, alt_m: alt };
+}
+
 export function Scene3D({
   geoRef,
   target,
@@ -202,6 +221,16 @@ export function Scene3D({
     [vehicles, geoRef],
   );
 
+  // 每机自定义目标（非 mission.target 的 target_ref → 红色标记，与全局蓝色目标区分）
+  const vehicleTargets = useMemo(
+    () =>
+      vehicles.flatMap((v) => {
+        const t = parseVehicleTargetRef(v, target);
+        return t ? [{ id: v.id, pos: geoToLocal(t, geoRef) }] : [];
+      }),
+    [vehicles, target, geoRef],
+  );
+
   return (
     <Canvas
       camera={{
@@ -251,6 +280,14 @@ export function Scene3D({
         />
       ))}
       <TargetZone center={targetPos} />
+
+      {/* 每机自定义目标（红色小标记；mission.target 缺省不显示，复用全局 TargetZone） */}
+      {vehicleTargets.map((t) => (
+        <mesh key={t.id} position={[t.pos[0], t.pos[2], t.pos[1]]}>
+          <sphereGeometry args={[250, 32, 16]} />
+          <meshStandardMaterial color="#ff4466" />
+        </mesh>
+      ))}
 
       {radarMeshes.map((r) => (
         <RadarSphere

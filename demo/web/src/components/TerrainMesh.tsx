@@ -39,6 +39,16 @@ export function TerrainMesh({ data, geoRef }: TerrainMeshProps) {
     const minH = hs.length ? Math.min(...hs) : 0;
     const maxH = hs.length ? Math.max(...hs) : 1;
 
+    // z 轴夸张：绝对高度在场景跨度（百 km 级）下不可见，按 (h - minH) × 夸张系数
+    // 映射。系数取场景跨度 / 高度范围 × 0.25，clamp [10, 60]（主管 2026-08-08：
+    // 7.5as 地形看不到特征 → 相对高度 + z 夸张，让山区起伏可辨）。
+    const spanMeters = Math.hypot(
+      (data.max_lon - data.min_lon) * xScale,
+      (data.max_lat - data.min_lat) * yScale,
+    );
+    const range = Math.max(maxH - minH, 1);
+    const zScale = Math.min(Math.max((spanMeters / range) * 0.25, 10), 60);
+
     const geo = new THREE.BufferGeometry();
     const positions = new Float32Array(nx * ny * 3);
     const colors = new Float32Array(nx * ny * 3);
@@ -52,12 +62,12 @@ export function TerrainMesh({ data, geoRef }: TerrainMeshProps) {
           data.min_lon + (i * (data.max_lon - data.min_lon)) / (nx - 1);
         const x = (lon - geoRef.lon) * xScale;
         const h = data.heights[j * nx + i];
-        const z = h === null ? 0 : h;
+        const z = h === null ? 0 : (h - minH) * zScale;
         const idx = j * nx + i;
         positions[idx * 3] = x;
         positions[idx * 3 + 1] = z;
         positions[idx * 3 + 2] = y;
-        const col = heightColor(z, minH, maxH);
+        const col = heightColor(h ?? 0, minH, maxH);
         colors[idx * 3] = col.r;
         colors[idx * 3 + 1] = col.g;
         colors[idx * 3 + 2] = col.b;

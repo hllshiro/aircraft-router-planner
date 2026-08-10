@@ -951,7 +951,8 @@ mod tests {
         let mut h = Vec::with_capacity(rows * cols);
         for r in 0..rows {
             for c in 0..cols {
-                h.push(((r * 37 + c * 11) % 4000 - 2000) as i16); // 变化地形（含负值/零）
+                // 先 % 再转 i16 减偏移：usize 无符号减法在 debug（overflow check）下会下溢
+                h.push((((r * 37 + c * 11) % 4000) as i16) - 2000); // 变化地形（含负值/零）
             }
         }
         let pack = write_pack_raw(
@@ -1008,7 +1009,8 @@ mod tests {
         let mut h = Vec::with_capacity(rows * cols);
         for r in 0..rows {
             for c in 0..cols {
-                h.push(((r * 37 + c * 11) % 4000 - 2000) as i16);
+                // 同 deflate 测试：避免 usize 无符号减法 debug 下溢
+                h.push((((r * 37 + c * 11) % 4000) as i16) - 2000);
             }
         }
         let pack = write_pack_raw(

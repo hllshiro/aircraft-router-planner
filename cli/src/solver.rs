@@ -83,6 +83,8 @@ struct Region {
 struct VehicleSpec {
     id: String,
     start: Geo,
+    /// 每机目标（target_ref 解析；缺省 = mission.target）。
+    target: Geo,
     alt_m: f64,
     /// 机型配置（Phase 4 M4：平滑参数派生输入）。
     profile: crate::config::VehicleProfile,
@@ -166,14 +168,17 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
 
     // 2. 车辆规格（vehicles 空 → 默认单机：mission.start → mission.target）
     let specs: Vec<VehicleSpec> = if input.mission.vehicles.is_empty() {
+        let t = input.mission.target.to_geo()?;
         vec![VehicleSpec {
             id: "v1".into(),
             start: input.mission.start.to_geo()?,
+            target: t,
             alt_m: input.mission.start.alt_m,
             profile: crate::config::VehicleProfile::default(),
             mid_waypoints: Vec::new(),
         }]
     } else {
+        let mission_target = input.mission.target.to_geo()?;
         input
             .mission
             .vehicles
@@ -191,6 +196,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                     id: v.id.clone(),
                     start: Geo::new(v.start_pose.lon, v.start_pose.lat)
                         .map_err(|_| AppError::InputInvalid(InputInvalidReason::IllegalCoordinate))?,
+                    target: resolve_target_ref(v.target_ref.as_deref(), &mission_target)?,
                     alt_m: v.start_pose.alt_m,
                     profile: v.profile.clone(),
                     mid_waypoints: mid,
@@ -351,6 +357,8 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
     let mut out_vehicles = Vec::new();
     let mut fmm_ms = 0.0f64;
     'veh: for v in &specs {
+        // 每机目标（shadow：闭包与剖面切分统一使用 v.target，mission.target 仅作缺省）
+        let target = v.target;
         // 段序列：起点 + 必经点 + 目标
         let mut seg_ends: Vec<Geo> = Vec::with_capacity(v.mid_waypoints.len() + 2);
         seg_ends.push(v.start);
@@ -870,7 +878,29 @@ fn default_mask_candidates() -> Option<PathBuf> {
     candidates.into_iter().find(|c| c.exists())
 }
 
-/// 任务区域：所有起点 + target 的方形包围盒 + 0.15° 缓冲（保证源/目标不贴边）。
+/// 解析每机目标引用（Demo 每机独立终点，主管 2026-08-10）：
+/// 缺省 / "mission.target" → mission.target；"lon,lat[,alt]" → 自定义坐标
+/// （alt 解析但当前仅水平语义，与 M5 mid_waypoints 高度一致）；其他 → 未识别
+/// 引用硬拒（InputInvalid）。
+fn resolve_target_ref(r: Option<&str>, mission_target: &Geo) -> Result<Geo, AppError> {
+    let Some(s) = r.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(*mission_target);
+    };
+    if s == "mission.target" {
+        return Ok(*mission_target);
+    }
+    let parts: Vec<&str> = s.split(',').map(str::trim).collect();
+    if parts.len() == 2 || parts.len() == 3 {
+        if let (Ok(lon), Ok(lat)) = (parts[0].parse::<f64>(), parts[1].parse::<f64>()) {
+            return Geo::new(lon, lat)
+                .map_err(|_| AppError::InputInvalid(InputInvalidReason::IllegalCoordinate));
+        }
+    }
+    Err(AppError::InputInvalid(InputInvalidReason::IllegalCoordinate))
+}
+
+/// 任务区域：所有起点 + 每机目标 + mission.target 的方形包围盒 + 0.15° 缓冲
+/// （保证源/目标不贴边）。
 fn region_of(specs: &[VehicleSpec], target: &Geo) -> Region {
     let mut min_lon = f64::INFINITY;
     let mut max_lon = f64::NEG_INFINITY;
@@ -881,6 +911,10 @@ fn region_of(specs: &[VehicleSpec], target: &Geo) -> Region {
         max_lon = max_lon.max(s.start.lon);
         min_lat = min_lat.min(s.start.lat);
         max_lat = max_lat.max(s.start.lat);
+        min_lon = min_lon.min(s.target.lon);
+        max_lon = max_lon.max(s.target.lon);
+        min_lat = min_lat.min(s.target.lat);
+        max_lat = max_lat.max(s.target.lat);
     }
     min_lon = min_lon.min(target.lon);
     max_lon = max_lon.max(target.lon);
@@ -2606,6 +2640,59 @@ mod tests {
         }
         // 旋翼机（uav2）无 Dubins 链（急转合法）——路径点应不因拟合失败回退
         assert!(out.vehicles[1].warnings.is_empty(), "旋翼机不应有 smoothing 告警");
+    }
+
+    #[test]
+    fn m1_vehicle_per_target_ref() {
+        // Demo 每机独立终点（主管 2026-08-10）：target_ref = "lon,lat[,alt]" 自定义
+        // 坐标 → 每机路径终点 = 各自 target；缺省 / "mission.target" → mission.target；
+        // 未识别引用 → InputInvalid。
+        let s = r#"{
+            "schema_version":"0.20",
+            "mission":{
+                "start":{"lon":115.0,"lat":39.0,"alt_m":3000},
+                "target":{"lon":116.5,"lat":39.9,"alt_m":3000},
+                "terrain":{"source":"none"},
+                "vehicles":[
+                    {"id":"v1","profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":100},
+                     "start_pose":{"lon":115.0,"lat":39.0,"alt_m":3000,"heading_deg":45},
+                     "target_ref":"117.0,40.2,3000"},
+                    {"id":"v2","profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":100},
+                     "start_pose":{"lon":115.5,"lat":39.5,"alt_m":3000,"heading_deg":45},
+                     "target_ref":"mission.target"}
+                ]
+            }
+        }"#;
+        let input = parse(s);
+        let out = solve(&input, &SolveParams::default(), 0).unwrap();
+        assert_eq!(out.vehicles.len(), 2);
+        for v in &out.vehicles {
+            assert_eq!(v.status, "planned");
+        }
+        // v1 自定义目标（117.0, 40.2）；v2 mission.target（116.5, 39.9）
+        let last1 = out.vehicles[0].path.last().unwrap();
+        let last2 = out.vehicles[1].path.last().unwrap();
+        assert!(
+            (last1.x - 117.0).abs() < 0.05 && (last1.y - 40.2).abs() < 0.05,
+            "v1 终点应 ≈ (117.0,40.2)，实际 ({},{})",
+            last1.x,
+            last1.y
+        );
+        assert!(
+            (last2.x - 116.5).abs() < 0.05 && (last2.y - 39.9).abs() < 0.05,
+            "v2 终点应 ≈ mission.target (116.5,39.9)，实际 ({},{})",
+            last2.x,
+            last2.y
+        );
+        // 未识别引用 → input_invalid（非法坐标错误）
+        let bad = s.replace("117.0,40.2,3000", "not-a-ref");
+        let input_bad = parse(&bad);
+        let out_bad = solve(&input_bad, &SolveParams::default(), 0);
+        assert!(
+            out_bad.is_err(),
+            "未识别 target_ref 应 InputInvalid，实际 {:?}",
+            out_bad
+        );
     }
 
     #[test]
