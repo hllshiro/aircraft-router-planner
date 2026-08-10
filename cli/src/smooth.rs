@@ -130,6 +130,7 @@ pub fn theta_star_smooth(
     max_turn_deg: Option<f64>,
     entry_heading: Option<f64>,
     min_r_m: f64,
+    entry_max_deg: f64,
 ) -> Path {
     if path.len() < 3 {
         return path.clone();
@@ -173,9 +174,18 @@ pub fn theta_star_smooth(
                     // 95°：b→target 直接拉直（check 已通过），solver boundary
                     // arc 用标准弧切 b 处理 88.5°（r×tan(44.25°)≈431m，物理
                     // 半径内）。zigzag11 首跳 61.94° 场景仍受约束（<95）。
-                    // >95° 的掉头仍走相邻点（宁丑勿违）。
+                    // 必经点段再放宽（2026-08-10 zigzag27）：主管输入 4 必经点
+                    // 之字形，wp3 处几何需 160° 大转向，95° 仍挡 → 拉直全拒
+                    // → 走相邻点 → 段边界 179.9° 掉头 → arc tan(89.95°)≈114.6
+                    // 发散退化（d_m 截断 0.75×|bc| 后 r_eff≈5m）→ FINAL 拒 →
+                    // 回退 541 点锯齿。必经点是用户硬约束（必须经过），到达后
+                    // 大转向合法（solver 会插切弧处理 160°：r×tan(80°)≈2.5km
+                    // 需 bc 段足够长——SEG3 wp3→wp4 直线 65km 满足）；非必经点
+                    // 段仍 95°（zigzag11 135° 语义保护）。首跳上限直接取
+                    // entry_max_deg（不再乘 1.6——zigzag25 的 min(96,95)=95 语义
+                    // 由非必经点传 95 保持）。
                     let effective_max = if out.len() == 1 && entry_heading.is_some() {
-                        (max_turn * 1.6).min(95.0)
+                        entry_max_deg
                     } else {
                         max_turn
                     };
@@ -617,7 +627,7 @@ mod base_tests {
     fn theta_star_removes_collinear() {
         // 全共线点：check 恒 true → 应压缩为两点
         let p = straight_path(20);
-        let out = theta_star_smooth(&p, &|_, _, _, _, _, _| true, None, None, 0.0);
+        let out = theta_star_smooth(&p, &|_, _, _, _, _, _| true, None, None, 0.0, 95.0);
         assert_eq!(out.len(), 2, "got {}", out.len());
     }
 
@@ -626,7 +636,7 @@ mod base_tests {
         // 中间点直连被 check 拒绝：保留分段
         let p = straight_path(10);
         // 只允许相邻直连（j=i+1 总是允许）
-        let out = theta_star_smooth(&p, &|_, _, _, _, _, _| false, None, None, 0.0);
+        let out = theta_star_smooth(&p, &|_, _, _, _, _, _| false, None, None, 0.0, 95.0);
         assert_eq!(out.len(), p.len(), "got {}", out.len());
     }
 
@@ -643,17 +653,17 @@ mod base_tests {
             PathPoint::new(0.03, 0.03, 100.0),
         ]);
         // 入航向 0°（东），首跳点方向 45°（东北）→ 45° <= 60° 允许
-        let out = theta_star_smooth(&p, &|_, _, _, _, _, _| true, Some(60.0), Some(0.0), 0.0);
+        let out = theta_star_smooth(&p, &|_, _, _, _, _, _| true, Some(60.0), Some(0.0), 0.0, 95.0);
         assert_eq!(out.len(), 2, "45° 首跳应允许: got {}", out.len());
         // 入航向 90°（北），首跳点方向 45° → 差 45° <= 60° 允许
-        let out = theta_star_smooth(&p, &|_, _, _, _, _, _| true, Some(60.0), Some(90.0), 0.0);
+        let out = theta_star_smooth(&p, &|_, _, _, _, _, _| true, Some(60.0), Some(90.0), 0.0, 95.0);
         assert_eq!(out.len(), 2, "45° 差应允许: got {}", out.len());
         // 入航向 180°（西），首跳点方向 45° → 差 135° > 60° → 拒跳，退邻点
         // （首跳被拒但后续跳点仍可拉直 → 3 点：(0,0)→(0.01,0.01)→(0.03,0.03)）
-        let out = theta_star_smooth(&p, &|_, _, _, _, _, _| true, Some(60.0), Some(180.0), 0.0);
+        let out = theta_star_smooth(&p, &|_, _, _, _, _, _| true, Some(60.0), Some(180.0), 0.0, 95.0);
         assert_eq!(out.len(), 3, "135° 首跳应拒: got {}", out.len());
         // 无入航向（起点段）→ 不约束首跳（保持原语义）
-        let out = theta_star_smooth(&p, &|_, _, _, _, _, _| true, Some(60.0), None, 0.0);
+        let out = theta_star_smooth(&p, &|_, _, _, _, _, _| true, Some(60.0), None, 0.0, 95.0);
         assert_eq!(out.len(), 2, "无入航向应直接拉直: got {}", out.len());
     }
 
@@ -1162,6 +1172,8 @@ pub struct ThetaStarSmoother<'a> {
     pub entry_heading: Option<f64>,
     /// 圆弧过渡的最小转弯半径（米，物理约束；fallback 急转弯插入弧点用）
     pub min_r_m: f64,
+    /// 首跳 entry 约束放宽上限（度；必经点段 175°，非必经点 95°）
+    pub entry_max_deg: f64,
 }
 impl Smoother for ThetaStarSmoother<'_> {
     fn name(&self) -> &str {
@@ -1174,6 +1186,7 @@ impl Smoother for ThetaStarSmoother<'_> {
             self.max_turn_deg,
             self.entry_heading,
             self.min_r_m,
+            self.entry_max_deg,
         ))
     }
 }
@@ -1227,12 +1240,14 @@ pub fn default_chain<'a>(
     opts: &SmoothOptions,
     check: &'a SegmentCheck<'a>,
     entry_heading: Option<f64>,
+    entry_max_deg: f64,
 ) -> Vec<Box<dyn Smoother + 'a>> {
     let mut chain: Vec<Box<dyn Smoother + 'a>> = vec![Box::new(ThetaStarSmoother {
         check,
         max_turn_deg: Some(opts.max_turn_deg),
         entry_heading,
         min_r_m: opts.turn_radius_m,
+        entry_max_deg,
     })];
     if opts.aircraft_type == AircraftType::FixedWing {
         // Catmull-Rom 过点样条：对"绕行弧线"（Theta* 拉直受深探测 check 限制只能折线逼近）
@@ -1606,7 +1621,7 @@ mod chain_tests {
             .collect();
         let input = Path::new(pts);
         let check = |_: f64, _: f64, _: f64, _: f64, _: f64, _: f64| true;
-        let chain = default_chain(&opts, &check, None);
+        let chain = default_chain(&opts, &check, None, 95.0);
         let out = smooth_path_chain(&input, &chain, &opts, &ctx, None);
         assert!(!out.applied.is_empty(), "applied: {:?}", out.applied);
         assert!(out.warning.is_none(), "warning: {:?}", out.warning);
@@ -1651,7 +1666,7 @@ mod chain_tests {
             PathPoint::new(1.0, 0.0, 500.0),
         ]);
         let check = |_: f64, _: f64, _: f64, _: f64, _: f64, _: f64| true;
-        let chain = default_chain(&opts, &check, None);
+        let chain = default_chain(&opts, &check, None, 95.0);
         let out = smooth_path_chain(&input, &chain, &opts, &ctx, None);
         // NoData 不再阻断：链应应用至少一个阶段（不再回退 smoothing_failed 楼梯）
         assert!(!out.applied.is_empty(), "applied: {:?}", out.applied);
@@ -1678,7 +1693,7 @@ mod chain_tests {
             PathPoint::new(1.0, 0.0, 500.0),
         ]);
         let check = |_: f64, _: f64, _: f64, _: f64, _: f64, _: f64| true;
-        let chain = default_chain(&opts, &check, None);
+        let chain = default_chain(&opts, &check, None, 95.0);
         let out = smooth_path_chain(&input, &chain, &opts, &ctx, None);
         // 不 panic；NaN 输入复验 fail → 回退原始
         assert!(!out.verify.ok);
@@ -1716,7 +1731,7 @@ mod chain_tests {
         let check = |lon1: f64, lat1: f64, _: f64, lon2: f64, lat2: f64, _: f64| {
             !((lon2 - lon1).abs() > 0.025 && (lat2 - lat1).abs() > 0.01)
         };
-        let chain = default_chain(&opts, &check, None);
+        let chain = default_chain(&opts, &check, None, 95.0);
         let out = smooth_path_chain(&wave, &chain, &opts, &ctx, None);
         assert_eq!(
             out.warning.as_deref(),
@@ -1739,7 +1754,7 @@ mod chain_tests {
         };
         let wave = square_wave(4, 0.02);
         let check = |_: f64, _: f64, _: f64, _: f64, _: f64, _: f64| true;
-        let chain = default_chain(&opts, &check, None);
+        let chain = default_chain(&opts, &check, None, 95.0);
         let out = smooth_path_chain(&wave, &chain, &opts, &ctx, None);
         assert!(out.warning.is_none(), "warning: {:?}", out.warning);
         assert!(out.verify.ok, "issues: {:?}", out.verify.issues);
@@ -1786,7 +1801,7 @@ mod chain_tests {
         let check = |lon1: f64, lat1: f64, _: f64, lon2: f64, lat2: f64, _: f64| {
             !((lon2 - lon1).abs() > 0.025 && (lat2 - lat1).abs() > 0.01)
         };
-        let chain = default_chain(&opts, &check, None);
+        let chain = default_chain(&opts, &check, None, 95.0);
         let out = smooth_path_chain(&wave, &chain, &opts, &ctx, None);
         assert!(out.verify.ok, "issues: {:?}", out.verify.issues);
         assert!(out.warning.is_none(), "warning: {:?}", out.warning);
