@@ -160,7 +160,13 @@ fn load_real() -> Option<BuiltinSource> {
 /// 文件不存在（未转换/被删）→ fallback：用真实 china_dem_l12 重采样到 7.5as
 /// 网格（真实地形内容 + 真实 7.5as 块数/压缩语义），近似可靠（field build 耗时
 /// 由块数/解压量决定，与地形内容几乎无关）。
+/// 备用地形性能对比（gmted2010 全球 7.5as，2.31GB）——**不加入默认测试流程**
+/// （主管 2026-08-10：gmted2010_7p5as_global.z19.arpack 为备用地形数据，本身
+/// 不需要加入测试流程；且每次循环读 2.31GB × 6 次拖慢全量测试 ~8min）。
+/// 需要手动验证时：`cargo test -p aircraft-router-planner-cli --test
+/// field_build_compare gmted_7p5as_speed_comparison -- --ignored`。
 #[test]
+#[ignore]
 fn gmted_7p5as_speed_comparison() {
     let Some(src10) = load_real() else {
         eprintln!("[compare] SKIP: china_dem_l12.arpack not found");
