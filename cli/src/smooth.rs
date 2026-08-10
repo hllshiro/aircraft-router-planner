@@ -948,11 +948,17 @@ pub fn verify_path(
     }
 
     // 2) 地形净空 + 禁飞包含（每段等距采样）
-    let segs = opts.verify_seg_samples.max(2);
+    // 采样密度按段长自适应（2026-08-10 主管输入撞山修复）：固定 verify_seg_samples
+    // 点对长段（>20km）采样间隔过大，山峰会漏过——276km 直线段 9 点采样间隔
+    // ~30km，2137m 峰被漏 → 穿山路径通过复验交付（dubins 96 点段短采样密能发现，
+    // 链却选点数最少的 2 点直线）。目标间隔 ~1km（7.5as 地形 ~230m 分辨率，
+    // 1km 足够捕捉山峰宽度），下限 = 原固定值。
     let infl_km = ctx.zone_inflation_m / 1000.0;
     for i in 1..n {
         let a = path.points[i - 1];
         let b = path.points[i];
+        let seg_len_m = crate::path::haversine_m(a.lon, a.lat, b.lon, b.lat);
+        let segs = ((seg_len_m / 1_000.0).ceil() as usize).max(opts.verify_seg_samples.max(2));
         // Zone 硬墙（NoFly/Obstacle）：段到墙水平净距 ≥ zone_inflation_m
         // （几何精确，无采样漏判；主管 2026-08-06：绕飞贴边→考虑飞机机动留转弯空间。
         //  inflation=0 时仍拒绝穿入（clr≤0）——与原 zone_contains_at 采样语义一致）

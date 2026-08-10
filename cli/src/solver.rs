@@ -530,15 +530,26 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
             // 段端点（必经点/目标）是硬约束：任何平滑不得移除
             raw_joined = join_paths(&raw_segs);
 
-            // 路径撞山检查 + 抬升决策（未抬升时）：沿 raw 路径采样地形，若路径地形
-            // + 净空 ≥ 巡航高度（撞山）→ 抬到「路径地形最高 + 净空 + 100m」重跑
-            // （**路径级**抬升，避免区域级过度抬升破坏 restricted 剖面语义）。
+            // 路径撞山检查 + 抬升决策（未抬升时）：沿 **分段直线**（起点→必经点→目标）
+            // 采样地形，若直线地形 + 净空 ≥ 巡航高度（撞山）→ 抬到「直线地形最高 + 净空
+            // + 100m」重跑。**必须采样直线而非 FMM 路径点**：FMM 网格路径（楼梯）点
+            // 间隔 ~1km 且可能恰好错过尖峰（2026-08-10 主管输入：直线经 2137m 峰，
+            // 网格点只采到 1692m → 抬升不足 → FMM 绕山楼梯 + Theta* 拉直穿山 →
+            // 全链失败回退锯齿）。直线是平滑链/直线替代交付路径的上界；密度
+            // ~1km（同 verify 口径），覆盖尖峰。**路径级**抬升：只抬到直线地形
+            // 最高 + 净空 + 100m，避免区域级过度抬升破坏 restricted 剖面语义。
             if !terrain_alt_raised && terrain.as_source().is_some() {
                 let t = terrain.as_source().unwrap();
                 let mut path_max_terr: f64 = 0.0;
-                for seg in &raw_segs {
-                    for p in &seg.points {
-                        if let Sample::Land(h) = t.sample_at(p.lon, p.lat) {
+                for ends in seg_ends.windows(2) {
+                    let (a, b) = (ends[0], ends[1]);
+                    let seg_len_m = crate::path::haversine_m(a.lon, a.lat, b.lon, b.lat);
+                    let n = ((seg_len_m / 1_000.0).ceil() as usize).max(2);
+                    for i in 0..=n {
+                        let tt = i as f64 / n as f64;
+                        let lon = a.lon + (b.lon - a.lon) * tt;
+                        let lat = a.lat + (b.lat - a.lat) * tt;
+                        if let Sample::Land(h) = t.sample_at(lon, lat) {
                             path_max_terr = path_max_terr.max(h);
                         }
                     }
@@ -634,6 +645,8 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                 &all_zones,
                 Some(&threat as &dyn crate::threat::ThreatModel),
                 inflation_km,
+                terrain.as_source(),
+                opts.clearance_m,
             );
             let ctx = VerifyContext {
                 terrain: terrain.as_source(),
@@ -1183,14 +1196,49 @@ fn join_paths(segs: &[Path]) -> Path {
 /// 允许拉直（雷达软约束由 verify 记录；无条件拒绝会让最后接近段无法拉直 →
 /// 交付 FMM 网格伪影，主管 2026-08-06 37 点场景）。
 /// 低概率边缘（≥0.7，即有效半径外）允许拉直 → 绕行路径可平滑。
+/// 地形净空（2026-08-10 主管输入撞山修复）：直连段沿途采样地形，
+/// 任何采样点 `Land 高度 + 净空 ≥ 段高度` → 拒绝拉直（穿山拉直会交付
+/// 撞山路径——FMM 楼梯绕山但 Theta* 把楼梯拉直成直线穿 2137m 峰，
+/// 而 verify 固定 9 点/段采样间隔 ~30km 漏峰 → 撞山路径通过复验交付）。
+/// 采样密度同 verify 口径（按段长自适应，间隔 ~1km，上限 256 点防性能退化；
+/// Water/NoData/OOB 语义同 verify：水面净空从 0 起算、NoData 不硬拒、
+/// OOB 拒绝）。Theta* 是 O(n²) 贪心跳点，每个候选段都查地形 → 上限
+/// 256 点控制 worst case（段长 256km 已超 demo 场景量级）。
 fn make_segment_check<'a>(
     zones: &'a [Zone],
     threat: Option<&'a dyn crate::threat::ThreatModel>,
     inflation_km: f64,
+    terrain: Option<&'a dyn TerrainSource>,
+    clearance_m: f64,
 ) -> impl Fn(f64, f64, f64, f64, f64, f64) -> bool + 'a {
     move |lon1, lat1, alt1, lon2, lat2, alt2| {
         const N: usize = 16;
         const DEEP_RATIO: f64 = 0.7;
+        // 地形净空：段沿程采样（段高度线性插值；与 verify 同口径的 Land 判定）。
+        if let Some(t) = terrain {
+            let seg_len_m = crate::path::haversine_m(lon1, lat1, lon2, lat2);
+            let n_t = ((seg_len_m / 1_000.0).ceil() as usize).max(2).min(256);
+            for i in 0..=n_t {
+                let tt = i as f64 / n_t as f64;
+                let lon = lon1 + (lon2 - lon1) * tt;
+                let lat = lat1 + (lat2 - lat1) * tt;
+                let alt = alt1 + (alt2 - alt1) * tt;
+                match t.sample_at(lon, lat) {
+                    Sample::Land(h) => {
+                        if alt < h + clearance_m {
+                            return false;
+                        }
+                    }
+                    Sample::Water | Sample::Lake(_) => {
+                        if alt < clearance_m {
+                            return false;
+                        }
+                    }
+                    Sample::NoData => { /* 空洞不硬拒（降级警告由 verify 汇总） */ }
+                    Sample::OutOfBounds => return false,
+                }
+            }
+        }
         for z in zones {
             let clr = crate::config::zone_segment_clearance_km(lon1, lat1, lon2, lat2, z);
             if z.is_wall() {
@@ -2430,7 +2478,7 @@ mod tests {
             height_semantics: HeightSemantics::Msl,
         };
         let zones = vec![z];
-        let check = make_segment_check(&zones, None, 0.0);
+        let check = make_segment_check(&zones, None, 0.0, None, 0.0);
         // 斜切直线：start → 接近 target 的直线，穿过梯形内部 → 拒绝拉直
         assert!(!check(115.9, 39.8, 3000.0, 116.48, 40.3, 3000.0));
         // 绕行折线两段：先向下绕过梯形下边（y<39.9），再从右侧上行（x>116.5）→ 放行
@@ -2438,7 +2486,7 @@ mod tests {
         assert!(check(116.55, 39.85, 3000.0, 116.8, 40.3, 3000.0));
         // 机动膨胀（主管 2026-08-06：绕飞太贴边→考虑飞机机动）：贴边绕行段
         // （距下边 ~5.5km < 膨胀 6km）被拒；远离段放行。
-        let check_infl = make_segment_check(&zones, None, 6.0);
+        let check_infl = make_segment_check(&zones, None, 6.0, None, 0.0);
         assert!(
             !check_infl(115.9, 39.8, 3000.0, 116.55, 39.85, 3000.0),
             "绕行段距梯形下边 < 膨胀 6km 应被拒绝（留转弯空间）"
@@ -2468,7 +2516,7 @@ mod tests {
             height_semantics: HeightSemantics::Msl,
         };
         let zones = vec![z];
-        let check = make_segment_check(&zones, None, 0.0);
+        let check = make_segment_check(&zones, None, 0.0, None, 0.0);
         // zigzag9 theta_star 拉直段 start→(114.2076,42.3648) 擦过 rz1 圆边缘
         // （浅穿）→ 高度 3000 在带内 → 必须拒绝拉直
         assert!(
@@ -3339,6 +3387,83 @@ mod tests {
             v1.warnings.iter().all(|w| !w.contains("smoothing_failed")),
             "v1 不应 smoothing_failed，实际 {:?}",
             v1.warnings
+        );
+    }
+
+    #[test]
+    fn zigzag26_straight_line_peak_raise_no_collision() {
+        // 主管 2026-08-10 输入（east_asia 7.5as 真实地形）：v1 start_pose
+        // （117.57,38.98）→ target_ref（115.46,40.87），直线 276km，巡航 1892m。
+        // 直线后半段经 (115.8132,40.5606) 2137m 尖峰。修复前：抬升决策采样 FMM
+        // 网格点（间隔 ~1km 恰好错过尖峰 → 只抬到 1692m→1892m），Theta* 把绕山
+        // 楼梯拉直成 2 点直线穿山，verify 固定 9 点/段采样间隔 ~30km 漏峰 → 撞山
+        // 路径通过复验交付（clearance -245m）。
+        // 修复三层：① verify_path 地形/禁飞采样按段长自适应（间隔 ≤1km）——
+        // 长段不再漏峰；② make_segment_check 加地形净空（Theta* 拉直不得穿山）；
+        // ③ 抬升决策采样分段直线（seg_ends，~1km 密度）而非 FMM 网格点——
+        // 直线地形最高 2040m → 抬升到 2240m 越过山峰。
+        // 断言：交付路径沿直线密采样（2000 点）最小净空 ≥ 100m（不撞山）；
+        // 平滑交付（≤3 点）；无 smoothing_failed。
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+        let cand = root.join("data/east_asia_7p5as.arpack");
+        if !cand.exists() {
+            eprintln!("skip zigzag26: real terrain missing ({})", cand.display());
+            return;
+        }
+        let s = r#"{
+            "schema_version":"0.20",
+            "mission":{
+                "start":{"lon":115.9,"lat":39.8,"alt_m":3000},
+                "target":{"lon":116.8,"lat":40.3,"alt_m":3000},
+                "vehicles":[
+                    {"id":"v1","profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":250,"min_turn_radius_m":442,"max_climb_angle_deg":15},
+                     "start_pose":{"lon":117.57051750925365,"lat":38.9816070217835,"alt_m":500,"heading_deg":45},
+                     "mid_waypoints":[],"target_ref":"115.46093981532285,40.8762471499978,2000"}],
+                "red_forces":{"radars":[]},
+                "no_fly_zones":[],"restricted_zones":[],"obstacles":[],
+                "terrain":{"source":"path","path":"__P__"},
+                "parameters":{}
+            }
+        }"#;
+        let s = s.replace("__P__", &cand.to_string_lossy().replace('\\', "\\\\"));
+        let input = parse(&s);
+        let out = solve(&input, &SolveParams::default(), 0).unwrap();
+        let v = &out.vehicles[0];
+        assert_eq!(v.status, "planned");
+        assert!(
+            v.path.len() <= 3,
+            "应平滑交付直线，实际 {} 点",
+            v.path.len()
+        );
+        assert!(
+            v.warnings.iter().all(|w| !w.contains("smoothing_failed")),
+            "不应 smoothing_failed，实际 {:?}",
+            v.warnings
+        );
+        // 抬升提示存在（低空任务被地形抬升）
+        assert!(
+            v.warnings.iter().any(|w| w.contains("cruise altitude raised")),
+            "应提示巡航高度抬升，实际 {:?}",
+            v.warnings
+        );
+        // 密采样复核：输出路径任何点净空 ≥ 100m（不撞山）
+        let t = crate::terrain::open_source(&cand).unwrap();
+        let a = &v.path[0];
+        let b = v.path.last().unwrap();
+        let n = 2000;
+        let mut min_clr = f64::INFINITY;
+        for i in 0..=n {
+            let tt = i as f64 / n as f64;
+            let lon = a.x + (b.x - a.x) * tt;
+            let lat = a.y + (b.y - a.y) * tt;
+            let alt = a.alt_m + (b.alt_m - a.alt_m) * tt;
+            if let crate::terrain::Sample::Land(h) = t.sample_at(lon, lat) {
+                min_clr = min_clr.min(alt - h);
+            }
+        }
+        assert!(
+            min_clr >= 100.0,
+            "交付路径撞山：最小净空 {min_clr:.1}m < 100m"
         );
     }
 
