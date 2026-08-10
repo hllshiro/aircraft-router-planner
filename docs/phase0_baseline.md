@@ -55,7 +55,7 @@
 - 掩膜语义验证（真实数据）：GMTED2010 + mask_10as 全球采样 Land 29.5% / Water 70.1% / Lake 0.5%（陆地占比吻合理论 ~29.2%）；定点北京 Land(52.1m)/太平洋 Water/青海湖 Lake(3194m)——掩膜 3 态集成正确；掩膜加速海洋采样（跳过 DEM 解压：masked 247µs vs 无掩膜 1172µs 随机）
 
 - **待定数据（发布前，2026-08-05 转换完成；2026-08-08 迁移到项目根 `data/`，gitignore）**：
-  - `data/gmted2010_7p5as_global.z19.arpack`：**2.311GB**、7.5 弧秒（≈231.9m 赤道）、全球 84°N..56°S 67200×172800、int16、zstd-19、vd=EGM96、空洞率≈0（海洋=0m）；Rust 采样验证：北京 52.1m/青藏 4928.7m/太平洋 0m ✓；>10 弧秒契约满足；体积超 800MB 目标（全球主档口径，待主管裁决）
+  - `data/gmted2010_7p5as_global.z19.arpack`：**2.311GB**、7.5 弧秒（≈231.9m 赤道）、全球 84°N..56°S 67200×172800、int16、zstd-19、vd=EGM96、空洞率≈0（海洋=0m）；Rust 采样验证：北京 52.1m/青藏 4928.7m/太平洋 0m ✓；>10 弧秒契约满足；体积超 800MB 目标（**已裁决（2026-08-08）：不作为发布默认，默认 = 东亚 7.5as 537MB，全球档保留 data/ 可选**）
   - `data/china_dem_l12.arpack`：**76MB**、9.888 弧秒（≈305.75m 赤道，踩线 ≤10 弧秒）、中国区 73.5-135.1°E / 3.6-53.6°N 18194×22429、有效 29%（NaN=海洋/境外→no_data -32768）、北京 100% 有效；Rust 采样验证：北京 49m/云南 1459.8m/海南 -7.8m ✓
   - 转换工具：`phase0/scripts/convert_to_arpk1.py`（GeoTIFF 直读 / JP2 gdal_translate -srcwin 并行解码；opj -t 与后台 start /b 子进程存在挂起问题，已弃用）+ `cli/examples/arpk1_probe.rs`（Rust 交叉验证）
 - **掩膜分辨率定案：10 弧秒**（2026-08-04 主管拍板；`mask_10as.mask` V2 3 态：0 海洋/1 陆地/2 内陆湖，含南极内陆补全；2026-08-08 生成 7.5as 全球版 `data/mask_7p5as.mask` 并定为默认掩膜；掩膜暂不入 git，开发完成后决定）
@@ -73,7 +73,7 @@
 
 ## 主管决策 2026-08-08（三项，A1_TERRAIN_PACKAGE）
 
-1. **默认地形 = GMTED2010 东亚 7.5as 压缩版（east_asia_7p5as.arpack 497MB）**：取代 china_dem_l12 默认地位；terrain source=path/builtin 且未给路径时，solver 依次尝试 exe 同目录 / 工作目录 / phase0/data / pending/east_asia_crop 下的 `east_asia_7p5as.arpack`（commit 29adf33 接线）。
+1. **默认地形 = GMTED2010 东亚 7.5as 压缩版（east_asia_7p5as.arpack 537MB）**：取代 china_dem_l12 默认地位；terrain source=path/builtin 且未给路径时，solver 依次尝试 exe 同目录 / 工作目录 / phase0/data / pending/east_asia_crop 下的 `east_asia_7p5as.arpack`（commit 29adf33 接线；2026-08-10 数据迁移到项目根 data/ 与 install/data/，实际文件 537.2MB）。
 2. **海岸掩膜随默认地形提供——默认提供和使用的掩膜为全球 7.5as 版本（mask_7p5as.mask）**：GSHHG 全球 V2 3 态（覆盖 360°×180°，86400×172800，30.8MB，生成 30.9s；10 个已知点语义与 10as 版全一致）；solver `default_mask_candidates()` 自动探测（候选名 mask_7p5as.mask，exe 同目录 / 工作目录 / phase0/data），`TerrainConfig.mask_path` 可显式覆盖；区域窗口掩膜（east_asia_7p5as.mask 等）不自动探测，需显式指定；mask_10as.mask 保留（可显式使用）。
 3. **内置纯 Rust 压缩编码器（COMPRESSION_DEFLATE=2，commit 8780d4e）**：成熟纯 Rust zstd 编码器不存在（ruzstd 仅解码；zstd-pure-rs immature 有数据损坏风险），经主管确认采用 miniz_oxide deflate（flate2 官方 rust 后端，零 C 红线）；POC 实测真实地形差分块压缩比 4.06:1 ≥ zstd 3.98:1。convert 输出自动压缩（索引动态记录 + finish 回填 + 流式重读算 SHA，与 Python convert 语义一致）。
 
