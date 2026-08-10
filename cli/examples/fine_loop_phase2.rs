@@ -102,7 +102,7 @@ fn main() {
         let opts = SmoothOptions::default();
         let check = |_: f64, _: f64, _: f64, _: f64, _: f64, _: f64| true; // 无地形/禁飞限制的纯几何链
         let ctx = VerifyContext { terrain: None, nofly: None, zones: None, threat: None, zone_inflation_m: 0.0 };
-        let chain = default_chain(&opts, &check, None);
+        let chain = default_chain(&opts, &check, None, 95.0);
         let result = smooth_path_chain(&p, &chain, &opts, &ctx, None);
         if result.path.len() >= 2 {
             ok += 1;

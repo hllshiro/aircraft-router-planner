@@ -1229,7 +1229,9 @@ fn make_segment_check<'a>(
         // 地形净空：段沿程采样（段高度线性插值；与 verify 同口径的 Land 判定）。
         if let Some(t) = terrain {
             let seg_len_m = crate::path::haversine_m(lon1, lat1, lon2, lat2);
-            let n_t = ((seg_len_m / 1_000.0).ceil() as usize).max(2).min(256);
+            // 目标间隔 ~200m（7.5as 地形 ~230m 分辨率），与 verify 同口径；
+            // 上限按 200m 间隔放宽到 1024（≈205km），防止超长段截断漏检。
+            let n_t = ((seg_len_m / 200.0).ceil() as usize).max(2).min(1024);
             for i in 0..=n_t {
                 let tt = i as f64 / n_t as f64;
                 let lon = lon1 + (lon2 - lon1) * tt;
@@ -3427,6 +3429,209 @@ mod tests {
                 mi + 1,
                 v.path
             );
+        }
+    }
+
+    #[test]
+    fn zigzag28_waypoint_zigzag_verify_local_projection_radius() {
+        // 主管 2026-08-10 输入（east_asia 7.5as 真实地形）：单机独立 start_pose + 10 必经点
+        // + target_ref，无 zone/雷达。10 个必经点大之字形（经度 116.7~117.7、纬度 38.9~39.6
+        // 交错），段边界多 >140° 大转角（wp2 144°、wp3 149.7°、wp4 116.2°、wp5 148°、wp6
+        // 141.7°、wp7 158.4°、wp8 143.7°、wp9 87.4°、wp10 63.5°）。zigzag27 entry 放宽后
+        // theta_star 全部拉直成功、段边界 arc 全部插入成功 → FINAL 36 点，但 verify 报
+        // `vertex 23: radius 436m < min 442m` 误拒 → 全链回退 1017 点网格楼梯 + 995km。
+        // 根因（zigzag28）：verify_path 用**全路径中点投影**（path.points[n/2]，lat 39.56°
+        // → cos=0.7712）测三点外接圆半径，而 arc_transition 生成弧用 **b 点局部投影**
+        // （lat 38.93° → cos=0.7776）；wp7 处 158.4° 切弧远离路径中点（~70km），经度缩放
+        // 失配 0.8% 被放大 → 物理 442m 弧被量成 434m < 437.58（442×0.99）→ 误拒。
+        // 修复：radius 检查改三点局部投影（LocalProjection 以三点均值为中心，与
+        // arc_transition 生成口径一致）。结果：1017→36 点平滑，770km（之字形直线拉直），
+        // smoothing_failed 消失。
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+        let cand = root.join("data/east_asia_7p5as.arpack");
+        if !cand.exists() {
+            eprintln!("skip zigzag28: real terrain missing ({})", cand.display());
+            return;
+        }
+        let s = r#"{
+            "schema_version":"0.20",
+            "mission":{
+                "start":{"lon":115.9,"lat":39.8,"alt_m":3000},
+                "target":{"lon":116.8,"lat":40.3,"alt_m":3000},
+                "vehicles":[
+                    {"id":"v1","profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":250,"min_turn_radius_m":442,"max_climb_angle_deg":15},
+                     "start_pose":{"lon":117.57051750925365,"lat":38.9816070217835,"alt_m":500,"heading_deg":45},
+                     "mid_waypoints":[
+                        {"lon":117.5310926755737,"lat":39.36711249439876,"alt_m":500},
+                        {"lon":117.27112137218157,"lat":39.56318138239763,"alt_m":500},
+                        {"lon":117.34900609147277,"lat":39.17993766070357,"alt_m":500},
+                        {"lon":117.02306561461393,"lat":39.4989067016085,"alt_m":500},
+                        {"lon":116.81964533225553,"lat":39.16459697832345,"alt_m":500},
+                        {"lon":117.61912491286566,"lat":39.56928673239517,"alt_m":500},
+                        {"lon":117.34789241305992,"lat":38.91485862893048,"alt_m":500},
+                        {"lon":117.73424167310449,"lat":39.2810150397907,"alt_m":500},
+                        {"lon":117.71147898319053,"lat":38.91563411936639,"alt_m":500},
+                        {"lon":116.69698769455375,"lat":38.92250726143136,"alt_m":500}],
+                     "target_ref":"115.46093981532285,40.8762471499978,2000"}],
+                "red_forces":{"radars":[]},
+                "no_fly_zones":[],
+                "restricted_zones":[],
+                "obstacles":[],
+                "terrain":{"source":"path","path":"__P__"},
+                "parameters":{}
+            }
+        }"#;
+        let s = s.replace("__P__", &cand.to_string_lossy().replace('\\', "\\\\"));
+        let input = parse(&s);
+        let out = solve(&input, &SolveParams::default(), 0).unwrap();
+        let v = &out.vehicles[0];
+        assert_eq!(v.status, "planned", "v1 应 planned");
+        assert!(
+            v.path.len() <= 60,
+            "应平滑交付（修复前 1017 点网格楼梯），实际 {} 点",
+            v.path.len()
+        );
+        assert!(
+            v.warnings.iter().all(|w| !w.contains("smoothing_failed")),
+            "不应 smoothing_failed，实际 {:?}",
+            v.warnings
+        );
+        // 必经点语义：10 个必经点均需经过（容差 0.05°≈5.5km，同 m5/zigzag27 口径）。
+        let mids = [
+            (117.5310926755737_f64, 39.36711249439876_f64),
+            (117.27112137218157_f64, 39.56318138239763_f64),
+            (117.34900609147277_f64, 39.17993766070357_f64),
+            (117.02306561461393_f64, 39.4989067016085_f64),
+            (116.81964533225553_f64, 39.16459697832345_f64),
+            (117.61912491286566_f64, 39.56928673239517_f64),
+            (117.34789241305992_f64, 38.91485862893048_f64),
+            (117.73424167310449_f64, 39.2810150397907_f64),
+            (117.71147898319053_f64, 38.91563411936639_f64),
+            (116.69698769455375_f64, 38.92250726143136_f64),
+        ];
+        for (mi, (mlon, mlat)) in mids.iter().enumerate() {
+            assert!(
+                v.path.iter().any(|p| (p.x - mlon).abs() < 0.05 && (p.y - mlat).abs() < 0.05),
+                "wp{} 必经点应经过邻域，实际 {:?}",
+                mi + 1,
+                v.path
+            );
+        }
+    }
+
+    #[test]
+    fn zigzag29_waypoint_zigzag_uturn_arc_from_waypoint() {
+        // 主管 2026-08-10 输入 3（east_asia 7.5as 真实地形）：单机独立 start_pose + 23
+        // 必经点 + target_ref，无 zone/雷达。23 必经点密集大之字形，含多处 >170° 接近
+        // 180° 的掉头（wp1 174.9°、wp7 174.8°、wp11 165.9°、wp13 167.9°、wp15 172.5°、
+        // wp17 167°、wp21 162.4°）。zigzag27 entry 放宽 + zigzag28 局部投影 radius 后，
+        // theta_star 首跳 177.8° > 175° 被挡 → SEG1 输出 3 点 → solver 段边界 arc 的
+        // c=中间点（距 b 仅 11.5km）→ 切弧模型 d_m=min(r·tan(87.45°)≈10km, 0.75×11.5km)
+        // 截断 → r_eff≈383m < 442m → verify radius 拒；且切弧 S/E 距 b≈10km 把必经点
+        // 甩出弧外（远超 0.05°≈5.5km 容差）→ 全链回退 2549 点网格楼梯。
+        // 根因（zigzag29）：**切弧模型对接近 180° 的转角几何发散**——切点距离
+        // r·tan(θ/2) 在 θ→180° 时 →∞，必经点 b 被甩到弧外。修复：keep_b（必经点/段
+        // 端点）改用 **U 形弧（S=b）**——弧从必经点出发（b 在弧上精确经过），半径恒
+        // min_r_m，转 θ 后 E 为弧上自然点（距 b=2r·sin(θ/2)，174.9° 时仅 883m，E→c
+        // 方向偏差 <3°）。同时地形采样 1km→200m（7.5as ~230m 格距），消除弧后段起点
+        // 偏移导致的采样网格相位差漏检窄山峰。结果：2549→95 点平滑（1821km 之字形
+        // 拉直），smoothing_failed 消失，23 必经点全部在 5.5km 容差内。
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+        let cand = root.join("data/east_asia_7p5as.arpack");
+        if !cand.exists() {
+            eprintln!("skip zigzag29: real terrain missing ({})", cand.display());
+            return;
+        }
+        let s = r#"{
+            "schema_version":"0.20",
+            "mission":{
+                "start":{"lon":115.9,"lat":39.8,"alt_m":3000},
+                "target":{"lon":116.8,"lat":40.3,"alt_m":3000},
+                "vehicles":[
+                    {"id":"v1","profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":250,"min_turn_radius_m":442,"max_climb_angle_deg":15},
+                     "start_pose":{"lon":117.57051750925365,"lat":38.9816070217835,"alt_m":500,"heading_deg":45},
+                     "mid_waypoints":[
+                        {"lon":117.11783474006214,"lat":39.46984164454213,"alt_m":500},
+                        {"lon":117.47656872164231,"lat":39.05202611607821,"alt_m":500},
+                        {"lon":116.90637588798378,"lat":39.4496563699438,"alt_m":500},
+                        {"lon":117.36422085502315,"lat":38.99039201054334,"alt_m":500},
+                        {"lon":116.79495413353128,"lat":39.3882830409556,"alt_m":500},
+                        {"lon":117.2970385812442,"lat":38.92409889966998,"alt_m":500},
+                        {"lon":116.64313344054925,"lat":39.34130967422113,"alt_m":500},
+                        {"lon":117.21571916145582,"lat":38.88579602285712,"alt_m":500},
+                        {"lon":117.0496252060799,"lat":39.69033181045541,"alt_m":500},
+                        {"lon":117.59846930948892,"lat":39.14600125973928,"alt_m":500},
+                        {"lon":117.19239519871157,"lat":39.77515291467246,"alt_m":500},
+                        {"lon":117.75328904873285,"lat":39.265771413168174,"alt_m":500},
+                        {"lon":117.37639341129983,"lat":39.899859443956274,"alt_m":500},
+                        {"lon":117.82723727925679,"lat":39.4482470117936,"alt_m":500},
+                        {"lon":117.4781831630707,"lat":40.02988393385804,"alt_m":500},
+                        {"lon":117.91417815346816,"lat":39.566639775283306,"alt_m":500},
+                        {"lon":116.35343384512255,"lat":39.21191424808533,"alt_m":500},
+                        {"lon":117.13763274937696,"lat":40.007607829090794,"alt_m":500},
+                        {"lon":116.54022244694409,"lat":39.61959713191777,"alt_m":500},
+                        {"lon":116.94054105824308,"lat":40.15250255474903,"alt_m":500},
+                        {"lon":116.33463652719644,"lat":39.77092757783807,"alt_m":500},
+                        {"lon":116.77908228189388,"lat":40.31455957166121,"alt_m":500},
+                        {"lon":116.40841749032751,"lat":40.11731272727076,"alt_m":500}],
+                     "target_ref":"115.46093981532285,40.8762471499978,2000"}],
+                "red_forces":{"radars":[]},
+                "no_fly_zones":[],
+                "restricted_zones":[],
+                "obstacles":[],
+                "terrain":{"source":"path","path":"__P__"},
+                "parameters":{}
+            }
+        }"#;
+        let s = s.replace("__P__", &cand.to_string_lossy().replace('\\', "\\\\"));
+        let input = parse(&s);
+        let out = solve(&input, &SolveParams::default(), 0).unwrap();
+        let v = &out.vehicles[0];
+        assert_eq!(v.status, "planned", "v1 应 planned");
+        assert!(
+            v.path.len() <= 150,
+            "应平滑交付（修复前 2549 点网格楼梯），实际 {} 点",
+            v.path.len()
+        );
+        assert!(
+            v.warnings.iter().all(|w| !w.contains("smoothing_failed")),
+            "不应 smoothing_failed，实际 {:?}",
+            v.warnings
+        );
+        // 必经点语义：23 个必经点均需经过（球面距离容差 0.05°≈5.5km；zigzag29 用
+        // 球面距离而非矩形 dx/dy——23 点密集时 wp snap 的经度偏差可达 4-5km，lat 39.5°
+        // 处 0.05° 经度只 ≈4.3km，矩形会误拒；注释口径同为 5.5km）。
+        let mids = [
+            (117.11783474006214_f64, 39.46984164454213_f64),
+            (117.47656872164231_f64, 39.05202611607821_f64),
+            (116.90637588798378_f64, 39.4496563699438_f64),
+            (117.36422085502315_f64, 38.99039201054334_f64),
+            (116.79495413353128_f64, 39.3882830409556_f64),
+            (117.2970385812442_f64, 38.92409889966998_f64),
+            (116.64313344054925_f64, 39.34130967422113_f64),
+            (117.21571916145582_f64, 38.88579602285712_f64),
+            (117.0496252060799_f64, 39.69033181045541_f64),
+            (117.59846930948892_f64, 39.14600125973928_f64),
+            (117.19239519871157_f64, 39.77515291467246_f64),
+            (117.75328904873285_f64, 39.265771413168174_f64),
+            (117.37639341129983_f64, 39.899859443956274_f64),
+            (117.82723727925679_f64, 39.4482470117936_f64),
+            (117.4781831630707_f64, 40.02988393385804_f64),
+            (117.91417815346816_f64, 39.566639775283306_f64),
+            (116.35343384512255_f64, 39.21191424808533_f64),
+            (117.13763274937696_f64, 40.007607829090794_f64),
+            (116.54022244694409_f64, 39.61959713191777_f64),
+            (116.94054105824308_f64, 40.15250255474903_f64),
+            (116.33463652719644_f64, 39.77092757783807_f64),
+            (116.77908228189388_f64, 40.31455957166121_f64),
+            (116.40841749032751_f64, 40.11731272727076_f64),
+        ];
+        for (mi, (mlon, mlat)) in mids.iter().enumerate() {
+            let near = v.path.iter().any(|p| {
+                let d = crate::path::haversine_m(p.x, p.y, *mlon, *mlat);
+                d <= 5_500.0
+            });
+            assert!(near, "wp{} 必经点应经过邻域，实际 {:?}", mi + 1, v.path);
         }
     }
 }

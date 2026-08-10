@@ -315,13 +315,16 @@ pub(crate) fn arc_transition(
     let d_m_raw = r_m * (theta / 2.0).to_radians().tan();
     // 弧末点 E 不得越过出段下一节点 c：E 在 c 的出段侧 → E→c 反向折返。
     // 截断 d_m ≤ 0.75×|bc|（有效半径同步缩小，弧点转角不变）。
+    // keep_b（必经点/段端点硬点）**不用切弧模型**（2026-08-10 zigzag29）：
+    // 切弧的 S/E 在 b 两侧 d_m=r·tan(θ/2) 处，θ→180° 时 d_m 发散——174.9°
+    // 大转角 d_m≈10km，必经点 b 被甩到弧外 10km（远超 0.05°≈5.5km 容差），
+    // 且 bc 短时 d_m 截断 → r_eff<物理半径 → verify radius 拒 → 全链回退
+    // 2549 点网格楼梯。改用 **U 形弧（S=b）**：弧从必经点出发（b 在弧上，
+    // 精确经过），半径恒 min_r_m，转 θ 后 E 为弧上自然点——E 距 b 仅
+    // 2r·sin(θ/2)（174.9° 时 883m），E 不在出段直线上但 E→c 方向偏差角
+    // ≈atan(2r·sin²(θ/2)/|bc|)<3°（c 距 b≥数 km），verify 转角放行。
     let bc_m = crate::path::haversine_m(b.lon, b.lat, c.lon, c.lat);
     let d_m = d_m_raw.min(bc_m * 0.75);
-    let r_eff = if d_m_raw > 0.0 {
-        d_m / (theta / 2.0).to_radians().tan()
-    } else {
-        r_m
-    };
     // 等距投影 dest（以 b 为中纬；弧长 ~10km 级，误差 <0.1%）。
     let lat0 = b.lat.to_radians();
     let kx = 111_320.0 * lat0.cos();
@@ -331,8 +334,6 @@ pub(crate) fn arc_transition(
         let n_ = dist_m * h_deg.to_radians().cos();
         (lon + e / kx, lat + n_ / ky)
     };
-    let (s_lon, s_lat) = dest(b.lon, b.lat, h_ab, -d_m);
-    let (e_lon, e_lat) = dest(b.lon, b.lat, h_bc, d_m);
     // **180° 掉头无平滑弧**：入/出段同线（S/E 必须在同一条直线上）时，
     // 切线约束（S 处=入段方向、E 处=出段方向）与直径几何矛盾；且
     // tan(θ/2)=tan(90°) 发散 → 标准弧退化（d_m 截断后 r_eff≈0）。
@@ -341,6 +342,20 @@ pub(crate) fn arc_transition(
     if theta > 179.999 {
         return None;
     }
+    // keep_b：S=b（弧从必经点出发，U 形弯）；非 keep_b：S 在入段直线上
+    // b 前 d_m 处（切弧模型，b 是两切线交点，弧绕过 b 急转弯点）。
+    let (s_lon, s_lat) = if keep_b {
+        (b.lon, b.lat)
+    } else {
+        dest(b.lon, b.lat, h_ab, -d_m)
+    };
+    let r_eff = if keep_b {
+        min_r_m
+    } else if d_m_raw > 0.0 {
+        d_m / (theta / 2.0).to_radians().tan()
+    } else {
+        r_m
+    };
     // 半径方向（center→S）：右转圆心在入段右侧（半径 = h_ab−90，φ 随弧顺时针增），
     // 左转圆心在入段左侧（半径 = h_ab+90，φ 逆时针减）。圆心在 S 的对面：
     // center = S − r·(sin φ0, cos φ0)；P(t) = center + r·(sin φ(t), cos φ(t))，
@@ -365,7 +380,13 @@ pub(crate) fn arc_transition(
             heading_deg: None,
         });
     }
-    // 末点精确用 E。
+    // 末点：keep_b 用弧上自然点（U 形弯，E 由弧几何决定，不在出段直线上
+    // 但 E→c 方向偏差 <3°）；非 keep_b 用出段直线上的 E=dest(b,h_bc,d_m)。
+    let (e_lon, e_lat) = if keep_b {
+        (pts[n].lon, pts[n].lat)
+    } else {
+        dest(b.lon, b.lat, h_bc, d_m)
+    };
     pts[n] = crate::path::PathPoint {
         lon: e_lon,
         lat: e_lat,
@@ -945,7 +966,23 @@ pub fn verify_path(
                     opts.max_turn_deg
                 ));
             }
-            let (a, b, c) = (xy[i - 1], xy[i], xy[i + 1]);
+            // 半径是**局部几何量**，必须用三点局部投影测量（2026-08-10 zigzag28：
+            // verify 曾用全路径中点投影测弧半径，弧远离路径中点时等距投影经度
+            // 缩放失配（cos 随纬度变化 0.8%）→ 442m 物理转弯弧被量成 434m <
+            // 0.99×442=437.58 → 误拒 → 全链回退 1017 点网格锯齿。arc_transition
+            // 生成弧用 b 点局部投影，验证同样要局部口径，二者才一致）。
+            let p0 = &path.points[i - 1];
+            let p1 = &path.points[i];
+            let p2 = &path.points[i + 1];
+            let lp = LocalProjection::new(
+                (p0.lon + p1.lon + p2.lon) / 3.0,
+                (p0.lat + p1.lat + p2.lat) / 3.0,
+            );
+            let (a, b, c) = (
+                lp.to_xy(p0.lon, p0.lat),
+                lp.to_xy(p1.lon, p1.lat),
+                lp.to_xy(p2.lon, p2.lat),
+            );
             if let Some(r) = circumradius(a, b, c)
                 && r < opts.turn_radius_m * 0.99
             {
@@ -968,7 +1005,12 @@ pub fn verify_path(
         let a = path.points[i - 1];
         let b = path.points[i];
         let seg_len_m = crate::path::haversine_m(a.lon, a.lat, b.lon, b.lat);
-        let segs = ((seg_len_m / 1_000.0).ceil() as usize).max(opts.verify_seg_samples.max(2));
+        // 目标间隔 ~200m（7.5as 地形 ~230m 分辨率）：段边界弧插入后起点偏移
+        // （E 距 b 数百米）会使 1km 采样网格整体移相，窄山峰（宽 <1km）可被
+        // 网格错过（2026-08-10 zigzag29：SEG23 121km 直线 terrain 2082m 峰，
+        // check 与 verify 相位差 379m → 一个抓到另一个漏）。200m < 格距 230m，
+        // 任意相位下 ≥1 个采样点必落入 ≥230m 宽的山峰格。下限 = 原固定值。
+        let segs = ((seg_len_m / 200.0).ceil() as usize).max(opts.verify_seg_samples.max(2));
         // Zone 硬墙（NoFly/Obstacle）：段到墙水平净距 ≥ zone_inflation_m
         // （几何精确，无采样漏判；主管 2026-08-06：绕飞贴边→考虑飞机机动留转弯空间。
         //  inflation=0 时仍拒绝穿入（clr≤0）——与原 zone_contains_at 采样语义一致）
