@@ -1,4 +1,5 @@
 import type { InputConfig, PlanResult, TerrainInfo } from './types';
+import { parseVehicleTargetRef } from './types';
 
 export async function planRoute(config: InputConfig): Promise<PlanResult> {
   const resp = await fetch('/api/plan', {
@@ -42,6 +43,14 @@ export function sceneBounds(
     maxLon = Math.max(maxLon, v.start_pose.lon);
     minLat = Math.min(minLat, v.start_pose.lat);
     maxLat = Math.max(maxLat, v.start_pose.lat);
+    // 每机自定义目标（target_ref）纳入包围盒 → 点击设置终点在场景外时 bbox 自动扩展
+    const vt = parseVehicleTargetRef(v, target);
+    if (vt) {
+      minLon = Math.min(minLon, vt.lon);
+      maxLon = Math.max(maxLon, vt.lon);
+      minLat = Math.min(minLat, vt.lat);
+      maxLat = Math.max(maxLat, vt.lat);
+    }
   }
   // 跨度 = max(实际距离 × 1.4, 最小 2.5°lon ≈ 220km / 2.2°lat ≈ 245km)
   const spanLon = Math.max((maxLon - minLon) * 1.4, 2.5);

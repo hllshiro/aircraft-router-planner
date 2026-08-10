@@ -3,7 +3,7 @@ import { Canvas } from '@react-three/fiber';
 import { OrbitControls, Grid } from '@react-three/drei';
 import type { ThreeEvent } from '@react-three/fiber';
 import type { Waypoint, GeoRef, VehicleInput, Radar, Zone, VehicleOutput, Vec2, TerrainInfo } from '../types';
-import { geoToLocal, geoPointToLocal, localToGeo } from '../types';
+import { geoToLocal, geoPointToLocal, localToGeo, parseVehicleTargetRef } from '../types';
 import { StartMarker } from './StartMarker';
 import { TargetZone } from './TargetZone';
 import { RadarSphere } from './RadarSphere';
@@ -94,15 +94,14 @@ function GroundClickPlane({
     [active, onClick, geoRef, suppressUntil],
   );
 
-  // 点击平面 = sceneBounds（与地形网格/相机视野一致的可见范围）：
-  // 固定 ±600km 平面比场景显示范围大得多（近距场景最小 2.5°×2.2°≈±135km），
-  // 多边形顶点可点在视野外/地形外 → 添加看不见的顶点（主管 2026-08-07：
-  // 顶点点击范围应与场景范围一致）。以 geoRef(start) 为原点换算局部坐标。
+  // 点击平面 = sceneBounds 外扩 3 倍（宽高 ×3，中心不变）：
+  // 起终点/顶点可点在已加载场景之外 → sceneBounds 自动扩展 → 地形重新采样，
+  // 场景随点击逐步扩大（主管 2026-08-10：场景不应被限制在固定大小）。
   const kx = 111320 * Math.cos((geoRef.lat * Math.PI) / 180);
   const ky = 110574;
   const [minLon, minLat, maxLon, maxLat] = bounds;
-  const width = (maxLon - minLon) * kx;
-  const height = (maxLat - minLat) * ky;
+  const width = (maxLon - minLon) * kx * 3;
+  const height = (maxLat - minLat) * ky * 3;
   const cx = ((minLon + maxLon) / 2 - geoRef.lon) * kx;
   const cz = ((minLat + maxLat) / 2 - geoRef.lat) * ky;
 
@@ -143,24 +142,7 @@ function computeZScale(terrainData: TerrainInfo | null, geoRef: GeoRef): number 
   return Math.min(Math.max((spanMeters / range) * 0.08, 3), 20);
 }
 
-/** 每机自定义目标（target_ref = "lon,lat[,alt]"）；缺省 / "mission.target" → null */
-function parseVehicleTargetRef(
-  v: VehicleInput,
-  missionTarget: Waypoint,
-): Waypoint | null {
-  const r = (v.target_ref ?? '').trim();
-  if (!r || r === 'mission.target') return null;
-  const parts = r.split(',').map((s) => s.trim());
-  if (parts.length < 2) return null;
-  const lon = +parts[0];
-  const lat = +parts[1];
-  if (!Number.isFinite(lon) || !Number.isFinite(lat)) return null;
-  const alt =
-    parts.length >= 3 && Number.isFinite(+parts[2])
-      ? +parts[2]
-      : missionTarget.alt_m;
-  return { lon, lat, alt_m: alt };
-}
+/** 每机自定义目标 → 局部坐标（parseVehicleTargetRef 定义在 types.ts，App/api 共享） */
 
 export function Scene3D({
   geoRef,
@@ -194,6 +176,26 @@ export function Scene3D({
     setDragActive(dragging);
     if (!dragging) setDragSuppressUntil(Date.now() + 400);
   }, []);
+
+  // 拾取统一入口（地形表面 / 地面平面共用）：拖动结束 400ms 内抑制 + 同位置 400ms 防抖
+  const lastPick = useRef<{ x: number; y: number; t: number } | null>(null);
+  const handlePick = useCallback(
+    (wp: Waypoint) => {
+      if (Date.now() < dragSuppressUntil) return;
+      const now = Date.now();
+      if (
+        lastPick.current &&
+        now - lastPick.current.t < 400 &&
+        Math.abs(lastPick.current.x - wp.lon) < 1e-6 &&
+        Math.abs(lastPick.current.y - wp.lat) < 1e-6
+      ) {
+        return;
+      }
+      lastPick.current = { x: wp.lon, y: wp.lat, t: now };
+      onGroundClick(wp);
+    },
+    [dragSuppressUntil, onGroundClick],
+  );
 
   const radarMeshes = radars.map((r) => ({
     id: r.id,
@@ -279,7 +281,14 @@ export function Scene3D({
         enabled={!dragActive}
       />
 
-      {terrainData && <TerrainMesh data={terrainData} geoRef={geoRef} zScale={zScale} />}
+      {terrainData && (
+        <TerrainMesh
+          data={terrainData}
+          geoRef={geoRef}
+          zScale={zScale}
+          onPick={activeClickMode !== null ? handlePick : undefined}
+        />
+      )}
 
       <Grid
         args={[100000, 100000, 20, 20]}
@@ -370,7 +379,7 @@ export function Scene3D({
 
       <GroundClickPlane
         active={activeClickMode !== null}
-        onClick={onGroundClick}
+        onClick={handlePick}
         geoRef={geoRef}
         suppressUntil={dragSuppressUntil}
         bounds={bounds}

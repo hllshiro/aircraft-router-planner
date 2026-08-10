@@ -181,6 +181,25 @@ export function geoPointToLocal(
   return geoToLocal({ lon, lat, alt_m }, ref, zScale);
 }
 
+/** 每机自定义目标（target_ref = "lon,lat[,alt]"）；缺省 / "mission.target" → null */
+export function parseVehicleTargetRef(
+  v: VehicleInput,
+  missionTarget: Waypoint,
+): Waypoint | null {
+  const r = (v.target_ref ?? '').trim();
+  if (!r || r === 'mission.target') return null;
+  const parts = r.split(',').map((s) => s.trim());
+  if (parts.length < 2) return null;
+  const lon = +parts[0];
+  const lat = +parts[1];
+  if (!Number.isFinite(lon) || !Number.isFinite(lat)) return null;
+  const alt =
+    parts.length >= 3 && Number.isFinite(+parts[2])
+      ? +parts[2]
+      : missionTarget.alt_m;
+  return { lon, lat, alt_m: alt };
+}
+
 export function localToGeo(v: Vec3, ref: GeoRef): Waypoint {
   const lat0 = (ref.lat * Math.PI) / 180;
   const lon = ref.lon + v[0] / (111320 * Math.cos(lat0));

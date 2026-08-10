@@ -1,12 +1,16 @@
 import { useMemo } from 'react';
 import * as THREE from 'three';
-import type { GeoRef, TerrainInfo } from '../types';
+import type { ThreeEvent } from '@react-three/fiber';
+import type { GeoRef, TerrainInfo, Waypoint } from '../types';
+import { localToGeo } from '../types';
 
 interface TerrainMeshProps {
   data: TerrainInfo;
   geoRef: GeoRef;
   /** 统一 z 夸张系数（Scene3D computeZScale；与航路/标记/zone 同一尺度） */
   zScale: number;
+  /** 拾取模式下的地形点击（返回地形表面交点经纬，避免夸张后射线打到 y=0 平面偏差） */
+  onPick?: (wp: Waypoint) => void;
 }
 
 /** 高度 → 颜色（低绿 → 棕 → 高白雪线） */
@@ -29,7 +33,7 @@ function heightColor(h: number, minH: number, maxH: number): THREE.Color {
   return c;
 }
 
-export function TerrainMesh({ data, geoRef, zScale }: TerrainMeshProps) {
+export function TerrainMesh({ data, geoRef, zScale, onPick }: TerrainMeshProps) {
   const geometry = useMemo(() => {
     const { nx, ny } = data;
     const lat0 = (geoRef.lat * Math.PI) / 180;
@@ -81,7 +85,19 @@ export function TerrainMesh({ data, geoRef, zScale }: TerrainMeshProps) {
   }, [data, geoRef]);
 
   return (
-    <mesh geometry={geometry} receiveShadow>
+    <mesh
+      geometry={geometry}
+      receiveShadow
+      onClick={
+        onPick
+          ? (e: ThreeEvent<MouseEvent>) => {
+              e.stopPropagation();
+              // 地形表面交点（x=东/米、z=南/米）→ 经纬；高度用 0（起终点高度由表单决定）
+              onPick(localToGeo([e.point.x, e.point.z, 0], geoRef));
+            }
+          : undefined
+      }
+    >
       <meshStandardMaterial
         vertexColors
         side={THREE.DoubleSide}
