@@ -26,6 +26,12 @@ use crate::terrain::mask::{GeoMask, MaskedSource};
 use crate::terrain::{BulkPrefetch, Sample, TerrainSource};
 use crate::threat::{SphericalRadarThreat, ThreatModel, ThreatParams};
 
+/// 地形高度过滤的松弛量（2026-08-10）：只挡「明显高于巡航高度（+300m）」的山。
+/// 3000m 任务经过 3058m 五台山（净空不足但历史行为可过）不得被区域级过滤困住而
+/// 水平绕行破坏 restricted 剖面语义；1000m 低空场景的 1200m+ 高原仍会被挡 → 无解 →
+/// probe → 路径级抬升。撞山抬升判定同口径（避免与 verify 采样密度差异导致误抬）。
+const TERRAIN_MASK_SLACK_M: f64 = 300.0;
+
 /// 解算参数（M1：地形路径 CLI/输入指定；grid 粗网格分辨率）。
 #[derive(Debug, Clone)]
 pub struct SolveParams {
@@ -380,12 +386,34 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
         let mut profile_mask: Vec<bool> = Vec::new();
         let mut raw_joined: Path = Path::new(Vec::new());
         let mut force_restricted_wall = false;
-        'fmm_attempt: for _attempt in 0..2 {
+        // 地形高度过滤 + 抬升机制（2026-08-10 主管 e2e_zz 低空撞山）：
+        // FMM 2D 不感知飞行高度 vs 地形——1000m 巡航可穿过 1447m 山 → raw 穿山 →
+        // Theta*/verify 全拒 → 回退密集网格楼梯。方案：代价场按本机飞行高度把
+        // 「Land 高度 + 净空 ≥ alt」格点置 INF（FMM 水平绕山）；
+        //   · 过滤后 FMM 无解 → 先用**无过滤场**探测路径（区分「真无通道」与「区域级
+        //     过度过滤」——大区域如青藏高原边缘，3000m 任务原本可走，不得抬升）；
+        //   · 探测/过滤路径**本身撞山**（路径地形 + 净空 ≥ 巡航高度）→ 把巡航高度抬到
+        //     「路径地形最高 + 净空 + 100m」重跑（**路径级**抬升，非区域级——避免把
+        //     区域最大地形当目标导致过度抬升破坏 restricted 底部/顶部剖面语义）；
+        //   · 抬升后仍无解 → 无过滤场保底（宁丑勿违）。
+        let mut terrain_probe_done = false;   // 已用无过滤场探测路径
+        let mut terrain_alt_raised = false;   // 已抬升巡航高度
+        let mut terrain_fallback_done = false; // 已回退无过滤场（保底）
+        // 有效巡航高度（可被抬升逻辑更新；初始 = 起点高度）
+        let mut alt_eff = v.alt_m;
+        'fmm_attempt: for _attempt in 0..4 {
+            let use_terrain_mask = if terrain_fallback_done {
+                false
+            } else if terrain_alt_raised {
+                true
+            } else {
+                !terrain_probe_done
+            };
             let restricted_wall_for = |z: &Zone| {
                 force_restricted_wall
                     || restricted_detour_required(
                         z,
-                        v.alt_m,
+                        alt_eff,
                         v.profile.ceiling_m,
                         terrain.as_source(),
                         &v.start,
@@ -393,30 +421,56 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                         opts.max_climb_deg,
                     )
             };
-            let veh_field: Option<crate::costfield::CostField> = if all_zones
-                .iter()
-                .any(|z| restricted_wall_for(z))
-            {
-                let mut f = field.clone();
-                let g = f.rows;
-                for r in 0..g {
-                    for c in 0..g {
-                        let (lon, lat) = cell_lonlat(r, c, &region, g);
-                        if let Ok(gg) = Geo::new(lon, lat) {
-                            if all_zones
-                                .iter()
-                                .any(|z| restricted_wall_for(z) && zone_contains(z, &gg))
-                            {
-                                f.cost[r * g + c] = f32::INFINITY;
+            let has_restricted_wall = all_zones.iter().any(|z| restricted_wall_for(z));
+            let has_terrain_mask = use_terrain_mask && terrain.as_source().is_some();
+            let veh_field: Option<crate::costfield::CostField> =
+                if has_restricted_wall || has_terrain_mask {
+                    let mut f = field.clone();
+                    let g = f.rows;
+                    if has_restricted_wall {
+                        for r in 0..g {
+                            for c in 0..g {
+                                let (lon, lat) = cell_lonlat(r, c, &region, g);
+                                if let Ok(gg) = Geo::new(lon, lat) {
+                                    if all_zones
+                                        .iter()
+                                        .any(|z| restricted_wall_for(z) && zone_contains(z, &gg))
+                                    {
+                                        f.cost[r * g + c] = f32::INFINITY;
+                                    }
+                                }
+                            }
+                        }
+                        // 膨胀/软罚带只对 restricted 墙做；**不得**因 terrain 存在而调用——
+                        // apply_inflation_and_band 会膨胀**所有** INF 格点（含基础场 NoData/
+                        // OOB 墙）+ 加 1.5km 软罚带，terrain 存在时误调会改变全场代价导致
+                        // FMM 路径被 NoData/OOB 墙膨胀挤开（zigzag21 实测：路径绕行 rz1，
+                        // 6500m 剖面丢失）。
+                        apply_inflation_and_band(&mut f, inflation_cells, cell_m);
+                    }
+                    // 地形高度过滤：Land 格点高度 + 净空 ≥ 本机飞行高度 + slack → 禁行（INF）。
+                    // 注意：Water/Lake 水面净空从 0 起算，飞行高度 > 0 即可通行；
+                    // NoData/OOB 已由基础代价/墙处理，此处不覆盖。地形墙是连续格点场，
+                    // FMM 格点步进天然绕开，不需要膨胀（膨胀会过度阻塞窄通道）。
+                    if has_terrain_mask {
+                        let tsrc = terrain.as_source().unwrap();
+                        let alt = alt_eff;
+                        let clearance = opts.clearance_m.max(1.0);
+                        for r in 0..g {
+                            for c in 0..g {
+                                let (lon, lat) = cell_lonlat(r, c, &region, g);
+                                if let Sample::Land(h) = tsrc.sample_at(lon, lat) {
+                                    if h + clearance >= alt + TERRAIN_MASK_SLACK_M {
+                                        f.cost[r * g + c] = f32::INFINITY;
+                                    }
+                                }
                             }
                         }
                     }
-                }
-                apply_inflation_and_band(&mut f, inflation_cells, cell_m);
-                Some(f)
-            } else {
-                None
-            };
+                    Some(f)
+                } else {
+                    None
+                };
             let field_ref = veh_field.as_ref().unwrap_or(&field);
             eprintln!("[debug] fmm attempt {} field ready (veh={})", _attempt, veh_field.is_some());
             // 逐段 FMM → 回溯 → 拼接（去重段端点）
@@ -440,12 +494,30 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                         .iter()
                         .map(|&(r, c)| {
                             let (lon, lat) = cell_lonlat(r, c, &region, grid);
-                            RouterPoint::new(lon, lat, v.alt_m)
+                            RouterPoint::new(lon, lat, alt_eff)
                         })
                         .collect(),
                 ));
             }
             if no_solution || raw_segs.is_empty() {
+                if use_terrain_mask && !terrain_probe_done {
+                    // 过滤无解 → 无过滤场探测路径（区分「真无通道」与「区域级过度过滤」）
+                    terrain_probe_done = true;
+                    eprintln!(
+                        "[debug] terrain-masked FMM no path -> probe unmasked (v={})",
+                        v.id
+                    );
+                    continue 'fmm_attempt;
+                }
+                if use_terrain_mask && !terrain_fallback_done {
+                    // 抬升后仍无解 → 无过滤场保底（保可用性，宁丑勿违）
+                    terrain_fallback_done = true;
+                    eprintln!(
+                        "[debug] raised FMM no path -> fallback unmasked (v={})",
+                        v.id
+                    );
+                    continue 'fmm_attempt;
+                }
                 out_vehicles.push(VehicleOutput {
                     id: v.id.clone(),
                     status: "no_solution".into(),
@@ -458,6 +530,39 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
             // 段端点（必经点/目标）是硬约束：任何平滑不得移除
             raw_joined = join_paths(&raw_segs);
 
+            // 路径撞山检查 + 抬升决策（未抬升时）：沿 raw 路径采样地形，若路径地形
+            // + 净空 ≥ 巡航高度（撞山）→ 抬到「路径地形最高 + 净空 + 100m」重跑
+            // （**路径级**抬升，避免区域级过度抬升破坏 restricted 剖面语义）。
+            if !terrain_alt_raised && terrain.as_source().is_some() {
+                let t = terrain.as_source().unwrap();
+                let mut path_max_terr: f64 = 0.0;
+                for seg in &raw_segs {
+                    for p in &seg.points {
+                        if let Sample::Land(h) = t.sample_at(p.lon, p.lat) {
+                            path_max_terr = path_max_terr.max(h);
+                        }
+                    }
+                }
+                let clearance = opts.clearance_m.max(1.0);
+                if path_max_terr > 0.0 && path_max_terr + clearance >= alt_eff + TERRAIN_MASK_SLACK_M {
+                    let new_alt = (path_max_terr + clearance + 100.0).max(v.alt_m);
+                    let ceiling_ok = v
+                        .profile
+                        .ceiling_m
+                        .is_none_or(|c| new_alt <= c);
+                    if new_alt > alt_eff + 0.5 && ceiling_ok {
+                        terrain_alt_raised = true;
+                        alt_eff = new_alt;
+                        eprintln!(
+                            "[debug] terrain path collision -> raise cruise alt {:.0}->{:.0}m (path terrain {:.0}m, v={})",
+                            v.alt_m, alt_eff, path_max_terr, v.id
+                        );
+                        continue 'fmm_attempt;
+                    }
+                    // 超升限 → 不抬升，用当前路径（verify 会记穿山，保可用性）
+                }
+            }
+
             // 受限区底部/顶部剖面切分（沿 raw 路径；剖面段跳过平滑链）
             smooth_src.clear();
             profile_mask.clear();
@@ -466,7 +571,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                 let (sub, mask, nw) = build_restricted_profiles(
                     seg,
                     &all_zones,
-                    v.alt_m,
+                    alt_eff,
                     opts.max_climb_deg,
                     v.profile.ceiling_m,
                     terrain.as_source(),
@@ -486,6 +591,16 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
             break;
         }
         let mut warnings = Vec::new();
+        // 抬升提示（2026-08-10）：巡航高度被抬升必须显式告知（低空任务被地形抬升）。
+        if terrain_alt_raised && alt_eff > v.alt_m + 0.5 {
+            let terr_max = (alt_eff - opts.clearance_m.max(1.0) - 100.0).max(0.0);
+            let msg = format!(
+                "terrain clearance: cruise altitude raised {:.0}->{:.0}m (terrain up to {:.0}m)",
+                v.alt_m, alt_eff, terr_max
+            );
+            warnings.push(msg.clone());
+            degradations.push(msg);
+        }
         // 降速提示（主管 2026-08-07：速度非锁定，转弯段可降速实现小半径）：
         // turn_radius < 巡航物理下限 → 转弯段需降到 v_turn = sqrt(r·g·tanφ)。
         if opts.turn_radius_m > 0.0 {
@@ -665,7 +780,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
             // 段端点 = 起点 + 必经点 + 目标（直线替代用；必经点硬约束，任何平滑不得移除）
             let mut straight_pts: Vec<crate::path::PathPoint> = Vec::new();
             for g in &seg_ends {
-                let p = crate::path::PathPoint::new(g.lon, g.lat, v.alt_m);
+                let p = crate::path::PathPoint::new(g.lon, g.lat, alt_eff);
                 let dup = straight_pts.last().map_or(false, |q| {
                     (q.lon - p.lon).abs() < 1e-12 && (q.lat - p.lat).abs() < 1e-12
                 });
@@ -3132,6 +3247,87 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn zigzag24_low_alt_terrain_raise_no_staircase() {
+        // 主管 2026-08-10 输入（east_asia 7.5as 真实地形）：双机独立 target_ref。
+        // v2 起点 1000m（116.55°E,38.55°N）→ 目标 1500m（116.07°E,42.00°N）——路径
+        // 穿内蒙古高原（地形 2050m+）——FMM 2D 不感知飞行高度 vs 地形 → 1000m raw
+        // 穿山 → Theta*/verify 全拒 → 回退 734 点网格楼梯（smoothing_failed）。
+        // 修复：代价场按本机高度把「Land + 净空 ≥ alt + 300m」格点置 INF（FMM 绕山）；
+        // 过滤后无解 → 无过滤场探测路径 → 路径撞山（2050m）→ 抬升到「路径地形最高 +
+        // 净空 + 100m」=2250m 重跑 → 平滑 7 点；restricted 底部 1500m 剖面保持。
+        // 回归保护：① 抬升不破坏 v1（3000m 不动）；② restricted 墙膨胀/软罚带不因
+        // terrain 存在而误调（zigzag21 回归）；③ 抬升只发生在路径撞山（非区域级）。
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+        let cand = root.join("data/east_asia_7p5as.arpack");
+        if !cand.exists() {
+            eprintln!("skip zigzag24: real terrain missing ({})", cand.display());
+            return;
+        }
+        let s = r#"{
+            "schema_version":"0.20",
+            "mission":{
+                "start":{"lon":115.9,"lat":39.8,"alt_m":3000},
+                "target":{"lon":116.8,"lat":40.3,"alt_m":3000},
+                "vehicles":[
+                    {"id":"v1","profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":250,"min_turn_radius_m":442,"max_climb_angle_deg":15},
+                     "start_pose":{"lon":117.5708068837583,"lat":38.97929027731468,"alt_m":3000,"heading_deg":45},
+                     "mid_waypoints":[],"target_ref":"114.62855523087296,41.481418330201244,3000"},
+                    {"id":"v2","profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":250,"min_turn_radius_m":442,"max_climb_angle_deg":15},
+                     "start_pose":{"lon":116.55201554900877,"lat":38.54836682471938,"alt_m":1000,"heading_deg":45},
+                     "mid_waypoints":[],"target_ref":"116.06634800292873,42.00165253451988,1500"}],
+                "red_forces":{"radars":[]},
+                "no_fly_zones":[
+                    {"id":"zone_1786326750206","zone_type":"no_fly","shape":"polygon","geometry":{"vertices":[[116.29703178143244,40.659872167707796],[115.20946822222263,39.507896098494335],[115.73653221684515,39.54513536978776]]},"alt_min_m":0,"alt_max_m":12000,"height_semantics":"msl"}],
+                "restricted_zones":[
+                    {"id":"rz_1786326782863","zone_type":"restricted","shape":"circle","geometry":{"center":[116.60669517425168,39.793491838843366],"radius_km":40},"alt_min_m":2000,"alt_max_m":6000,"height_semantics":"msl"}],
+                "obstacles":[],
+                "terrain":{"source":"path","path":"__P__"},
+                "parameters":{}
+            }
+        }"#;
+        let s = s.replace("__P__", &cand.to_string_lossy().replace('\\', "\\\\"));
+        let input = parse(&s);
+        let out = solve(&input, &SolveParams::default(), 0).unwrap();
+        let v1 = &out.vehicles[0];
+        let v2 = &out.vehicles[1];
+        assert_eq!(v1.status, "planned");
+        assert_eq!(v2.status, "planned");
+        // v2：抬升 + 平滑（修复前 734 点楼梯 + smoothing_failed）
+        assert!(
+            v2.path.len() <= 20,
+            "v2 应平滑交付（修复前 734 点网格楼梯），实际 {} 点",
+            v2.path.len()
+        );
+        assert!(
+            v2.warnings.iter().any(|w| w.contains("cruise altitude raised")),
+            "v2 应提示巡航高度抬升，实际 {:?}",
+            v2.warnings
+        );
+        assert!(
+            v2.warnings.iter().all(|w| !w.contains("smoothing_failed")),
+            "v2 不应 smoothing_failed，实际 {:?}",
+            v2.warnings
+        );
+        // v2 抬升后 restricted 底部 1500m 剖面保持（穿过 rz 带内时下降底部穿行）
+        assert!(
+            v2.path.iter().any(|p| (p.alt_m - 1500.0).abs() < 1.0),
+            "v2 restricted 底部 1500m 剖面应保持，实际 {:?}",
+            v2.path
+        );
+        // v1：3000m 不受抬升影响，平滑且无 smoothing_failed
+        assert!(
+            v1.path.len() <= 20,
+            "v1 应平滑交付，实际 {} 点",
+            v1.path.len()
+        );
+        assert!(
+            v1.warnings.iter().all(|w| !w.contains("smoothing_failed")),
+            "v1 不应 smoothing_failed，实际 {:?}",
+            v1.warnings
+        );
     }
 }
 
