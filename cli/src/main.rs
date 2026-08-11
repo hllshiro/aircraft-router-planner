@@ -212,9 +212,22 @@ fn run(args: &Args) -> Result<(), AppError> {
         return Ok(());
     }
 
-    // 4. 解算（Phase 4 M1 接入：代价场 → FMM → 回溯 → 平滑链 → 输出契约）
+    // 4. 解算前：外部地形（GeoTIFF/DTED/SRTM .hgt）自动 convert 为 ARPK1。
+    //    solver 只吃 ARPK1（架构决策）；demo 用户直接选外部 tiff 时由 CLI 运行时
+    //    路径补齐「外部文件 → convert → ARPK1 → solver」（2026-08-11 主管
+    //    Beijing_DEM.tif 被 arpack magic mismatch 拒绝）。
+    //    转换产物按 输入路径+mtime 缓存于系统临时目录 arp_auto_convert/，
+    //    重复规划不重转（57MB tiff ≈ 2-4s）。
+    let terrain_path = args
+        .terrain
+        .clone()
+        .or_else(|| input.mission.terrain.path.clone().map(PathBuf::from));
+    let terrain_path = match terrain_path {
+        Some(p) if is_external_terrain(&p) => Some(auto_convert_to_arpk1(&p)?),
+        other => other,
+    };
     let params = SolveParams {
-        terrain_path: args.terrain.clone(),
+        terrain_path,
         mask_path: args.mask.clone(),
         grid: args.grid,
     };
@@ -257,4 +270,53 @@ fn write_output(args: &Args, out: &Output) -> Result<(), AppError> {
         }
     }
     Ok(())
+}
+
+/// 外部地形扩展名（solver 只吃 ARPK1，这些格式需先 convert）。
+fn is_external_terrain(p: &std::path::Path) -> bool {
+    matches!(
+        p.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase().as_str(),
+        "tif" | "tiff" | "hgt" | "dt0" | "dt1" | "dt2"
+    )
+}
+
+/// FNV-1a 64（稳定跨进程，用于缓存文件名——DefaultHasher 每次随机）。
+fn fnv1a(s: &str) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in s.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
+/// 转换缓存版本：auto-convert 缓存 key 的一部分。外部格式解析/转换逻辑变更时 bump
+/// （旧缓存强制失效——2026-08-11 Beijing_DEM north-up 方向修复后，旧错误方向缓存
+/// 因 path+mtime 不变被复用，导致 OOB → FMM no path）。
+const CONVERT_CACHE_VERSION: u64 = 2;
+
+/// 外部地形 → ARPK1（缓存到系统临时目录 arp_auto_convert/，按输入路径+mtime 命中；
+/// convert 失败清理半成品，避免缓存损坏文件被复用）。
+fn auto_convert_to_arpk1(input: &std::path::Path) -> Result<PathBuf, AppError> {
+    let dir = std::env::temp_dir().join("arp_auto_convert");
+    std::fs::create_dir_all(&dir)?;
+    let mtime = std::fs::metadata(input)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let out = dir.join(format!(
+        "arp_v{}_{:016x}_{}.arpack",
+        CONVERT_CACHE_VERSION,
+        fnv1a(&input.to_string_lossy()),
+        mtime
+    ));
+    if !out.exists() {
+        if let Err(e) = convert::convert_file(input, &out, &ConvertOptions::default()) {
+            let _ = std::fs::remove_file(&out);
+            return Err(e);
+        }
+    }
+    Ok(out)
 }

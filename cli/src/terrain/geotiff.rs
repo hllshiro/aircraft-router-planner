@@ -133,20 +133,16 @@ pub(crate) fn parse_georef(
     if sx == 0.0 || sy0 == 0.0 {
         return Err(AppError::Data("geotiff degenerate pixelscale".into()));
     }
-    // gdal 非标准输出检测：tiepoint 在左上角（north-up 数据）但 ModelPixelScale
-    // sy > 0（正）——行向下 model_y 增大，行 bottom 纬度越界（|lat|>90）即证伪。
-    // 修正：sy 方向反置 → row_flip = true（行 0 = 北）。
-    // 标准 south-up（tiepoint 在左下角，sy>0）y1 不越界，保持不变。
-    let sy = if sy0 > 0.0 {
-        let y1_check = ty - tj * sy0 + (height as f64 - 1.0) * sy0;
-        if y1_check > 90.0 || y1_check < -90.0 {
-            -sy0
-        } else {
-            sy0
-        }
-    } else {
-        sy0
-    };
+    // 行向判定（2026-08-11 主管 Beijing_DEM.tif 暴露）：tiepoint (0,0) + ModelPixelScale
+    // sy>0 时 GDAL north-up 与 south-up 布局无法靠 tj 区分（都 tj=0），旧逻辑仅用
+    // 「south-up 假设下北界 |lat|>90 越界」检测 north-up——北京数据北界 42.68° 不越界
+    // → 误判 south-up → origin 取左上角 41.06 当南界 → 全区域采样 OutOfBounds。
+    // 新判定：分别算 south-up 假设的北界（y0+(h-1)*sy）与 north-up 假设的南界
+    // （y0-(h-1)*sy），越界者淘汰；两者都合理（或都越界）时默认 north-up（GDAL /
+    // ArcGIS / Global Mapper 等主流工具默认 north-up，tiepoint (0,0) = 左上角）；
+    // tiepoint 不在行 0（tj>0，如左下角布局）保守 south-up。
+    let y0_tie = ty - tj * sy0;
+    let sy = resolve_sy(sy0, tj, height as usize, y0_tie);
     // 像素 (0,0) 的模型坐标（仿射：x = tx + (col - ti)*sx, y = ty + (row - tj)*sy）
     let x0 = tx - ti * sx;
     let y0 = ty - tj * sy;
@@ -178,6 +174,30 @@ pub(crate) fn parse_georef(
         row_flip: sy < 0.0,
         col_flip: sx < 0.0,
     })
+}
+
+/// 行向解析：ModelPixelScale sy0（>0 时 GDAL 写正）、tiepoint 行 tj、行数 height、
+/// tiepoint 的 model_y（y0_tie = ty - tj*sy0）→ 实际 sy（正 = south-up，行 0 = 南；
+/// 负 = north-up，行 0 = 北，需 row_flip）。判定逻辑见 parse_georef 注释。
+fn resolve_sy(sy0: f64, tj: f64, height: usize, y0_tie: f64) -> f64 {
+    if sy0 > 0.0 {
+        let h = height as f64 - 1.0;
+        let south_max = y0_tie + h * sy0;
+        let north_min = y0_tie - h * sy0;
+        let south_ok = (-90.0..=90.0).contains(&south_max);
+        let north_ok = (-90.0..=90.0).contains(&north_min);
+        if south_ok && !north_ok {
+            sy0
+        } else if north_ok && !south_ok {
+            -sy0
+        } else if tj > 0.0 {
+            sy0
+        } else {
+            -sy0
+        }
+    } else {
+        sy0
+    }
 }
 
 /// GDAL_NODATA tag → 空洞值（None = 无标记；F32/F64 的 NaN 仍按空洞）。
@@ -539,5 +559,31 @@ mod tests {
         assert!(s.height_at(b.min_lon + 0.0005, b.min_lat + 0.0005).is_some());
         // 出界 → None
         assert!(s.height_at(b.max_lon + 0.01, b.min_lat).is_none());
+    }
+
+    /// 行向判定（2026-08-11 Beijing_DEM north-up 暴露）：
+    /// 1) Beijing_DEM.tif（tiepoint (0,0)=(115.42,41.06) 左上角，sy0>0，北界 42.68 不越界）
+    ///    → north-up（sy 反号，row_flip=true）→ 南界 = 41.06-(4711)*cell ≈ 39.44；
+    /// 2) 南极 south-up（y0=-89，north-up 假设南界越界）→ south-up；
+    /// 3) gdal 裁剪东亚（tiepoint 左上角 69.999861，高度 10°）→ north-up → 南界 60
+    ///    （2026-08-08 主管"origin (70,60)"修复回归）；
+    /// 4) tj>0（tiepoint 非行 0，左下角布局）保守 south-up。
+    #[test]
+    fn resolve_sy_direction() {
+        // Beijing_DEM.tif
+        let sy = resolve_sy(0.0003433228, 0.0, 4712, 41.05923271);
+        assert!(sy < 0.0, "Beijing north-up should flip, sy={sy}");
+        // 南极 south-up：north-up 假设南界 -89.9999-0.0999 < -90 越界 → south-up
+        assert_eq!(resolve_sy(0.0001, 0.0, 1000, -89.9999), 0.0001);
+        // gdal 裁剪东亚：都合理 → tj=0 → north-up（南界 = 69.999861-9999*0.001 = 60）
+        let sy = resolve_sy(0.001, 0.0, 10000, 69.999861);
+        assert!(sy < 0.0, "gdal north-up should flip, sy={sy}");
+        // tj>0 保守 south-up
+        assert_eq!(resolve_sy(0.001, 500.0, 1000, 60.0), 0.001);
+        // sy0<0 显式（north-up 直写）保持负
+        assert_eq!(resolve_sy(-0.0003, 0.0, 100, 40.0), -0.0003);
+        // 北极 north-up：south-up 假设北界 85+10=95 越界 → north-up
+        let sy = resolve_sy(0.01, 0.0, 1000, 85.0);
+        assert!(sy < 0.0, "arctic north-up should flip, sy={sy}");
     }
 }
