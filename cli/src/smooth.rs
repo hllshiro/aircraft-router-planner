@@ -146,7 +146,12 @@ pub fn theta_star_smooth(
             if j == i + 1 || j == i {
                 break;
             }
-            let a = path.points[i];
+            // 跳点插弧（zz33）后 out 末点是弧点 E（≠ path[i]，i=k 是 raw 索引）：
+            // check 起点必须用**实际输出末点**（E），否则 E→path[j] 穿 zone 段
+            // （从 raw path[i] 检查可能在外侧放行）被 verify 抓到 → 全链回退
+            // 锯齿（2026-08-11 zz34：SEG1 插弧后 E→path[231] 穿 restricted 圆
+            // 17km 深处，check 用 raw 点放行，verify 拒 → 1679 点）。
+            let a = *out.last().unwrap();
             let b = path.points[j];
             if !check(a.lon, a.lat, a.alt_m, b.lon, b.lat, b.alt_m) {
                 if std::env::var_os("ARP_DEBUG_SMOOTH").is_some() && out.len() < 4 {

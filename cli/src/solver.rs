@@ -4380,6 +4380,76 @@ mod tests {
     }
 
     #[test]
+    fn zigzag34_theta_star_check_uses_output_endpoint_after_jump_arc() {
+        // 主管 2026-08-11 输入（zz34）：单机 + 2 必经点 + radar（early_warning
+        // 50km，wp2 在盘内 37.5km）+ no_fly 三角形 + restricted 圆（圆顶与三角形
+        // C 顶点同高，膨胀后走廊闭合）。
+        // 根因：zz33 跳点插弧成功后 out 末点是弧点 E（≠ raw path[i]，i=k=231），
+        // 后续 Theta* 跳点 check 起点仍用 path.points[i]（raw 走廊内点）——漏检
+        // E→path[j] 穿 restricted 圆（SEG1 E→(117.0828,39.8165) 在 y≈40.02 处穿圆
+        // 17km 深处）→ theta_star 输出 9 点但 final verify 拒（issues=96）→ 全链
+        // 回退 raw 1679 点网格楼梯（871km）。
+        // 修复：Theta* 跳点 check 起点改用 out 实际末点（插弧后为 E）——与 verify
+        // 同口径检查真实输出段。
+        // 结果：1679→20 点平滑，必经点偏差 <0.3km，562.4km，radar 累计探测
+        // 0.0154（路径绕开雷达盘）。
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+        let cand = root.join("data/east_asia_7p5as.arpack");
+        if !cand.exists() {
+            eprintln!("skip zigzag34: real terrain missing ({})", cand.display());
+            return;
+        }
+        let s = r#"{
+            "schema_version":"0.20",
+            "mission":{
+                "start":{"lon":115.9,"lat":39.8,"alt_m":3000},
+                "target":{"lon":116.8,"lat":40.3,"alt_m":3000},
+                "vehicles":[
+                    {"id":"v1","profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":250,"min_turn_radius_m":442,"max_climb_angle_deg":15},
+                     "start_pose":{"lon":117.49643196710215,"lat":39.45217964261854,"alt_m":3000,"heading_deg":45},
+                     "mid_waypoints":[{"lon":116.30222159303027,"lat":40.52501663038863,"alt_m":3000},{"lon":116.5195046089279,"lat":40.00372676035467,"alt_m":3000}],
+                     "target_ref":"115.41519624070744,41.063105449335495,3000"}],
+                "red_forces":{"radars":[
+                    {"id":"radar_1786430183478","lon":116.10054207161798,"lat":39.893963015168175,"radar_type":"early_warning","radius_km":50,"alt_m":10}
+                ]},
+                "no_fly_zones":[
+                    {"id":"zone_1786418099258","zone_type":"no_fly","shape":"polygon",
+                     "geometry":{"vertices":[[116.13619653711649,40.07186918292957],[116.91994987492495,40.58747146826297],[116.5682729278144,40.19722929127514]]},
+                     "alt_min_m":0,"alt_max_m":12000,"height_semantics":"msl"}],
+                "restricted_zones":[
+                    {"id":"rz_1786418172746","zone_type":"restricted","shape":"circle",
+                     "geometry":{"center":[116.87035584365995,40.01756770083293],"radius_km":20},
+                     "alt_min_m":1000,"alt_max_m":6000,"height_semantics":"msl"}],
+                "obstacles":[],
+                "terrain":{"source":"path","path":"__P__"},
+                "parameters":{"p_cross":0.9}
+            }
+        }"#;
+        let s = s.replace("__P__", &cand.to_string_lossy().replace('\\', "\\\\"));
+        let input = parse(&s);
+        let out = solve(&input, &SolveParams::default(), 0).unwrap();
+        let v = &out.vehicles[0];
+        assert_eq!(v.status, "planned", "v1 应 planned");
+        assert!(
+            v.path.len() <= 100,
+            "应平滑交付（修复前 1679 点网格楼梯），实际 {} 点",
+            v.path.len()
+        );
+        assert!(
+            v.warnings.iter().all(|w| !w.contains("smoothing_failed")),
+            "不应 smoothing_failed，实际 {:?}",
+            v.warnings
+        );
+        for (lo, la) in [
+            (116.30222159303027, 40.52501663038863),
+            (116.5195046089279, 40.00372676035467),
+        ] {
+            let near = v.path.iter().any(|p| crate::path::haversine_m(p.x, p.y, lo, la) <= 5_500.0);
+            assert!(near, "必经点 ({lo},{la}) 应经过邻域，实际 {:?}", v.path);
+        }
+    }
+
+    #[test]
     fn oob_input_point_no_error_and_plans() {
         // 主管 2026-08-11：放开输入点限制——起点/必经点落在地形数据范围外
         // （east_asia_7p5as 东界 135E 之外 152E）不再报 data_error（旧 8e5e64e
