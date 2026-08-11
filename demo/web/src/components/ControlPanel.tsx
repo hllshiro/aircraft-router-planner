@@ -336,7 +336,7 @@ export function ControlPanel({
               />
             </div>
           </div>
-          {/* 每机独立目标（2026-08-10：target_ref 自定义坐标；"恢复全局目标" 清除后跟 mission.target） */}
+          {/* 每机独立目标（2026-08-10：target_ref 自定义坐标；改输入即写 target_ref 覆盖全局，删恢复按钮 2026-08-11） */}
           <div className="field-row">
             <div>
               <label>目标经度</label>
@@ -377,15 +377,6 @@ export function ControlPanel({
                   })
                 }
               />
-            </div>
-            <div style={{ alignSelf: 'flex-end' }}>
-              <button
-                className="btn-small"
-                title="恢复为全局 mission.target"
-                onClick={() => updateVehicleAt(idx, { target_ref: undefined })}
-              >
-                恢复全局目标
-              </button>
             </div>
           </div>
           {/* 每机独立起终点场景拾取（原全局按钮已转移至此） */}
