@@ -487,10 +487,28 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
         // （>alt_eff+0.5 且 ≤ceiling）单调有界；attempts 上限兜底（FMM 4 次 +
         // 平滑抬升重跑 2 次）。
         let mut attempts = 0usize;
+        // 阶段1-C 失败诊断：最近 3 次 attempt 的 final verify 失败原因（attempts>6
+        // 耗尽时输出 JSON，供定位"为什么平滑链始终不过"）。
+        let mut last_failures: Vec<(usize, Vec<String>)> = Vec::new();
         'fmm_attempt: loop {
             attempts += 1;
             if attempts > 6 {
+                // 诊断输出（阶段1-C）：最后一次 verify 失败原因 JSON 到 stderr。
+                if !last_failures.is_empty() {
+                    let json = serde_json::json!({
+                        "event": "fmm_attempts_exhausted",
+                        "vehicle": v.id,
+                        "attempts": attempts - 1,
+                        "failures": last_failures.iter().map(|(a, iss)| {
+                            serde_json::json!({ "attempt": a, "issues": iss })
+                        }).collect::<Vec<_>>(),
+                    });
+                    eprintln!("{}", serde_json::to_string(&json).unwrap_or_else(|_| {
+                        r#"{"event":"fmm_attempts_exhausted","serialize_error":true}"#.into()
+                    }));
+                }
                 pts = raw_joined.points.clone();
+                warnings.push("smoothing_failed: max attempts exhausted".into());
                 break;
             }
             let use_terrain_mask = if terrain_fallback_done {
@@ -1033,6 +1051,13 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                 &ctx,
                 Some(phys_min_radius_m),
             );
+            // 阶段1-C：收集失败原因（仅失败的 attempt；保留最近 3 次）
+            if !final_rep.ok {
+                last_failures.push((attempts, final_rep.issues.clone()));
+                if last_failures.len() > 3 {
+                    last_failures.remove(0);
+                }
+            }
             if final_rep.ok {
                 pts = joined.points;
                 // extend 而非覆盖：保留 profile 级降速提示（turn_radius 信任输入）
@@ -1276,6 +1301,25 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
             if !degradations.contains(&msg) {
                 degradations.push(msg);
             }
+        }
+        // 阶段1-D 回退过硬闸（主管 2026-08-11 拍板：不需要输出无法实现的路径）：
+        // raw 回退（smoothing_failed / max attempts exhausted）后若直线替代与雷达
+        // 直穿替代都未成功（未撤销 smoothing_failed），则路径未过完整复验硬闸
+        // （地形净空/禁飞/受限区）——不再交付 raw，明确输出 no_solution。
+        // "宁可不给路径，也不给违禁路径"；失败原因保留在 warnings，
+        // 详细 issue JSON 已由 smooth_path_chain / attempts 耗尽分支输出到 stderr。
+        let smoothing_failed = warnings.iter().any(|w| w.starts_with("smoothing_failed"));
+        if smoothing_failed {
+            let mut diag = warnings.clone();
+            diag.push("no valid smoothed path; raw fallback withheld (hard-gate)".into());
+            out_vehicles.push(VehicleOutput {
+                id: v.id.clone(),
+                status: "no_solution".into(),
+                path: Vec::new(),
+                distance_m: 0.0,
+                warnings: diag,
+            });
+            continue 'veh;
         }
         let dist = Path::new(pts.clone()).length_m();
         out_vehicles.push(VehicleOutput {
@@ -1529,32 +1573,25 @@ fn make_segment_check<'a>(
         const N: usize = 16;
         const DEEP_RATIO: f64 = 0.7;
         // 地形净空：段沿程采样（段高度线性插值；与 verify 同口径的 Land 判定）。
+        // 采样点数与单点判定共用 smooth::terrain_sample_count / terrain_point_clearance
+        // 原语（阶段1-A，2026-08-11）——两处口径单一来源，杜绝 zz29 相位差类漏检。
         if let Some(t) = terrain {
             let seg_len_m = crate::path::haversine_m(lon1, lat1, lon2, lat2);
-            // 目标间隔 ~200m（7.5as 地形 ~230m 分辨率），与 verify 同口径；
-            // 上限按 200m 间隔放宽到 1024（≈205km），防止超长段截断漏检。
-            let n_t = ((seg_len_m / 200.0).ceil() as usize).max(2).min(1024);
+            // 目标间隔 ~200m（7.5as 地形 ~230m 分辨率），下限 2（同 verify 下限语义
+            // min_samples.max(2)），上限 1024（≈205km，防超长段退化）——与 verify
+            // 同函数同间隔，仅上限收紧（Theta* 每候选段都查地形，性能关键）。
+            let n_t = crate::smooth::terrain_sample_count(seg_len_m, 2, 1024);
             for i in 0..=n_t {
                 let tt = i as f64 / n_t as f64;
                 let lon = lon1 + (lon2 - lon1) * tt;
                 let lat = lat1 + (lat2 - lat1) * tt;
                 let alt = alt1 + (alt2 - alt1) * tt;
-                match t.sample_at(lon, lat) {
-                    Sample::Land(h) => {
-                        if alt < h + clearance_m {
-                            return false;
-                        }
-                    }
-                    Sample::Water | Sample::Lake(_) => {
-                        if alt < clearance_m {
-                            return false;
-                        }
-                    }
-                    Sample::NoData => { /* 空洞不硬拒（降级警告由 verify 汇总） */ }
-                    Sample::OutOfBounds => {
-                        /* 2026-08-11 放开输入点限制：数据范围外同空洞，不硬拒 */
-                    }
-                    Sample::Forbidden => return false, // 防御：地形源不产生墙，出现即拒
+                match crate::smooth::terrain_point_clearance(t, lon, lat, alt, clearance_m) {
+                    crate::smooth::TerrainPointClearance::Fail(_) => return false,
+                    // 空洞不硬拒（降级警告由 verify 汇总）；OOB 同空洞（2026-08-11）
+                    crate::smooth::TerrainPointClearance::NoData
+                    | crate::smooth::TerrainPointClearance::OutOfBounds => {}
+                    crate::smooth::TerrainPointClearance::Ok => {}
                 }
             }
         }
@@ -4488,5 +4525,49 @@ mod tests {
                 v.warnings
             );
         }
+    }
+
+    #[test]
+    fn smoothing_failed_withholds_raw_fallback_no_solution() {
+        // 阶段1-D 护栏（主管 2026-08-11 拍板：不需要输出无法实现的路径）：
+        // FMM 有解但所有平滑阶段都失败（min_turn_radius_m=100km 使任何绕行
+        // 转角曲率半径都不足 → Theta*/Catmull/Dubins/greedy 全拒），且直线
+        // 替代穿禁飞方块被拒 → 不得再回退 raw 交付（旧行为 status=planned +
+        // 密集网格楼梯），必须明确 no_solution + 保留失败原因。
+        let s = r#"{
+            "schema_version":"0.20",
+            "mission":{
+                "start":{"lon":115.9,"lat":39.8,"alt_m":3000},
+                "target":{"lon":116.8,"lat":40.3,"alt_m":3000},
+                "vehicles":[
+                    {"id":"v1","profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":250,"min_turn_radius_m":100000,"max_climb_angle_deg":15},
+                     "start_pose":{"lon":115.0,"lat":39.0,"alt_m":3000,"heading_deg":90},
+                     "mid_waypoints":[
+                        {"lon":116.0,"lat":39.0,"alt_m":3000},
+                        {"lon":116.0,"lat":39.5,"alt_m":3000},
+                        {"lon":117.0,"lat":39.5,"alt_m":3000}],
+                     "target_ref":"117.0,39.0,3000"}
+                ],
+                "red_forces":{"radars":[]},
+                "no_fly_zones":[
+                    {"id":"wall","zone_type":"no_fly","shape":"polygon",
+                     "geometry":{"vertices":[[116.2,39.25],[116.8,39.25],[116.8,39.75],[116.2,39.75]]},
+                     "alt_min_m":0,"alt_max_m":12000,"height_semantics":"msl"}],
+                "restricted_zones":[],"obstacles":[],
+                "terrain":{"source":"none"}
+            }
+        }"#;
+        let input = parse(s);
+        let out = solve(&input, &SolveParams::default(), 0).unwrap();
+        let v = &out.vehicles[0];
+        assert_eq!(v.status, "no_solution", "平滑全失败应 no_solution，实际 {:?}", v.status);
+        assert!(v.path.is_empty(), "no_solution 不应携带 raw 路径");
+        assert!(
+            v.warnings
+                .iter()
+                .any(|w| w.contains("smoothing_failed") || w.contains("hard-gate")),
+            "应保留失败原因，实际 {:?}",
+            v.warnings
+        );
     }
 }

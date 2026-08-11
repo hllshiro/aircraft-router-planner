@@ -972,6 +972,20 @@ pub(crate) fn segment_circle_intersect_t(
     Some((t1, t2))
 }
 
+// ==================== verify 软项容忍带（阶段1-B，主管 2026-08-11 拍板取值） ====================
+// 软项（转角/半径/弦高/爬升角）微小超差不判败（避免"超差 0.5° 全链回退锯齿"），
+// 容忍带内 → warning（判过但计 warn）；超出容忍带 → issue（该阶段失败）。
+// 硬闸（地形净空 / 禁飞/受限区）无容忍带，违规即 issue。常量单一来源，
+// verify 与链内各阶段共用，杜绝"验证阈值漂移"。
+/// 转角容忍带：≤ max_turn_deg + SOFT_TURN_DEG 判过（计 warn）。
+pub const SOFT_TURN_DEG: f64 = 2.0;
+/// 半径容忍带：≥ turn_radius_m × SOFT_RADIUS_RATIO 判过（< 0.99×r 计 warn）。
+pub const SOFT_RADIUS_RATIO: f64 = 0.95;
+/// 弦高容忍带：≤ chord_tol_m + SOFT_CHORD_M 判过（> tol 计 warn）。
+pub const SOFT_CHORD_M: f64 = 50.0;
+/// 爬升角容忍带：≤ max_climb_deg + SOFT_CLIMB_DEG 判过（计 warn）。
+pub const SOFT_CLIMB_DEG: f64 = 2.0;
+
 #[allow(clippy::too_many_arguments)]
 pub fn verify_path(
     path: &Path,
@@ -1016,9 +1030,15 @@ pub fn verify_path(
             let dh = (path.points[i].alt_m - path.points[i - 1].alt_m).abs();
             if horiz > 1e-9 {
                 let climb = (dh / horiz).atan().to_degrees();
-                if climb > opts.max_climb_deg {
+                if climb > opts.max_climb_deg + SOFT_CLIMB_DEG {
                     rep.issues.push(format!(
                         "segment {i}: climb {climb:.2}deg > max {:.1}deg",
+                        opts.max_climb_deg
+                    ));
+                } else if climb > opts.max_climb_deg {
+                    // 容忍带内：判过但计 warn（阶段1-B）
+                    rep.warnings.push(format!(
+                        "segment {i}: climb {climb:.2}deg slightly exceeds max {:.1}deg (tolerated)",
                         opts.max_climb_deg
                     ));
                 }
@@ -1034,9 +1054,15 @@ pub fn verify_path(
             let h0 = path.segment_heading_deg(i - 1).unwrap_or(0.0);
             let h1 = path.segment_heading_deg(i).unwrap_or(h0);
             let turn = angle_diff_deg(h0, h1).abs();
-            if turn > opts.max_turn_deg {
+            if turn > opts.max_turn_deg + SOFT_TURN_DEG {
                 rep.issues.push(format!(
                     "vertex {i}: turn {turn:.2}deg > max {:.1}deg",
+                    opts.max_turn_deg
+                ));
+            } else if turn > opts.max_turn_deg {
+                // 容忍带内：判过但计 warn（阶段1-B，主管 2026-08-11：≤max+2° 判过）
+                rep.warnings.push(format!(
+                    "vertex {i}: turn {turn:.2}deg slightly exceeds max {:.1}deg (tolerated)",
                     opts.max_turn_deg
                 ));
             }
@@ -1057,13 +1083,19 @@ pub fn verify_path(
                 lp.to_xy(p1.lon, p1.lat),
                 lp.to_xy(p2.lon, p2.lat),
             );
-            if let Some(r) = circumradius(a, b, c)
-                && r < opts.turn_radius_m * 0.99
-            {
-                rep.issues.push(format!(
-                    "vertex {i}: radius {r:.0}m < min {:.0}m",
-                    opts.turn_radius_m
-                ));
+            if let Some(r) = circumradius(a, b, c) {
+                if r < opts.turn_radius_m * SOFT_RADIUS_RATIO {
+                    rep.issues.push(format!(
+                        "vertex {i}: radius {r:.0}m < min {:.0}m",
+                        opts.turn_radius_m
+                    ));
+                } else if r < opts.turn_radius_m * 0.99 {
+                    // 容忍带内 [0.95, 0.99)×r：判过但计 warn（阶段1-B）
+                    rep.warnings.push(format!(
+                        "vertex {i}: radius {r:.0}m slightly below min {:.0}m (tolerated)",
+                        opts.turn_radius_m
+                    ));
+                }
             }
         }
     }
@@ -1073,7 +1105,8 @@ pub fn verify_path(
     // 点对长段（>20km）采样间隔过大，山峰会漏过——276km 直线段 9 点采样间隔
     // ~30km，2137m 峰被漏 → 穿山路径通过复验交付（dubins 96 点段短采样密能发现，
     // 链却选点数最少的 2 点直线）。目标间隔 ~1km（7.5as 地形 ~230m 分辨率，
-    // 1km 足够捕捉山峰宽度），下限 = 原固定值。
+    // 1km 足够捕捉山峰宽度），下限 = 原固定值。采样点数与 Theta* check 共用原语
+    // terrain_sample_count（阶段1-A，两处口径统一）。
     let infl_km = ctx.zone_inflation_m / 1000.0;
     for i in 1..n {
         let a = path.points[i - 1];
@@ -1084,7 +1117,7 @@ pub fn verify_path(
         // 网格错过（2026-08-10 zigzag29：SEG23 121km 直线 terrain 2082m 峰，
         // check 与 verify 相位差 379m → 一个抓到另一个漏）。200m < 格距 230m，
         // 任意相位下 ≥1 个采样点必落入 ≥230m 宽的山峰格。下限 = 原固定值。
-        let segs = ((seg_len_m / 200.0).ceil() as usize).max(opts.verify_seg_samples.max(2));
+        let segs = terrain_sample_count(seg_len_m, opts.verify_seg_samples, usize::MAX);
         // Zone 硬墙（NoFly/Obstacle）：段到墙水平净距 ≥ zone_inflation_m
         // （几何精确，无采样漏判；主管 2026-08-06：绕飞贴边→考虑飞机机动留转弯空间。
         //  inflation=0 时仍拒绝穿入（clr≤0）——与原 zone_contains_at 采样语义一致）
@@ -1167,24 +1200,15 @@ pub fn verify_path(
                 ));
             }
             if let Some(ter) = ctx.terrain {
-                match ter.sample_at(lon, lat) {
-                    crate::terrain::Sample::Land(h) => {
-                        if alt < h + opts.clearance_m {
-                            rep.issues.push(format!(
-                                "sample (lon={lon:.4},lat={lat:.4}) clearance {:.0}m < {:.0}m (terrain {h:.0}m)",
-                                alt - h, opts.clearance_m
-                            ));
-                        }
+                // 单点判定与 Theta* check 共用原语（阶段1-A）——口径单一来源。
+                match terrain_point_clearance(ter, lon, lat, alt, opts.clearance_m) {
+                    TerrainPointClearance::Fail(msg) => {
+                        rep.issues.push(format!(
+                            "sample (lon={lon:.4},lat={lat:.4}) {msg}"
+                        ));
                     }
-                    crate::terrain::Sample::Water | crate::terrain::Sample::Lake(_) => {
-                        if alt < opts.clearance_m {
-                            rep.issues.push(format!(
-                                "sample (lon={lon:.4},lat={lat:.4}) water clearance {alt:.0}m < {:.0}m",
-                                opts.clearance_m
-                            ));
-                        }
-                    }
-                    crate::terrain::Sample::NoData => {
+                    TerrainPointClearance::Ok => {}
+                    TerrainPointClearance::NoData => {
                         // 空洞策略（主管 2026-08-04）：不设数据合格判断，对任意空洞形态
                         // 给出可用结果，最坏降级警告进 stats.degradations。空洞处高度未知
                         // 不阻断航路——固定端点（start/target）落在空洞时硬拒会让全链被拒、
@@ -1194,22 +1218,16 @@ pub fn verify_path(
                             "sample (lon={lon:.4},lat={lat:.4}) NoData terrain: clearance unknown (degraded)"
                         ));
                     }
-                    crate::terrain::Sample::OutOfBounds => {
-                        // 2026-08-11 放开输入点限制：数据范围外同 NoData——
-                        // 高度未知不阻断，降级警告（起终点落在小范围外部地形外时
-                        // 平滑链不再被 OOB 硬拒，回退密集网格楼梯）。逐点去重：
-                        // 整个路径只报首条，避免数百条洪水。
+                    TerrainPointClearance::OutOfBounds => {
+                        // 数据范围外同 NoData（2026-08-11 放开输入点限制）：高度未知
+                        // 不阻断，降级警告。逐点去重：整个路径只报首条，避免数百条洪水
+                        // （起点/终点在外部小范围地形外时整段 OOB）。
                         if !oob_warned {
                             oob_warned = true;
                             rep.warnings.push(format!(
                                 "sample (lon={lon:.4},lat={lat:.4}) out of terrain bounds (degraded)"
                             ));
                         }
-                    }
-                    crate::terrain::Sample::Forbidden => {
-                        rep.issues.push(format!(
-                            "sample (lon={lon:.4},lat={lat:.4}) inside forbidden wall"
-                        ));
                     }
                 }
             }
@@ -1227,9 +1245,15 @@ pub fn verify_path(
                     min_d = d;
                 }
             }
-            if min_d > opts.chord_tol_m {
+            if min_d > opts.chord_tol_m + SOFT_CHORD_M {
                 rep.issues.push(format!(
                     "point {idx}: chord {min_d:.0}m > tol {:.0}m",
+                    opts.chord_tol_m
+                ));
+            } else if min_d > opts.chord_tol_m {
+                // 容忍带内 (tol, tol+50m]：判过但计 warn（阶段1-B）
+                rep.warnings.push(format!(
+                    "point {idx}: chord {min_d:.0}m slightly exceeds tol {:.0}m (tolerated)",
                     opts.chord_tol_m
                 ));
             }
@@ -1267,6 +1291,71 @@ pub fn verify_path(
 
     rep.ok = rep.issues.is_empty();
     rep
+}
+
+/// 段沿程地形采样点数（verify 与 Theta* check 共用原语，2026-08-11 阶段1-A）：
+/// 目标间隔 ~200m（7.5as 地形 ~230m 分辨率——任意相位下 ≥1 采样点必落入
+/// ≥230m 宽的山峰格，zigzag29 相位差教训），下限 min_samples（防短段过稀，
+/// 保持原 verify_seg_samples / 2 语义）。
+/// max_samples 参数化：verify 传 usize::MAX（全量采样——860km 长段需 ~4300 点，
+/// 漏峰会交付穿山路径，zz30 教训）；Theta* check 传 1024（O(n²) 贪心跳点
+/// 每个候选段都查地形，上限控制 worst case）。
+pub fn terrain_sample_count(seg_len_m: f64, min_samples: usize, max_samples: usize) -> usize {
+    ((seg_len_m / 200.0).ceil() as usize)
+        .max(min_samples.max(2))
+        .min(max_samples)
+}
+
+/// 地形净空单点判定结果（verify 与 Theta* check 共用原语，2026-08-11 阶段1-A）。
+#[derive(Debug, Clone, PartialEq)]
+pub enum TerrainPointClearance {
+    /// 净空满足（Land 够高 / Water 够高）。
+    Ok,
+    /// 净空不足（Land 撞山 / Water 不够 / Forbidden 墙），msg 不含
+    /// "sample (lon=..,lat=..) " 前缀（调用方按需拼接）。
+    Fail(String),
+    /// NoData 空洞：净空未知，不阻断（降级警告由调用方汇总）。
+    NoData,
+    /// 数据范围外：同 NoData 不阻断（2026-08-11 放开输入点限制）。
+    OutOfBounds,
+}
+
+/// 地形净空单点判定：统一 Land/Water/Lake/NoData/OOB/Forbidden 语义，
+/// 杜绝 verify 与 Theta* check 两处口径漂移。
+pub fn terrain_point_clearance(
+    terrain: &dyn crate::terrain::TerrainSource,
+    lon: f64,
+    lat: f64,
+    alt: f64,
+    clearance_m: f64,
+) -> TerrainPointClearance {
+    match terrain.sample_at(lon, lat) {
+        crate::terrain::Sample::Land(h) => {
+            if alt < h + clearance_m {
+                TerrainPointClearance::Fail(format!(
+                    "clearance {:.0}m < {:.0}m (terrain {h:.0}m)",
+                    alt - h, clearance_m
+                ))
+            } else {
+                TerrainPointClearance::Ok
+            }
+        }
+        crate::terrain::Sample::Water | crate::terrain::Sample::Lake(_) => {
+            if alt < clearance_m {
+                TerrainPointClearance::Fail(format!(
+                    "water clearance {alt:.0}m < {:.0}m",
+                    clearance_m
+                ))
+            } else {
+                TerrainPointClearance::Ok
+            }
+        }
+        crate::terrain::Sample::NoData => TerrainPointClearance::NoData,
+        crate::terrain::Sample::OutOfBounds => TerrainPointClearance::OutOfBounds,
+        crate::terrain::Sample::Forbidden => {
+            TerrainPointClearance::Fail("inside forbidden wall".into())
+        }
+    }
 }
 
 /// 三点外接圆半径（等距平面；共线 → None）。
@@ -1454,6 +1543,9 @@ pub fn smooth_path_chain<'a>(
     // 更小（2026-08-06 zigzag3：reference=Theta* 时 seg 交付 96 点 Dubins，
     // 与受限区剖面段拼接处半径 7431m<11035m → 全路径终检拒 → 回退 raw）。
     let mut best: Option<(usize, &Path)> = None;
+    // 失败阶段收集（阶段1-C 诊断）：全链失败时把每阶段的 issue/warning 汇总
+    // 成 JSON 输出到 stderr——失败原因可见，杜绝"静默回退"。
+    let mut stage_failures: Vec<(String, Vec<String>, Vec<String>)> = Vec::new();
     for (idx, (_name, stage)) in stages.iter().enumerate().rev() {
         let rep = if _name == "dubins" {
             let mut o = opts.clone();
@@ -1477,6 +1569,7 @@ pub fn smooth_path_chain<'a>(
         // 该阶段复验失败 → 跳过；若含地形净空不足（"(terrain Nm)"）记录最大地形
         // 高度（verify 采样 ~200m 密于 check，窄峰不会被漏检）
         if !rep.ok {
+            stage_failures.push((_name.to_string(), rep.issues.clone(), rep.warnings.clone()));
             let t = rep
                 .issues
                 .iter()
@@ -1543,6 +1636,20 @@ pub fn smooth_path_chain<'a>(
     }
     // 全链失败：原始折线 + 显式告警
     let rep = verify_path(input, None, opts, ctx, phys_min_radius_m);
+    // 失败诊断 JSON（阶段1-C）：各阶段失败原因输出到 stderr，供用户/回归定位
+    // （"为什么 smoothing_failed"）。仅输出阶段名 + issue/warning 文本，不含路径点。
+    if !stage_failures.is_empty() {
+        let json = serde_json::json!({
+            "event": "smooth_chain_failed",
+            "input_points": input.points.len(),
+            "stages": stage_failures.iter().map(|(n, iss, warn)| {
+                serde_json::json!({ "name": n, "issues": iss, "warnings": warn })
+            }).collect::<Vec<_>>(),
+        });
+        eprintln!("{}", serde_json::to_string(&json).unwrap_or_else(|_| {
+            r#"{"event":"smooth_chain_failed","serialize_error":true}"#.into()
+        }));
+    }
     SmoothResult {
         path: input.clone(),
         applied: Vec::new(),
@@ -1753,6 +1860,62 @@ mod chain_tests {
         let rep = verify_path(&p, None, &opts, &ctx, None);
         assert!(!rep.ok);
         assert!(rep.issues.iter().any(|s| s.contains("radius")), "{:?}", rep.issues);
+    }
+
+    /// 阶段1-B 护栏：软项微小超差在容忍带内判过但计 warn（转角 ≤ max+2°）。
+    /// 回归保护：60.5° > 60° 的场景不得再触发全链回退锯齿。
+    #[test]
+    fn verify_turn_tolerance_band_warns_not_fails() {
+        let opts = SmoothOptions {
+            max_turn_deg: 60.0,
+            ..Default::default()
+        };
+        // 段1 向东（bearing 90°）；段2 向北偏东 29.5° → 转角 60.5°（>60 但 ≤62）。
+        // 点2 = (1 + 0.5·sin29.5°, 0.5·cos29.5°) ≈ (1.2462, 0.4352)。
+        let p = Path::new(vec![
+            PathPoint::new(0.0, 0.0, 500.0),
+            PathPoint::new(1.0, 0.0, 500.0),
+            PathPoint::new(1.0 + 0.5 * 0.492_423_6, 0.5 * 0.870_355_7, 500.0),
+        ]);
+        let ctx = VerifyContext {
+            terrain: Some(&FlatTerrain),
+            nofly: None,
+            zones: None,
+            threat: None,
+              zone_inflation_m: 0.0,
+        };
+        let rep = verify_path(&p, None, &opts, &ctx, None);
+        assert!(rep.ok, "60.5° 转角在容忍带内不应判败: {:?}", rep.issues);
+        assert!(
+            rep.warnings.iter().any(|s| s.contains("turn")),
+            "容忍带内应计 warn，实际 {:?}",
+            rep.warnings
+        );
+    }
+
+    /// 阶段1-B 护栏：软项超出容忍带（转角 > max+2°）仍判败——平滑质量底线。
+    #[test]
+    fn verify_turn_beyond_tolerance_fails() {
+        let opts = SmoothOptions {
+            max_turn_deg: 60.0,
+            ..Default::default()
+        };
+        // 转角 90°（方波阶梯）> 62° → issue
+        let p = Path::new(vec![
+            PathPoint::new(0.0, 0.0, 500.0),
+            PathPoint::new(1.0, 0.0, 500.0),
+            PathPoint::new(1.0, 1.0, 500.0),
+        ]);
+        let ctx = VerifyContext {
+            terrain: Some(&FlatTerrain),
+            nofly: None,
+            zones: None,
+            threat: None,
+              zone_inflation_m: 0.0,
+        };
+        let rep = verify_path(&p, None, &opts, &ctx, None);
+        assert!(!rep.ok);
+        assert!(rep.issues.iter().any(|s| s.contains("turn")), "{:?}", rep.issues);
     }
 
     #[test]
