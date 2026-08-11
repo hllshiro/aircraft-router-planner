@@ -269,8 +269,18 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
 
     // 3. 任务区域（所有起点 + target 包围盒 + 缓冲）
     let target = input.mission.target.to_geo()?;
-    let region = region_of(&specs, &target);
-    // 3b. 网格自适应（主管 2026-08-06 双大雷达/多边形场景）：**仅大区域**（span > 2.5°）时
+    let base_region = region_of(&specs, &target);
+    // 3b. 障碍感知外扩（2026-08-11 zz_region_block2）：硬墙（NoFly/Obstacle）bbox
+    // 超出任务区域时并入——墙占满 region 短边方向时绕行被迫出 region（region 外
+    // 无代价场 → coarse FMM no path → 误报 no_solution）。Restricted 不画墙不纳入。
+    let wall_zones = input
+        .mission
+        .no_fly_zones
+        .iter()
+        .chain(input.mission.obstacles.iter())
+        .filter(|z| z.is_wall());
+    let region = expand_region_for_walls(base_region, wall_zones, REGION_PAD_DEG);
+    // 3c. 网格自适应（主管 2026-08-06 双大雷达/多边形场景）：**仅大区域**（span > 2.5°）时
     // 固定 256 格 → 格距粗 → FMM 绕行弧锯齿曲率 < 物理转弯半径 → 平滑链转弯半径
     // verify 拒 → 回退锯齿。
     // 自适应格距：**含多边形墙（NoFly/Obstacle 多边形）→ ≤600m**（绕多边形尖角曲率
@@ -283,7 +293,10 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
     // 3228 被 clamp → cell 1.89km）锯齿根因不是网格粗，而是膨胀墙未补偿 8 邻域楼梯
     // 切角 → FMM 路径离原始墙 < verify 要求的 inflation → 平滑链全失败回退锯齿；
     // 已由 inflation_cells +1.0×cell 补偿修复（1024/2048 均通过，保持 1024 上限）。
-    let span_km = region.span_deg * 111.32;
+    // 3c2. 障碍感知外扩后 grid 等比保持 cell（2026-08-11）：region 变大时按 base_grid
+    // 的 cell 等比提 grid——cell 不变则 5c2 软罚带物理宽度不变（不触发 real_bad 教训），
+    // 也不变粗（无锯齿/贴墙 clearance 风险）。
+    let base_span_km = base_region.span_deg * 111.32;
     let has_poly_wall = input
         .mission
         .no_fly_zones
@@ -292,13 +305,21 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
         .chain(input.mission.obstacles.iter())
         .any(|z| z.is_wall() && matches!(z.shape, ZoneShape::Polygon { .. }));
     let target_cell = if has_poly_wall { 600.0 } else { 1100.0 };
-    let auto_grid = if region.span_deg > 2.5 {
-        ((span_km * 1000.0) / target_cell).ceil() as usize
+    let auto_grid = if base_region.span_deg > 2.5 {
+        ((base_span_km * 1000.0) / target_cell).ceil() as usize
     } else {
         0
     };
-    let grid = params.grid.max(8).max(auto_grid).min(1024);
-    eprintln!("[debug] region span={:.2}deg grid={} cell_m={:.0}", region.span_deg, grid, region.span_deg * 111_320.0 / grid as f64);
+    let base_grid = params.grid.max(8).max(auto_grid).min(1024);
+    let grid = if region.span_deg > base_region.span_deg + 1e-9 {
+        let cell_deg = base_region.span_deg / base_grid as f64;
+        ((region.span_deg / cell_deg).round() as usize)
+            .max(base_grid)
+            .min(1024)
+    } else {
+        base_grid
+    };
+    eprintln!("[debug] region span={:.2}deg grid={} cell_m={:.0} (base {:.2})", region.span_deg, grid, region.span_deg * 111_320.0 / grid as f64, base_region.span_deg);
 
     // 4. Zone 集合（no_fly + restricted + obstacles）
     //    代价场墙策略（M2 高度层）：
@@ -1411,7 +1432,17 @@ fn resolve_target_ref(r: Option<&str>, mission_target: &Geo) -> Result<Geo, AppE
     Err(AppError::InputInvalid(InputInvalidReason::IllegalCoordinate))
 }
 
-/// 任务区域：所有起点 + 每机目标 + mission.target 的方形包围盒 + 0.15° 缓冲
+/// 任务区域缓冲（度）：保证源/目标不贴边；同时是障碍感知外扩的机动余量
+/// （2026-08-11 zz_region_block2：墙占满 region 短边方向时绕行被迫出 region）。
+const REGION_PAD_DEG: f64 = 0.15;
+
+/// 圆墙外扩机动余量（度）：绕圆墙需求 ≈ inflation（2km）+ 转弯半径（~0.5km）+
+/// 净空 ≈ 0.03°（3.3km）。比多边形墙的 REGION_PAD_DEG 小——圆墙 bbox 大（半径
+/// 数十公里），大余量会让本就接近任务边界的圆撑出 region（zz19 教训，见
+/// expand_region_for_walls 注释）。
+const REGION_CIRCLE_MARGIN_DEG: f64 = 0.03;
+
+/// 任务区域：所有起点 + 每机目标 + mission.target 的方形包围盒 + 缓冲
 /// （保证源/目标不贴边）。
 fn region_of(specs: &[VehicleSpec], target: &Geo) -> Region {
     let mut min_lon = f64::INFINITY;
@@ -1432,10 +1463,69 @@ fn region_of(specs: &[VehicleSpec], target: &Geo) -> Region {
     max_lon = max_lon.max(target.lon);
     min_lat = min_lat.min(target.lat);
     max_lat = max_lat.max(target.lat);
-    let pad = 0.15;
+    let pad = REGION_PAD_DEG;
     min_lon -= pad;
     min_lat -= pad;
     let span = (max_lon - min_lon).max(max_lat - min_lat) + 2.0 * pad;
+    Region {
+        min_lon,
+        min_lat,
+        span_deg: span,
+    }
+}
+
+/// 障碍感知区域外扩（2026-08-11 zz_region_block2）：任务 bbox 近正方形时两个方向
+/// 都只有 REGION_PAD_DEG 缓冲——硬墙（NoFly/Obstacle）若占满 region 一个方向（墙
+/// bbox 延伸到 region 边界外），绕行路径被迫超出 region（region 外无代价场 →
+/// coarse FMM no path → 误报 no_solution；实际绕出 region 0.1° 即通）。
+/// 把硬墙 bbox（+ pad 机动余量）并入任务 region，保持方形（Region 只有单值 span）。
+/// Restricted 不画墙、不阻碍 FMM 水平传播 → 不纳入。
+fn expand_region_for_walls<'a>(
+    region: Region,
+    wall_zones: impl Iterator<Item = &'a Zone>,
+    pad: f64,
+) -> Region {
+    let r_min_lon = region.min_lon;
+    let r_max_lon = region.min_lon + region.span_deg;
+    let r_min_lat = region.min_lat;
+    let r_max_lat = region.min_lat + region.span_deg;
+    let mut min_lon = r_min_lon;
+    let mut max_lon = r_max_lon;
+    let mut min_lat = r_min_lat;
+    let mut max_lat = r_max_lat;
+    let mut has_wall = false;
+    for z in wall_zones {
+        // 墙 bbox 单独补机动余量（任务 region 已含 pad，不再重复加）：
+        // 多边形墙绕行在顶点外侧（路径需离顶点 ≥ inflation+转弯），余量取 pad（0.15°≈17km）
+        // ——zz_region_block2 矩形墙占满 region 短边时，绕行要出墙 bbox 0.05°+；
+        // 圆墙绕行贴圆边（FMM 绕膨胀圆，需求 ≈ inflation 2km + 转弯 ≈ 0.03°）——
+        // 大余量会把 bbox 本就接近任务边界的圆撑出 region，触发 terrain 墙格点翻转
+        // （zz19：r100 圆西缘 +0.15° 超任务西缘 0.045° → masked 场无解 → probe unmasked
+        // 丢 restricted 剖面语义）。圆墙用小余量 CIRCLE_MARGIN。
+        match &z.shape {
+            ZoneShape::Circle { center, radius_km } => {
+                let r = radius_km / 111.32 + REGION_CIRCLE_MARGIN_DEG;
+                min_lon = min_lon.min(center[0] - r);
+                max_lon = max_lon.max(center[0] + r);
+                min_lat = min_lat.min(center[1] - r);
+                max_lat = max_lat.max(center[1] + r);
+            }
+            ZoneShape::Polygon { vertices } => {
+                for v in vertices {
+                    min_lon = min_lon.min(v[0] - pad);
+                    max_lon = max_lon.max(v[0] + pad);
+                    min_lat = min_lat.min(v[1] - pad);
+                    max_lat = max_lat.max(v[1] + pad);
+                }
+            }
+        }
+        has_wall = true;
+    }
+    if !has_wall {
+        return region;
+    }
+    // 并集保持方形（span 取长边；两侧已含 pad，不再额外加）
+    let span = (max_lon - min_lon).max(max_lat - min_lat);
     Region {
         min_lon,
         min_lat,
@@ -4640,6 +4730,82 @@ mod tests {
         );
         // 绕行路径必须离禁飞区多边形 ≥ 2km（inflation）：v1 路径任何段不得进入
         // 三角形近邻（用 zone_segment_clearance_km 复验，与 verify 同口径）。
+        let zone = &input.mission.no_fly_zones[0];
+        for w in v.path.windows(2) {
+            let clr = crate::config::zone_segment_clearance_km(w[0].x, w[0].y, w[1].x, w[1].y, zone);
+            assert!(
+                clr >= 2.0 - 1e-6,
+                "路径段应离禁飞区 ≥2km，实际 {:.3}km ({},{})->({},{})",
+                clr, w[0].x, w[0].y, w[1].x, w[1].y
+            );
+        }
+    }
+
+    #[test]
+    fn zigzag36_region_expand_when_wall_fills_bbox() {
+        // 2026-08-11 主管问题 2（zz_region_block2）：bbox 近正方形（起点 (115.8,39.8)
+        // → 目标 (117.2,40.2)，span 1.85°）+ 矩形 no_fly（[115.9,117.1]×[39.65,41.6]）
+        // 占满 region 南北方向（北界 41.6 超 region 41.35、南界 39.65 顶到 region 底）：
+        // 绕行只能出 region（绕南端 y<39.65 或北端 y>41.6）→ region 外无代价场 →
+        // coarse FMM no path → 误报 no_solution（实际绕出 region 0.05° 即通）。
+        // 修复：region 纳入硬墙（NoFly/Obstacle）bbox + 机动余量（多边形 pad 0.15°、
+        // 圆墙 0.03°——zz19 教训：圆墙大余量会让本就贴近任务边界的圆撑出 region，
+        // 触发 terrain 墙格点翻转丢 restricted 剖面语义）；grid 等比保持 cell
+        // （region 变大 grid 按 base_grid cell 等比上调，软罚带物理宽度不变）。
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+        let cand = root.join("data/east_asia_7p5as.arpack");
+        if !cand.exists() {
+            eprintln!("skip zigzag36: real terrain missing ({})", cand.display());
+            return;
+        }
+        let s = r#"{
+            "schema_version":"0.20",
+            "mission":{
+                "start":{"lon":115.8,"lat":39.8,"alt_m":3000},
+                "target":{"lon":117.2,"lat":40.2,"alt_m":3000},
+                "vehicles":[
+                    {"id":"v1","profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":250,"min_turn_radius_m":442,"max_climb_angle_deg":15},
+                     "start_pose":{"lon":115.8,"lat":39.8,"alt_m":3000,"heading_deg":0},
+                     "mid_waypoints":[]}],
+                "red_forces":{"radars":[]},
+                "no_fly_zones":[
+                    {"id":"zone_block2","zone_type":"no_fly","shape":"polygon",
+                     "geometry":{"vertices":[[115.9,39.65],[117.1,39.65],[117.1,41.6],[115.9,41.6]]},
+                     "alt_min_m":0,"alt_max_m":12000,"height_semantics":"msl"}],
+                "restricted_zones":[],"obstacles":[],
+                "terrain":{"source":"path","path":"__P__"},
+                "parameters":{}
+            }
+        }"#;
+        let s = s.replace("__P__", &cand.to_string_lossy().replace('\\', "\\\\"));
+        let input = parse(&s);
+        let out = solve(&input, &SolveParams::default(), 0).unwrap();
+        let v = &out.vehicles[0];
+        assert_eq!(
+            v.status, "planned",
+            "墙占满 region 短边不应误报 no_solution（修复前 coarse FMM no path），实际 {:?}",
+            v.status
+        );
+        assert!(
+            v.path.len() <= 30,
+            "应平滑交付（修复前 no_solution），实际 {} 点",
+            v.path.len()
+        );
+        assert!(
+            v.warnings.iter().all(|w| !w.contains("smoothing_failed")),
+            "不应 smoothing_failed，实际 {:?}",
+            v.warnings
+        );
+        // 修复语义：路径必须绕出任务 bbox（南端 y < 39.65 或北端 y > 41.6——
+        // 矩形墙占满两方向，绕行只能出墙 bbox，证明 region 外扩生效而非碰巧直穿）。
+        let y_min = v.path.iter().map(|p| p.y).fold(f64::INFINITY, f64::min);
+        let y_max = v.path.iter().map(|p| p.y).fold(f64::NEG_INFINITY, f64::max);
+        assert!(
+            y_min < 39.65 - 0.005 || y_max > 41.6 + 0.005,
+            "路径应绕出墙 bbox（南绕 y<39.65 或北绕 y>41.6），实际 y∈[{:.3},{:.3}]",
+            y_min, y_max
+        );
+        // 硬约束复验：路径段不得穿入禁飞区（与 verify 同口径 clearance ≥ 2km）。
         let zone = &input.mission.no_fly_zones[0];
         for w in v.path.windows(2) {
             let clr = crate::config::zone_segment_clearance_km(w[0].x, w[0].y, w[1].x, w[1].y, zone);
