@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Canvas } from '@react-three/fiber';
 import { OrbitControls, Grid } from '@react-three/drei';
 import type { ThreeEvent } from '@react-three/fiber';
@@ -167,6 +167,43 @@ export function Scene3D({
   onMidpointMove,
   activeClickMode,
 }: Scene3DProps) {
+  // 相机/轨道控制器引用（视野随场景包围盒自适应，见 fitCameraToBounds）
+  const cameraRef = useRef<any>(null);
+  const controlsRef = useRef<any>(null);
+
+  // 相机视野随 sceneBounds 自适应（2026-08-11 主管：起终点更改 → 场景应扩展）：
+  // App 传的 geoRef = sceneBounds 中心 → 场景中心恒为局部原点 (0,0,0)；
+  // 相机保持当前方向（用户手动旋转/缩放后的姿态），仅按场景对角线调整距离——
+  // fov 50° 垂直半角 25°，target 处视宽 ≈ 2·d·tan(25°) ≈ 0.93·d，
+  // 取 d = diag/0.75 → 视宽 ≈ 1.24·diag（留 ~24% 余量，完整看到扩展后的场景）。
+  // 跨度变化 < 20% 不调整（拖拽微调起终点时视野不抖动）。
+  const fitCameraToBounds = useCallback(() => {
+    const cam = cameraRef.current;
+    const ctrl = controlsRef.current;
+    if (!cam || !ctrl) return;
+    const [minLon, minLat, maxLon, maxLat] = bounds;
+    const kx = 111320 * Math.cos((geoRef.lat * Math.PI) / 180);
+    const ky = 110574;
+    const diag = Math.hypot((maxLon - minLon) * kx, (maxLat - minLat) * ky);
+    if (!(diag > 0)) return;
+    const desiredDist = diag / 0.75;
+    ctrl.target.set(0, 0, 0);
+    const dir = cam.position.clone().sub(ctrl.target);
+    const len = dir.length();
+    if (len < 1e-6) {
+      cam.position.set(desiredDist, desiredDist * 0.75, desiredDist);
+    } else if (Math.abs(len - desiredDist) > desiredDist * 0.2) {
+      dir.normalize().multiplyScalar(desiredDist);
+      cam.position.copy(ctrl.target).add(dir);
+    }
+    ctrl.update();
+  }, [bounds, geoRef]);
+
+  // 挂载 + 每次 bounds 变化 → 视野对齐（地形已随 bbox 重新采样，相机需跟上）
+  useEffect(() => {
+    fitCameraToBounds();
+  }, [fitCameraToBounds]);
+
   // 统一 z 夸张系数（地形 + 航路 + 标记 + zone 高度共用，保证同一尺度）
   const zScale = useMemo(
     () => computeZScale(terrainData, geoRef),
@@ -277,7 +314,12 @@ export function Scene3D({
         position: [80000, 60000, 80000],
         fov: 50,
         near: 10,
-        far: 2000000,
+        far: 10000000,
+      }}
+      onCreated={({ camera }) => {
+        cameraRef.current = camera;
+        // 挂载即 fit 一次（首帧相机可能未就绪，fitCameraToBounds 内已防御）
+        fitCameraToBounds();
       }}
       style={{ background: '#1c2942' }}
     >
@@ -286,6 +328,7 @@ export function Scene3D({
       <directionalLight position={[20000, 30000, 10000]} intensity={1.1} />
 
       <OrbitControls
+        ref={controlsRef}
         makeDefault
         maxPolarAngle={Math.PI / 2.1}
         enabled={!dragActive}
