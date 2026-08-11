@@ -15,7 +15,7 @@ pub struct CostField {
 ```
 
 - `get(r,c)` / `idx(r,c)` / `in_bounds(r,c)` 内联访问器；
-- **语义**：Land/Water/Lake → 1.0（基础代价）；NoData → 5x；OOB/禁飞硬墙 → f32::INFINITY；雷达代价 → 乘性放大。
+- **语义**：Land/Water/Lake → 1.0（基础代价）；NoData/OOB → 5x（高代价**通行**，2026-08-11 放开输入点限制）；Forbidden（NoFly/Obstacle 硬墙）→ f32::INFINITY；雷达代价 → 乘性放大。
 
 ## 2. 语义代价场构建（build_semantic_cost_field）
 
@@ -25,7 +25,7 @@ where F: FnMut(usize, usize) -> Sample
 ```
 
 - 对每格点调用 `sample(r, c)` 得到语义采样，映射 `base_cost(nodata_mult)`；
-- solver 在闭包中叠加：Zone 硬墙（NoFly/Obstacle 全高度水平墙）→ `Sample::OutOfBounds`；地形 `sample_at`；无地形 → `Sample::Land(0.0)`（海拔 0 平面）。
+- solver 在闭包中叠加：Zone 硬墙（NoFly/Obstacle 全高度水平墙）→ `Sample::Forbidden`（INF 禁行 + LOS 遮挡，2026-08-11 新增，旧 OOB 语义不再用于硬墙）；地形 `sample_at`（数据范围外 OOB → 5x 高代价通行）；无地形 → `Sample::Land(0.0)`（海拔 0 平面）。
 
 ## 3. FMM 传播（fmm_propagate）—— 粗层主算法
 
@@ -116,7 +116,7 @@ pub struct RadarEntry { id, lon, lat, radius_m }  // 膨胀后探测半径
 
 solver.rs 中代价场构建的三层叠加（详见 07 文档）：
 
-1. **语义层**：`build_semantic_cost_field`（Land/Water/Lake=1.0、NoData=5x、OOB=INF）+ Zone 硬墙；
+1. **语义层**：`build_semantic_cost_field`（Land/Water/Lake=1.0、NoData/OOB=5x 通行、Forbidden=INF）+ Zone 硬墙；
 2. **膨胀 + 过渡带**：`apply_inflation_and_band`（禁飞墙向外膨胀 inflation_cells 格 → INF；墙外 2 格 BFS 距离变换软罚，墙边 ×1.5 渐变到 ×1）；
 3. **雷达静态代价**：`threat.static_union_probability` > 0 时 `cost *= 1 + 200 × (p + 深穿惩罚)`。
 

@@ -1,7 +1,7 @@
 # AircraftRouterPlanner 技术文档
 
 > 面向技术人员的技术方案 × 实现现状系列文档。配套权威设计文档：`docs/技术方案.md`（v0.20，终审定稿，含全部共识/裁决记录）。
-> 本文档集将"设计蓝图"与"代码实现"映射起来，标注已实现项、占位项与未实现项（截至 2026-08-10）。
+> 本文档集将"设计蓝图"与"代码实现"映射起来，标注已实现项、占位项与未实现项（截至 2026-08-11）。
 
 ## 快速导航
 
@@ -24,7 +24,7 @@
 - [01-概览与架构](./01-概览与架构.md) — 项目背景、目标与硬指标、技术选型、workspace 结构、分层架构（FMM 粗层 / 平滑细层 / 全链复验 / 回退层）、端到端数据流、实施进度、已知占位项
 - [02-输入输出契约](./02-输入输出契约.md) — Input/Output JSON schema（crs / mission / vehicles / zones / radar / weapons / parameters）、InputValidator、status 四态契约、错误码、默认参数表、A6 物理自洽
 - [03-坐标与投影](./03-坐标与投影.md) — 椭球表（WGS84/CGCS2000/GRS80）、TM 正反算（Krüger 级数）、UTM/GK3/WebMercator、近场 ENU、垂直基准层、WKT2 核对
-- [04-地形数据源](./04-地形数据源.md) — TerrainSource trait、Sample 语义（Land/Water/Lake/NoData/OOB）、ARPK1 内置格式（布局/fail-fast/缓存/双线性）、GSHHG 掩膜、SRTM/GeoTIFF/DTED、LOS 语义
+- [04-地形数据源](./04-地形数据源.md) — TerrainSource trait、Sample 语义（Land/Water/Lake/NoData/OOB/Forbidden）、ARPK1 内置格式（布局/fail-fast/缓存/双线性）、GSHHG 掩膜、SRTM/GeoTIFF/DTED（外部格式 solver 直读）、LOS 语义
 - [05-代价场与FMM](./05-代价场与FMM.md) — CostField、语义代价场构建、Godunov 迎风差分 + BinaryHeap 窄带、确定性堆、回溯、rstar 空间索引
 - [06-威胁模型](./06-威胁模型.md) — ThreatModel trait、球形雷达、探测概率衰减（线性/指数）、LOS 遮挡、压制、多雷达概率并集、静态穿透（Theta\* 深穿判定）
 - [07-求解器与端到端流程](./07-求解器与端到端流程.md) — solve() 九步流程、多机共享代价场、禁飞墙膨胀 + 过渡带软罚、受限区剖面（底部/顶部决策、两轮 FMM）、直线直穿替代、降级记录
