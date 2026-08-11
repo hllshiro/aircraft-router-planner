@@ -34,6 +34,8 @@ impl GeoBounds {
 }
 
 /// 地表类别（空洞分层策略，主管 2026-08-04 拍板：WATER/NODATA/OOB 三分类 + 湖泊）。
+/// 2026-08-11 放开输入点限制：OOB 归入无效数据处理（高代价通行），
+/// 禁飞/障碍硬墙单独用 `Forbidden`（INF 禁行）表达。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SurfaceClass {
     /// 陆地：正常 DEM 高程，地形遮挡由高度判定。
@@ -44,8 +46,10 @@ pub enum SurfaceClass {
     Lake,
     /// 真缺失（NODATA）：高代价通行（初值 5x，主管拍板），LOS 不确定区间保守端。
     NoData,
-    /// 超覆盖范围（OOB）：禁行墙，路径不得越出。
+    /// 超覆盖范围（OOB）：同 NoData——高代价通行 + 降级警告（2026-08-11 放开输入点限制）。
     OutOfBounds,
+    /// 禁行硬墙（NoFly/Obstacle 等任务硬约束）：INF 禁行，LOS 遮挡。
+    Forbidden,
 }
 
 /// 地形采样结果（4.2.5 空洞分层：语义 + 可选高度）。
@@ -59,8 +63,10 @@ pub enum Sample {
     Lake(f64),
     /// 真缺失（NODATA）。
     NoData,
-    /// 越界（OOB）。
+    /// 越界（OOB）：数据范围外，同 NoData 处理（高代价通行，2026-08-11 放开输入点限制）。
     OutOfBounds,
+    /// 禁行硬墙（NoFly/Obstacle 任务硬约束）：INF 禁行、LOS 遮挡。
+    Forbidden,
 }
 
 impl Sample {
@@ -71,15 +77,16 @@ impl Sample {
             Sample::Lake(_) => SurfaceClass::Lake,
             Sample::NoData => SurfaceClass::NoData,
             Sample::OutOfBounds => SurfaceClass::OutOfBounds,
+            Sample::Forbidden => SurfaceClass::Forbidden,
         }
     }
 
-    /// 有效高度（米）。Land/Lake 返回其高度；Water 返回 0（海平面）；NoData/OOB → None。
+    /// 有效高度（米）。Land/Lake 返回其高度；Water 返回 0（海平面）；NoData/OOB/Forbidden → None。
     pub fn height(&self) -> Option<f64> {
         match self {
             Sample::Land(h) | Sample::Lake(h) => Some(*h),
             Sample::Water => Some(0.0),
-            Sample::NoData | Sample::OutOfBounds => None,
+            Sample::NoData | Sample::OutOfBounds | Sample::Forbidden => None,
         }
     }
 
@@ -88,13 +95,16 @@ impl Sample {
         matches!(self, Sample::Water | Sample::Lake(_))
     }
 
-    /// 代价场基础代价（含 NODATA 5x 初值；OOB = 禁行 f32::INFINITY）。
+    /// 代价场基础代价（含 NODATA 5x 初值）。
+    /// 主管 2026-08-11：放开输入点限制——OOB（数据范围外）与 NoData 同属
+    /// "空洞/无效数据"处理流程，按 `nodata_mult` 高代价**通行**（非禁行墙）；
+    /// 输入点落在数据范围外也能规划（FMM 高代价区可穿过，最坏降级警告）。
     /// 地形高度本身的代价（越山爬升）由调用方按高度叠加。
     pub fn base_cost(&self, nodata_mult: f32) -> f32 {
         match self {
             Sample::Land(_) | Sample::Water | Sample::Lake(_) => 1.0,
-            Sample::NoData => nodata_mult.max(1.0),
-            Sample::OutOfBounds => f32::INFINITY,
+            Sample::NoData | Sample::OutOfBounds => nodata_mult.max(1.0),
+            Sample::Forbidden => f32::INFINITY,
         }
     }
 
@@ -103,12 +113,13 @@ impl Sample {
     /// - Water/Lake：水面不遮挡（无地形遮蔽）；
     /// - NoData：不确定区间保守端 → 视为不遮挡（探测概率高估 → 威胁高估 → 路径避开，
     ///   与高代价通行方向一致；修正 Phase 0"空洞不遮挡=非保守"的低估问题）；
-    /// - OutOfBounds：禁行墙 → 视为遮挡（不可通过）。
+    /// - OutOfBounds：同 NoData（2026-08-11 放开输入点限制）→ 不遮挡。
+    /// - Forbidden：禁行硬墙 → 遮挡。
     pub fn los_unblocked(&self) -> bool {
         match self {
             Sample::Land(_) | Sample::Water | Sample::Lake(_) => true,
-            Sample::NoData => true,      // 保守端：不遮挡（威胁高估）
-            Sample::OutOfBounds => false, // 禁行
+            Sample::NoData | Sample::OutOfBounds => true, // 保守端：不遮挡（威胁高估）
+            Sample::Forbidden => false,
         }
     }
 }
@@ -256,10 +267,10 @@ fn open_dir_source(dir: &Path) -> Result<Box<dyn TerrainSource>, AppError> {
 /// - `Water` / `Lake` → 水面不遮挡；
 /// - `NoData` → 不确定区间保守端：不遮挡（探测概率高估 → 威胁高估 → 路径避开，
 ///   与 NODATA 高代价通行方向一致；修正 Phase 0"空洞不遮挡=非保守"的低估问题）；
-/// - `OutOfBounds` → 禁行墙，遮挡（blocked）。
+/// - `OutOfBounds` → 同 NoData：不遮挡（2026-08-11 放开输入点限制）。
 ///
 /// 与 Phase 0 原型 `Terrain::ray_blocked_ll` 的差别：原型空洞/出界一律视为不遮挡，
-/// 本函数为正式语义（OOB 遮挡、NoData 保守端）。
+/// 本函数为正式语义（NoData/OOB 保守端不遮挡）。
 pub fn los_blocked<T: TerrainSource + ?Sized>(
     src: &T,
     olon: f64,
@@ -277,7 +288,7 @@ pub fn los_blocked<T: TerrainSource + ?Sized>(
         let lat = olat + dlat * t;
         let z = oz + dz * t;
         match src.sample_at(lon, lat) {
-            Sample::OutOfBounds => return true,
+            Sample::Forbidden => return true,
             Sample::Land(h) if z <= h => return true,
             _ => {}
         }
@@ -371,14 +382,14 @@ mod tests {
     }
 
     #[test]
-    fn los_water_nodata_unblocked_oob_blocked() {
+    fn los_water_nodata_unblocked_oob_unblocked() {
         // 低空射线（z=500 < 地形 1000）：陆地遮挡
         let s = FlatSrc { h: 1000.0, hole: false };
         assert!(los_blocked(&s, 0.0, -90.0, 500.0, 1.0, 0.0, 0.0, 1.0, 100));
         // 高空（z=2000 > 1000）：不遮挡
         assert!(!los_blocked(&s, 0.0, -90.0, 2000.0, 1.0, 0.0, 0.0, 1.0, 100));
-        // 射线进入 OOB（终点 lon=3 出界）→ 遮挡
-        assert!(los_blocked(&s, 0.0, -90.0, 2000.0, 1.0, 0.0, 0.0, 3.0, 100));
+        // 射线进入 OOB（终点 lon=3 出界）→ 不遮挡（2026-08-11 放开输入点限制，同 NoData）
+        assert!(!los_blocked(&s, 0.0, -90.0, 2000.0, 1.0, 0.0, 0.0, 3.0, 100));
     }
 
     #[test]
@@ -388,7 +399,8 @@ mod tests {
         assert_eq!(Sample::Land(10.0).base_cost(5.0), 1.0);
         assert_eq!(Sample::Water.base_cost(5.0), 1.0);
         assert_eq!(Sample::Lake(10.0).base_cost(5.0), 1.0);
-        assert_eq!(Sample::OutOfBounds.base_cost(5.0), f32::INFINITY);
+        // OOB 同 NoData：高代价通行（2026-08-11 放开输入点限制，非禁行墙）
+        assert_eq!(Sample::OutOfBounds.base_cost(5.0), 5.0);
         // height 语义
         assert_eq!(Sample::Water.height(), Some(0.0));
         assert_eq!(Sample::NoData.height(), None);

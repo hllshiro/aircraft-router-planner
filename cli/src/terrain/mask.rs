@@ -293,6 +293,7 @@ impl<T: TerrainSource> TerrainSource for MaskedSource<T> {
                 Sample::Land(h) | Sample::Lake(h) => Sample::Lake(h),
                 Sample::Water => Sample::Lake(0.0),
                 Sample::NoData | Sample::OutOfBounds => Sample::NoData,
+                Sample::Forbidden => Sample::Forbidden, // 防御透传
             },
             MaskClass::Land => self.inner.sample_at(lon, lat),
         }
@@ -335,6 +336,7 @@ impl<T: BulkPrefetch> BulkPrefetch for MaskedSource<T> {
                 Sample::Land(h) | Sample::Lake(h) => Sample::Lake(h),
                 Sample::Water => Sample::Lake(0.0),
                 Sample::NoData | Sample::OutOfBounds => Sample::NoData,
+                Sample::Forbidden => Sample::Forbidden, // 防御透传
             },
             MaskClass::Land => self.inner.sample_local(local, lon, lat),
         }

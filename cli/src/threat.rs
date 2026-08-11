@@ -228,6 +228,7 @@ fn line_of_sight(
             }
             Sample::NoData => return false,
             Sample::Water | Sample::Lake(_) | Sample::OutOfBounds => {}
+            Sample::Forbidden => return false, // 禁行墙（防御：地形源不产生，出现即遮挡）
         }
     }
     true

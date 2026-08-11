@@ -261,35 +261,11 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
             .collect::<Result<Vec<_>, AppError>>()?
     };
 
-    // 2b. 起终点地形范围预检（2026-08-11 主管 demo 外部地形暴露）：demo 地图拾取的
-    //     起终点可能落在小范围外部地形（如北京 DEM）数据外——FMM 起点格点 OOB INF →
-    //     笼统 "coarse FMM no path"。改为明确报错（带数据范围，方便调整起终点/换地形）。
-    //     仅检查实际参与规划的每机起点/目标/必经点（specs）；无地形（None）跳过。
-    if let Some(b) = terrain.as_source().and_then(|t| t.bounds()) {
-        for v in &specs {
-            for (label, lon, lat) in [
-                ("起点", v.start.lon, v.start.lat),
-                ("目标", v.target.lon, v.target.lat),
-            ] {
-                if !b.contains(lon, lat) {
-                    return Err(AppError::Data(format!(
-                        "飞机 {} 的{}({:.4}, {:.4}) 超出地形数据范围 \
-                         (lon {:.4}~{:.4}, lat {:.4}~{:.4})；请调整起终点或更换地形",
-                        v.id, label, lon, lat, b.min_lon, b.max_lon, b.min_lat, b.max_lat
-                    )));
-                }
-            }
-            for m in &v.mid_waypoints {
-                if !b.contains(m.lon, m.lat) {
-                    return Err(AppError::Data(format!(
-                        "飞机 {} 的必经点({:.4}, {:.4}) 超出地形数据范围 \
-                         (lon {:.4}~{:.4}, lat {:.4}~{:.4})；请调整必经点或更换地形",
-                        v.id, m.lon, m.lat, b.min_lon, b.max_lon, b.min_lat, b.max_lat
-                    )));
-                }
-            }
-        }
-    }
+    // 2b. 起终点/必经点不再做地形范围硬拒（主管 2026-08-11 拍板：放开输入点限制）。
+    //     输入点落在数据范围外时，交给既有空洞/无效数据处理流程：FMM 种子格点
+    //     （OOB 格点代价 INF 墙）照常传播 → 目标/必经点在数据内则出路径（OOB 段走
+    //     墙格，verify OOB 硬拒 → 平滑失败回退 raw 交付）；全被墙挡则 no_solution
+    //     + warning——均为四态内可用结果，不再返回 data_error（旧 8e5e64e 预检取消）。
 
     // 3. 任务区域（所有起点 + target 包围盒 + 缓冲）
     let target = input.mission.target.to_geo()?;
@@ -355,8 +331,9 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
         .fold(0.0f64, f64::max);
     let inflation_km = inflation_m / 1000.0;
 
-    // 5. 语义代价场（Land=1 / Water=1 / Lake=1 / NoData=5 / OOB=INF；NoFly/Obstacle 墙）
-    //    硬墙判定闭包（每格：墙内 → OutOfBounds 禁行）——par_local 与串行回退共用。
+    // 5. 语义代价场（Land=1 / Water=1 / Lake=1 / NoData=5 / OOB=5（2026-08-11 放开）/
+    //    Forbidden=INF；NoFly/Obstacle 墙用 Forbidden——OOB 不再表达墙）
+    //    硬墙判定闭包（每格：墙内 → Forbidden 禁行）——par_local 与串行回退共用。
     let walled = |lon: f64, lat: f64| -> bool {
         if let Ok(g) = Geo::new(lon, lat) {
             all_zones
@@ -390,21 +367,21 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
         TerrainHandle::External(t) => build_semantic_cost_field(grid, grid, |r, c| {
             let (lon, lat) = cell_lonlat(r, c, &region, grid);
             if walled(lon, lat) {
-                return Sample::OutOfBounds;
+                return Sample::Forbidden;
             }
             t.sample_at(lon, lat)
         }, 5.0),
         TerrainHandle::MaskedExternal(t) => build_semantic_cost_field(grid, grid, |r, c| {
             let (lon, lat) = cell_lonlat(r, c, &region, grid);
             if walled(lon, lat) {
-                return Sample::OutOfBounds;
+                return Sample::Forbidden;
             }
             t.sample_at(lon, lat)
         }, 5.0),
         TerrainHandle::None => build_semantic_cost_field(grid, grid, |r, c| {
             let (lon, lat) = cell_lonlat(r, c, &region, grid);
             if walled(lon, lat) {
-                return Sample::OutOfBounds;
+                return Sample::Forbidden;
             }
             Sample::Land(0.0)
         }, 5.0),
@@ -1396,7 +1373,10 @@ fn make_segment_check<'a>(
                         }
                     }
                     Sample::NoData => { /* 空洞不硬拒（降级警告由 verify 汇总） */ }
-                    Sample::OutOfBounds => return false,
+                    Sample::OutOfBounds => {
+                        /* 2026-08-11 放开输入点限制：数据范围外同空洞，不硬拒 */
+                    }
+                    Sample::Forbidden => return false, // 防御：地形源不产生墙，出现即拒
                 }
             }
         }
@@ -4038,6 +4018,47 @@ mod tests {
                 d <= 5_500.0
             });
             assert!(near, "v2 wp{} 必经点应经过邻域，实际 {:?}", mi + 1, v2.path);
+        }
+    }
+
+    #[test]
+    fn oob_input_point_no_error_and_plans() {
+        // 主管 2026-08-11：放开输入点限制——起点/必经点落在地形数据范围外
+        // （east_asia_7p5as 东界 135E 之外 152E）不再报 data_error（旧 8e5e64e
+        // 预检），走空洞/无效数据处理流程：OOB 按 NODATA 5x 高代价**通行**（非
+        // 禁行墙），目标在数据内 → 出路径（planned + OOB 降级警告）；全被挡 →
+        // no_solution——均为四态可用结果。
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+        let cand = root.join("data/east_asia_7p5as.arpack");
+        if !cand.exists() {
+            eprintln!("skip oob_input_point: real terrain missing ({})", cand.display());
+            return;
+        }
+        let s = r#"{
+            "schema_version":"0.20",
+            "mission":{
+                "start":{"lon":152.0,"lat":35.0,"alt_m":3000},
+                "target":{"lon":116.5,"lat":39.8,"alt_m":3000},
+                "terrain":{"source":"path","path":"__P__"}
+            }
+        }"#;
+        let s = s.replace("__P__", &cand.to_string_lossy().replace('\\', "\\\\"));
+        let input = parse(&s);
+        // 不再 data_error（旧预检 return Err 已删除）
+        let out = solve(&input, &SolveParams::default(), 0).unwrap();
+        let v = &out.vehicles[0];
+        assert!(
+            v.status == "planned" || v.status == "no_solution",
+            "OOB 输入点应给 planned/no_solution（四态可用结果），实际 {}",
+            v.status
+        );
+        if v.status == "planned" {
+            assert!(!v.path.is_empty(), "planned 路径不应为空");
+            assert!(
+                v.warnings.iter().any(|w| w.contains("out of terrain bounds")),
+                "应带 OOB 降级警告，实际 {:?}",
+                v.warnings
+            );
         }
     }
 }

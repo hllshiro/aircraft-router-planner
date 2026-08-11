@@ -209,7 +209,7 @@ where
 ///   + 局部无锁查表——3.71×（381ms → 103ms，1024² 冷缓存）。
 ///
 /// 数值与 `build_semantic_cost_field` 逐位一致（每格采样独立，仅遍历并行化）。
-/// `walled`：Fn(lon, lat) -> bool——命中硬墙（NoFly/Obstacle）→ OutOfBounds 禁行墙
+/// `walled`：Fn(lon, lat) -> bool——命中硬墙（NoFly/Obstacle）→ Forbidden 禁行墙
 /// （与 solver 原闭包语义一致；网格点经纬度 = `min_lon + (c+0.5)/grid*span`，同 cell_lonlat）。
 pub fn build_semantic_cost_field_par_local<B, W>(
     src: &B,
@@ -247,7 +247,7 @@ where
                 let lon = min_lon + u * span;
                 let i = r * grid + c;
                 f.cost[i] = if walled(lon, lat) {
-                    Sample::OutOfBounds.base_cost(nodata_mult)
+                    Sample::Forbidden.base_cost(nodata_mult)
                 } else {
                     src.sample_local(&local, lon, lat).base_cost(nodata_mult)
                 };
@@ -287,7 +287,7 @@ where
                         let u = (c as f64 + 0.5) / grid as f64;
                         let lon = min_lon + u * span;
                         sub[base + c] = if walled(lon, lat) {
-                            Sample::OutOfBounds.base_cost(nodata_mult)
+                            Sample::Forbidden.base_cost(nodata_mult)
                         } else {
                             src.sample_local(&local, lon, lat).base_cost(nodata_mult)
                         };

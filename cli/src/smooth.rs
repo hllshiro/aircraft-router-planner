@@ -910,6 +910,9 @@ pub fn verify_path(
     phys_min_radius_m: Option<f64>,
 ) -> VerifyReport {
     let mut rep = VerifyReport::default();
+    // 路径级去重：数据范围外（OOB）采样点逐点警告会洪水（起点/终点在外部小范围
+    // 地形外时整段 OOB，~200m 一点 → 数百条）——整个路径只报首条（2026-08-11）。
+    let mut oob_warned = false;
     let n = path.len();
     if n < 2 {
         rep.issues.push("path has < 2 points".into());
@@ -1121,8 +1124,20 @@ pub fn verify_path(
                         ));
                     }
                     crate::terrain::Sample::OutOfBounds => {
+                        // 2026-08-11 放开输入点限制：数据范围外同 NoData——
+                        // 高度未知不阻断，降级警告（起终点落在小范围外部地形外时
+                        // 平滑链不再被 OOB 硬拒，回退密集网格楼梯）。逐点去重：
+                        // 整个路径只报首条，避免数百条洪水。
+                        if !oob_warned {
+                            oob_warned = true;
+                            rep.warnings.push(format!(
+                                "sample (lon={lon:.4},lat={lat:.4}) out of terrain bounds (degraded)"
+                            ));
+                        }
+                    }
+                    crate::terrain::Sample::Forbidden => {
                         rep.issues.push(format!(
-                            "sample (lon={lon:.4},lat={lat:.4}) out of terrain bounds"
+                            "sample (lon={lon:.4},lat={lat:.4}) inside forbidden wall"
                         ));
                     }
                 }

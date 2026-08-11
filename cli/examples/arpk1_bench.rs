@@ -61,6 +61,7 @@ fn bench_source(src: &BuiltinSource, n_sample: usize, seed: u64, label: &str) {
             Sample::Water | Sample::Lake(_) => water += 1,
             Sample::NoData => nodata += 1,
             Sample::OutOfBounds => oob += 1,
+            Sample::Forbidden => {} // 地形源不产生硬墙（示例不统计）
         }
     }
     let s_ms = t2.elapsed().as_secs_f64() * 1000.0;
@@ -101,6 +102,7 @@ fn bench_masked(gmted: &str, mask: &str, n_sample: usize, seed: u64) {
             Sample::Lake(_) => lake += 1,
             Sample::NoData => nodata += 1,
             Sample::OutOfBounds => oob += 1,
+            Sample::Forbidden => {} // 地形源不产生硬墙（示例不统计）
         }
     }
     let s_ms = t1.elapsed().as_secs_f64() * 1000.0;

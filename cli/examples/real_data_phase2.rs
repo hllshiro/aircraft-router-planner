@@ -63,6 +63,7 @@ fn bench_region<T: TerrainSource>(src: &T, label: &str, lon_c: f64, lat_c: f64, 
             Sample::Water | Sample::Lake(_) => water += 1,
             Sample::NoData => nodata += 1,
             Sample::OutOfBounds => oob += 1,
+            Sample::Forbidden => {} // 地形源不产生硬墙（示例不统计）
         }
         s
     }, nodata_mult);
