@@ -139,6 +139,22 @@ pub trait TerrainSource: Send + Sync {
     fn resolution_desc(&self) -> String;
 }
 
+/// Box 透传委托（solver 外部格式直读路径，2026-08-11 主管：不需要转换）。
+impl TerrainSource for Box<dyn TerrainSource> {
+    fn height_at(&self, lon: f64, lat: f64) -> Option<f64> {
+        (**self).height_at(lon, lat)
+    }
+    fn sample_at(&self, lon: f64, lat: f64) -> Sample {
+        (**self).sample_at(lon, lat)
+    }
+    fn bounds(&self) -> Option<GeoBounds> {
+        (**self).bounds()
+    }
+    fn resolution_desc(&self) -> String {
+        (**self).resolution_desc()
+    }
+}
+
 /// 无锁批量预取采样优化（候选，2026-08-07 对比验证）。
 /// 可选实现：`BuiltinSource`（块级预取 + 无锁查表）与 `MaskedSource`（转发 inner）；
 /// 其余源不实现。field_build 层可用 `prefetch_lonlat` 一次性锁外解压区域块，

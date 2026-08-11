@@ -51,13 +51,25 @@ impl Default for SolveParams {
     }
 }
 
-/// 地形句柄：无地形 / 纯 ARPK1 / 掩膜包装。
-/// 掩膜包装（Phase 2 水体判定）：海洋 → Sample::Water（0 高程）、内陆湖 → Sample::Lake(DEM)、
+/// 地形打开中间态：ARPK1（BuiltinSource，预取）或外部格式（trait object，带锁）。
+enum InnerSource {
+    Builtin(BuiltinSource),
+    Dyn(Box<dyn TerrainSource>),
+}
+
+/// 地形句柄：无地形 / ARPK1 / 外部格式 / 掩膜包装。
+/// - `Plain`/`Masked`：ARPK1（BuiltinSource）——field build 走 BulkPrefetch 并行无锁预取
+///   （候选③，3.71×，对比测试验证）；
+/// - `External`/`MaskedExternal`：外部格式直读（GeoTIFF/DTED/SRTM，`open_source` 分派
+///   对应解析库，2026-08-11 主管：外部格式不需要转换）——无 BulkPrefetch → 带锁采样；
+/// - 掩膜包装（Phase 2 水体判定）：海洋 → Sample::Water（0 高程）、内陆湖 → Sample::Lake(DEM)、
 /// 陆地 → 委托内层；平滑链/代价场统一走 TerrainSource/BulkPrefetch 抽象。
 enum TerrainHandle {
     None,
     Plain(BuiltinSource),
+    External(Box<dyn TerrainSource>),
     Masked(MaskedSource<BuiltinSource>),
+    MaskedExternal(MaskedSource<Box<dyn TerrainSource>>),
 }
 
 impl TerrainHandle {
@@ -65,14 +77,18 @@ impl TerrainHandle {
         match self {
             Self::None => None,
             Self::Plain(t) => Some(t),
+            Self::External(t) => Some(t.as_ref()),
             Self::Masked(t) => Some(t),
+            Self::MaskedExternal(t) => Some(t),
         }
     }
     fn as_bulk(&self) -> Option<&(dyn BulkPrefetch + Sync)> {
         match self {
             Self::None => None,
             Self::Plain(t) => Some(t),
+            Self::External(_) => None,
             Self::Masked(t) => Some(t),
+            Self::MaskedExternal(_) => None,
         }
     }
 }
@@ -100,9 +116,9 @@ struct VehicleSpec {
 
 /// 端到端解算。elapsed_ms 为端到端耗时（main 计时传入）。
 pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Output, AppError> {
-    // 1. 地形源（none = 无地形平面；path/builtin = ARPK1 文件）。
-    //    具体类型 BuiltinSource（solver 仅用 ARPK1）：field build 可走 BulkPrefetch
-    //    并行无锁预取（候选③，3.71×，对比测试验证）。
+    // 1. 地形源（none = 无地形平面；path/builtin = ARPK1 文件或外部格式）。
+    //    主管 2026-08-11：外部格式（GeoTIFF/DTED/SRTM）不需要转换，直接调对应
+    //    解析库取数（`open_source` 按扩展名分派）；ARPK1 走 BuiltinSource（预取）。
     let terrain: TerrainHandle = match input.mission.terrain.source {
         TerrainSourceType::None => TerrainHandle::None,
         _ => {
@@ -110,8 +126,22 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                 .terrain_path
                 .clone()
                 .or_else(|| input.mission.terrain.path.clone().map(PathBuf::from));
-            let inner = match p {
-                Some(p) => BuiltinSource::open(&p)?,
+            let inner: InnerSource = match p {
+                Some(p) => {
+                    let ext = p
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .unwrap_or("")
+                        .to_ascii_lowercase();
+                    match ext.as_str() {
+                        // ARPK1/zstd → BuiltinSource（BulkPrefetch 预取路径）
+                        "arpack" | "zstd" => {
+                            InnerSource::Builtin(BuiltinSource::open(&p)?)
+                        }
+                        // 外部格式 → open_source 分派对应解析库（GeoTiff/Dted/Srtm/目录）
+                        _ => InnerSource::Dyn(crate::terrain::open_source(&p)?),
+                    }
+                }
                 None => {
                     // 主管决策 2026-08-08：默认地形 = 7.5as 东亚压缩版（east_asia_7p5as.arpack）。
                     // 候选：exe 同目录 / 工作目录 data/（2026-08-08 数据迁移到项目根 data/）。
@@ -129,7 +159,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                         }
                     }
                     if let Some(c) = candidates.iter().find(|c| c.exists()) {
-                        BuiltinSource::open(c)?
+                        InnerSource::Builtin(BuiltinSource::open(c)?)
                     } else {
                         return Err(AppError::Data(
                             "terrain.source=path/builtin 但未提供地形文件，且默认地形 \
@@ -158,16 +188,36 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                         )));
                     }
                     let gm = GeoMask::open(&mp)?;
-                    TerrainHandle::Masked(MaskedSource::new(inner, gm))
+                    match inner {
+                        InnerSource::Builtin(b) => {
+                            TerrainHandle::Masked(MaskedSource::new(b, gm))
+                        }
+                        InnerSource::Dyn(d) => {
+                            TerrainHandle::MaskedExternal(MaskedSource::new(d, gm))
+                        }
+                    }
                 }
                 None if !explicit_terrain => match default_mask_candidates() {
                     Some(mp) => {
                         let gm = GeoMask::open(&mp)?;
-                        TerrainHandle::Masked(MaskedSource::new(inner, gm))
+                        match inner {
+                            InnerSource::Builtin(b) => {
+                                TerrainHandle::Masked(MaskedSource::new(b, gm))
+                            }
+                            InnerSource::Dyn(d) => {
+                                TerrainHandle::MaskedExternal(MaskedSource::new(d, gm))
+                            }
+                        }
                     }
-                    None => TerrainHandle::Plain(inner),
+                    None => match inner {
+                        InnerSource::Builtin(b) => TerrainHandle::Plain(b),
+                        InnerSource::Dyn(d) => TerrainHandle::External(d),
+                    },
                 },
-                None => TerrainHandle::Plain(inner),
+                None => match inner {
+                    InnerSource::Builtin(b) => TerrainHandle::Plain(b),
+                    InnerSource::Dyn(d) => TerrainHandle::External(d),
+                },
             }
         }
     };
@@ -306,6 +356,21 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
             5.0,
             &walled,
         ),
+        // 外部格式（GeoTIFF/DTED/SRTM）无 BulkPrefetch → 带锁采样回退
+        TerrainHandle::External(t) => build_semantic_cost_field(grid, grid, |r, c| {
+            let (lon, lat) = cell_lonlat(r, c, &region, grid);
+            if walled(lon, lat) {
+                return Sample::OutOfBounds;
+            }
+            t.sample_at(lon, lat)
+        }, 5.0),
+        TerrainHandle::MaskedExternal(t) => build_semantic_cost_field(grid, grid, |r, c| {
+            let (lon, lat) = cell_lonlat(r, c, &region, grid);
+            if walled(lon, lat) {
+                return Sample::OutOfBounds;
+            }
+            t.sample_at(lon, lat)
+        }, 5.0),
         TerrainHandle::None => build_semantic_cost_field(grid, grid, |r, c| {
             let (lon, lat) = cell_lonlat(r, c, &region, grid);
             if walled(lon, lat) {
