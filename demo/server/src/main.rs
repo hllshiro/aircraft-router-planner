@@ -208,15 +208,26 @@ fn strip_first_dir(p: &PathBuf) -> PathBuf {
 struct TerrainReq {
     path: String,
     /// [min_lon, min_lat, max_lon, max_lat]
-    bbox: [f64; 4],
-    /// 网格尺寸 [nx, ny]，默认 [64, 64]，上限 128
+    bbox: Option<[f64; 4]>,
+    /// 网格尺寸 [nx, ny]，默认按跨度自适应，上限 256
     grid: Option<[usize; 2]>,
 }
 
+/// POST /api/terrain 请求体。
 async fn terrain_route(Json(payload): Json<TerrainReq>) -> Json<Value> {
-    let nx = payload.grid.map_or(64, |g| g[0].clamp(2, 128));
-    let ny = payload.grid.map_or(64, |g| g[1].clamp(2, 128));
-    let [min_lon, min_lat, max_lon, max_lat] = payload.bbox;
+    let src = match get_source(&payload.path) {
+        Ok(s) => s,
+        Err(e) => return Json(serde_json::json!({ "error": format!("open terrain: {e}") })),
+    };
+    let [min_lon, min_lat, max_lon, max_lat] = match payload.bbox {
+        Some(b) => b,
+        None => match src.bounds() {
+            Some(b) => [b.min_lon, b.min_lat, b.max_lon, b.max_lat],
+            None => {
+                return Json(serde_json::json!({ "error": "terrain source has no bounds" }));
+            }
+        },
+    };
 
     if !(min_lon.is_finite()
         && min_lat.is_finite()
@@ -228,9 +239,14 @@ async fn terrain_route(Json(payload): Json<TerrainReq>) -> Json<Value> {
         return Json(serde_json::json!({ "error": "invalid bbox" }));
     }
 
-    let src = match get_source(&payload.path) {
-        Ok(s) => s,
-        Err(e) => return Json(serde_json::json!({ "error": format!("open terrain: {e}") })),
+    // 网格密度：显式 grid 优先；缺省按跨度自适应（目标格距 0.008° ≈ 0.9km，上限 256）
+    const TARGET_CELL_DEG: f64 = 0.008;
+    let (nx, ny) = match payload.grid {
+        Some(g) => (g[0].clamp(2, 256), g[1].clamp(2, 256)),
+        None => (
+            (((max_lon - min_lon) / TARGET_CELL_DEG).ceil() as usize).clamp(2, 256),
+            (((max_lat - min_lat) / TARGET_CELL_DEG).ceil() as usize).clamp(2, 256),
+        ),
     };
 
     let mut heights: Vec<Option<f64>> = Vec::with_capacity(nx * ny);

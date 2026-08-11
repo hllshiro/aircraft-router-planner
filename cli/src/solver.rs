@@ -273,7 +273,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
             ] {
                 if !b.contains(lon, lat) {
                     return Err(AppError::Data(format!(
-                        "车辆 {} 的{}({:.4}, {:.4}) 超出地形数据范围 \
+                        "飞机 {} 的{}({:.4}, {:.4}) 超出地形数据范围 \
                          (lon {:.4}~{:.4}, lat {:.4}~{:.4})；请调整起终点或更换地形",
                         v.id, label, lon, lat, b.min_lon, b.max_lon, b.min_lat, b.max_lat
                     )));
@@ -282,7 +282,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
             for m in &v.mid_waypoints {
                 if !b.contains(m.lon, m.lat) {
                     return Err(AppError::Data(format!(
-                        "车辆 {} 的必经点({:.4}, {:.4}) 超出地形数据范围 \
+                        "飞机 {} 的必经点({:.4}, {:.4}) 超出地形数据范围 \
                          (lon {:.4}~{:.4}, lat {:.4}~{:.4})；请调整必经点或更换地形",
                         v.id, m.lon, m.lat, b.min_lon, b.max_lon, b.min_lat, b.max_lat
                     )));

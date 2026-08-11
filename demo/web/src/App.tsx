@@ -47,6 +47,24 @@ export default function App() {
     }
     let cancelled = false;
     setTerrainError(null);
+    // 外部格式（GeoTIFF/DTED/SRTM）：渲染范围=数据范围、精度=server 按跨度自适应
+    // （2026-08-11 主管：载入外部地形时渲染应达到数据的范围与精度，而非场景包围盒）
+    const isExternal = /\.(tif|tiff|hgt|dt0|dt1|dt2)$/i.test(t.path);
+    if (isExternal) {
+      fetchTerrain(t.path, null, null)
+        .then((d) => {
+          if (!cancelled) setTerrainData(d);
+        })
+        .catch((e) => {
+          if (!cancelled) {
+            setTerrainData(null);
+            setTerrainError(String(e));
+          }
+        });
+      return () => {
+        cancelled = true;
+      };
+    }
     const bbox = sceneBounds(config);
     // 96×96：跨度变大（sceneBounds 1.4 倍自适应）后保持地形精细度（server 上限 128）
     fetchTerrain(t.path, bbox, [96, 96])

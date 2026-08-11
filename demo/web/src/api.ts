@@ -12,13 +12,14 @@ export async function planRoute(config: InputConfig): Promise<PlanResult> {
 
 export async function fetchTerrain(
   path: string,
-  bbox: [number, number, number, number],
-  grid: [number, number] = [64, 64],
+  bbox?: [number, number, number, number] | null,
+  grid?: [number, number] | null,
 ): Promise<TerrainInfo> {
   const resp = await fetch('/api/terrain', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ path, bbox, grid }),
+    // bbox/grid 缺省（null/undefined）→ server 用数据范围 + 按跨度自适应精度
+    body: JSON.stringify({ path, bbox: bbox ?? undefined, grid: grid ?? undefined }),
   });
   const data = await resp.json();
   if (data.error) {
