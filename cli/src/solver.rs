@@ -741,6 +741,11 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
             // 终检暴露——2026-08-07 主管 1755 点场景 seg3 out→climb 与 seg4
             // climb→A 夹角 61.94° > 60°，climb 是段首点单段 verify 无法发现）。
             let mut smooth_segs: Vec<crate::path::Path> = Vec::new();
+            // boundary arc 因净距（zone clearance）失败而回退的边界点坐标：final verify
+            // 的 turn 检查对该边界豁免（≤65°；arc 会压到膨胀线内 → 宁可不转，机动空间
+            // 优先，宁丑勿违）。2026-08-11 主管输入：wp1 必经点转角 60.7°>60°，U 形弧
+            // 采样点偏墙 ~386m → arc 后段距墙 1.90km < 2.00km → 全链回退 687 点锯齿。
+            let mut turn_exempt: Vec<(f64, f64)> = Vec::new();
             let mut seg_warnings = Vec::new();
             let mut entry_heading: Option<f64> = None;
             // 段级平滑中间阶段的地形净空不足最大高度（smooth.rs SmoothResult.
@@ -838,24 +843,110 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                             ) {
                                 let arc_len = arc_pts.len();
                                 let e = *arc_pts.last().unwrap();
-                                prev.points.truncate(n - 1);
-                                prev.points.extend(arc_pts);
-                                // 后续段起点若为被弹出的 b（剖面锚点/平滑段端点，非硬约束）
-                                // → 同步到弧末点 E，否则 joined 出现 E→b 回头路
-                                // （2026-08-08 实测 E→原 pt3 转角 179.99°）。
-                                if !out_seg.points.is_empty() {
-                                    let p0 = &out_seg.points[0];
-                                    if (p0.lon - b.lon).abs() < 1e-9
-                                        && (p0.lat - b.lat).abs() < 1e-9
-                                    {
-                                        out_seg.points[0] = e;
+                                // 净距预检（2026-08-11 主管输入）：arc 使弧点偏出原直线
+                                // （U 形弧采样偏墙 ~386m），arc 后段 E→next 可能压到
+                                // zone 膨胀线内（1.90km < 2.00km）→ final verify 拒 →
+                                // 全链回退 raw 网格楼梯。插入前逐段检查弧段 + E→next 的
+                                // 墙净距（zone_segment_clearance_km 与 verify 同口径）；
+                                // 不足 → 回退 arc（保持必经点 b，宁丑勿违），该边界转角
+                                // ≤65° 记入豁免（机动空间优先）。
+                                let c2 = out_seg.points.get(1).copied().unwrap_or(c);
+                                let arc_ok = seg_zone_clearance_ok_arc(
+                                    &arc_pts, &e, &c2, &all_zones, inflation_m,
+                                );
+                                if arc_ok {
+                                    prev.points.truncate(n - 1);
+                                    prev.points.extend(arc_pts);
+                                    // 后续段起点若为被弹出的 b（剖面锚点/平滑段端点，非硬约束）
+                                    // → 同步到弧末点 E，否则 joined 出现 E→b 回头路
+                                    // （2026-08-08 实测 E→原 pt3 转角 179.99°）。
+                                    if !out_seg.points.is_empty() {
+                                        let p0 = &out_seg.points[0];
+                                        if (p0.lon - b.lon).abs() < 1e-9
+                                            && (p0.lat - b.lat).abs() < 1e-9
+                                        {
+                                            out_seg.points[0] = e;
+                                        }
                                     }
-                                }
-                                if std::env::var_os("ARP_DEBUG_SMOOTH").is_some() {
-                                    eprintln!(
-                                        "[smooth-dbg] boundary arc at ({:.4},{:.4}) turn {:.1}->{} pts",
-                                        b.lon, b.lat, d, arc_len
-                                    );
+                                    if std::env::var_os("ARP_DEBUG_SMOOTH").is_some() {
+                                        eprintln!(
+                                            "[smooth-dbg] boundary arc at ({:.4},{:.4}) turn {:.1}->{} pts",
+                                            b.lon, b.lat, d, arc_len
+                                        );
+                                    }
+                                } else {
+                                    // 弧末点外推到出段直线（E' 距 b = 4×r，clamp 0.75×|bc|）：
+                                    // U 形弧末点偏墙（~386m）使 arc 后段压到膨胀线内；E' 落在
+                                    // b→c 直线上后，段 E'→next 恢复为 b→c 子段净距（≥ 原值）。
+                                    // E'=2.2r 时弧内部转角 63.8°>60°（pt5→E' 短弦偏出段方向）；
+                                    // 4r 使 pt5→E' 趋近出段方向（turn≈3θ/4<60，θ≤80），
+                                    // verify radius（b, 弧中点, E'）≥442（θ=90° 最差 ~902m）。
+                                    let bc_m = crate::path::haversine_m(b.lon, b.lat, c.lon, c.lat);
+                                    let ext_m = (4.0 * opts.turn_radius_m).min(bc_m * 0.75);
+                                    if ext_m > opts.turn_radius_m {
+                                        let h_bc = crate::path::bearing_deg(b.lon, b.lat, c.lon, c.lat);
+                                        let lat0 = b.lat.to_radians();
+                                        let kx = 111_320.0 * lat0.cos();
+                                        let ky = 111_320.0;
+                                        let e2 = crate::path::PathPoint::new(
+                                            b.lon + ext_m * h_bc.to_radians().sin() / kx,
+                                            b.lat + ext_m * h_bc.to_radians().cos() / ky,
+                                            b.alt_m,
+                                        );
+                                        let mut arc_pts2 = arc_pts.clone();
+                                        if let Some(last) = arc_pts2.last_mut() {
+                                            *last = e2;
+                                        }
+                                        if seg_zone_clearance_ok_arc(
+                                            &arc_pts2, &e2, &c2, &all_zones, inflation_m,
+                                        ) {
+                                            let arc_len2 = arc_pts2.len();
+                                            prev.points.truncate(n - 1);
+                                            prev.points.extend(arc_pts2);
+                                            if !out_seg.points.is_empty() {
+                                                let p0 = &out_seg.points[0];
+                                                if (p0.lon - b.lon).abs() < 1e-9
+                                                    && (p0.lat - b.lat).abs() < 1e-9
+                                                {
+                                                    out_seg.points[0] = e2;
+                                                }
+                                            }
+                                            if std::env::var_os("ARP_DEBUG_SMOOTH").is_some() {
+                                                eprintln!(
+                                                    "[smooth-dbg] boundary arc ext at ({:.4},{:.4}) turn {:.1}->{} pts (E' {:.0}m)",
+                                                    b.lon, b.lat, d, arc_len2, ext_m
+                                                );
+                                            }
+                                        } else if d <= 65.0 {
+                                            // arc 会破坏净空 → 不插弧，保持 b；该边界转角 ≤65
+                                            // 豁免（final verify 后过滤，宁丑勿违）。
+                                            turn_exempt.push((b.lon, b.lat));
+                                            if std::env::var_os("ARP_DEBUG_SMOOTH").is_some() {
+                                                eprintln!(
+                                                    "[smooth-dbg] boundary arc SKIP (clearance) at ({:.4},{:.4}) turn {:.1} exempt",
+                                                    b.lon, b.lat, d
+                                                );
+                                            }
+                                        } else if std::env::var_os("ARP_DEBUG_SMOOTH").is_some() {
+                                            eprintln!(
+                                                "[smooth-dbg] boundary arc FAIL (clearance, turn {:.1} > 65) at ({:.4},{:.4})",
+                                                d, b.lon, b.lat
+                                            );
+                                        }
+                                    } else if d <= 65.0 {
+                                        turn_exempt.push((b.lon, b.lat));
+                                        if std::env::var_os("ARP_DEBUG_SMOOTH").is_some() {
+                                            eprintln!(
+                                                "[smooth-dbg] boundary arc SKIP (clearance, short seg) at ({:.4},{:.4}) turn {:.1} exempt",
+                                                b.lon, b.lat, d
+                                            );
+                                        }
+                                    } else if std::env::var_os("ARP_DEBUG_SMOOTH").is_some() {
+                                        eprintln!(
+                                            "[smooth-dbg] boundary arc FAIL (clearance, turn {:.1} > 65) at ({:.4},{:.4})",
+                                            d, b.lon, b.lat
+                                        );
+                                    }
                                 }
                             } else if std::env::var_os("ARP_DEBUG_SMOOTH").is_some() {
                                 eprintln!(
@@ -897,6 +988,42 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                 warnings.extend(seg_warnings.iter().cloned());
                 break 'fmm_attempt;
             } else {
+                // arc 失败边界的 turn 豁免（2026-08-11 主管输入）：boundary arc 因净距
+                // 预检回退（arc 会压到膨胀线内）后保持必经点 b 原样 → final verify 仅剩
+                // 该边界 turn 超限（≤65°）——机动空间优先，宁可不转（宁丑勿违）。过滤
+                // 掉这些 turn issue（转 warning）；若其余 issues 为空 → 交付拼接路径。
+                if !turn_exempt.is_empty() {
+                    let mut kept: Vec<String> = Vec::new();
+                    for iss in final_rep.issues.iter() {
+                        let exempted = iss.strip_prefix("vertex ").is_some_and(|rest| {
+                            let Some(colon) = rest.find(": turn ") else {
+                                return false;
+                            };
+                            let Ok(idx) = rest[..colon].trim().parse::<usize>() else {
+                                return false;
+                            };
+                            joined.points.get(idx).is_some_and(|p| {
+                                turn_exempt
+                                    .iter()
+                                    .any(|(lo, la)| dist_km(*lo, *la, p.lon, p.lat) < 1.0)
+                            })
+                        });
+                        if !exempted {
+                            kept.push(iss.clone());
+                        }
+                    }
+                    if kept.len() != final_rep.issues.len() {
+                        warnings.push(format!(
+                            "boundary turn at ({:.4},{:.4}) exceeds {}deg but arc would violate zone clearance; kept as-is (机动空间优先)",
+                            turn_exempt[0].0, turn_exempt[0].1, opts.max_turn_deg
+                        ));
+                        if kept.is_empty() {
+                            pts = joined.points;
+                            warnings.extend(seg_warnings.iter().cloned());
+                            break 'fmm_attempt;
+                        }
+                    }
+                }
                 // 地形净空不足 → 抬升重跑（2026-08-11 主管输入 2480m 峰）：verify
                 // issue 采样密（~200m），以其地形高度为准；段级平滑中间阶段的
                 // terrain issue（回退楼梯吞掉，见 seg_terr_max）取 max 并集。
@@ -1487,6 +1614,49 @@ fn dist_km(lon1: f64, lat1: f64, lon2: f64, lat2: f64) -> f64 {
     let y = dlat * 111.32;
     (x * x + y * y).sqrt()
 }
+
+/// 段对全部硬墙 zone（NoFly/Obstacle）的净距是否 ≥ inflation（与 smooth verify 的
+/// clearance 检查同口径：zone_segment_clearance_km）。穿入（clr≤1e-9）或不足 → false。
+fn seg_zone_clearance_ok(
+    lon1: f64,
+    lat1: f64,
+    lon2: f64,
+    lat2: f64,
+    zones: &[crate::config::Zone],
+    infl_m: f64,
+) -> bool {
+    let infl_km = infl_m / 1000.0;
+    zones
+        .iter()
+        .filter(|z| z.is_wall())
+        .all(|z| {
+            let clr = crate::config::zone_segment_clearance_km(lon1, lat1, lon2, lat2, z);
+            clr > 1e-9 && clr >= infl_km
+        })
+}
+
+/// boundary arc 插入前净距预检：arc 各相邻段 + 弧末点 E→出段第二点 c2 都必须满足
+/// 墙净距 ≥ inflation（2026-08-11 主管输入：U 形弧采样偏墙 → arc 后段 1.90km < 2.00km
+/// → final verify 拒 → 全链回退 raw 网格楼梯）。arc_pts[0] 通常为 b（keep_b 弧）。
+fn seg_zone_clearance_ok_arc(
+    arc_pts: &[crate::path::PathPoint],
+    e: &crate::path::PathPoint,
+    c2: &crate::path::PathPoint,
+    zones: &[crate::config::Zone],
+    infl_m: f64,
+) -> bool {
+    let mut prev = arc_pts.first().copied();
+    for p in arc_pts.iter().skip(1) {
+        if let Some(pp) = prev {
+            if !seg_zone_clearance_ok(pp.lon, pp.lat, p.lon, p.lat, zones, infl_m) {
+                return false;
+            }
+        }
+        prev = Some(*p);
+    }
+    seg_zone_clearance_ok(e.lon, e.lat, c2.lon, c2.lat, zones, infl_m)
+}
+
 
 /// 受限区穿行剖面高度决策（主管 2026-08-06 二轮：比较顶部绕飞与底部穿行的代价，选更优）。
 /// 仅对高度区间内的 restricted 调用；返回：
@@ -4019,6 +4189,72 @@ mod tests {
             });
             assert!(near, "v2 wp{} 必经点应经过邻域，实际 {:?}", mi + 1, v2.path);
         }
+    }
+
+    #[test]
+    fn zigzag32_boundary_arc_extend_keeps_clearance() {
+        // 主管 2026-08-11 输入（zz32）：单机 + 1 必经点（wp1 在 no_fly 三角形东北
+        // 角外） + no_fly 三角形 + restricted 圆，地形为外部 Beijing_DEM.tif（west
+        // 界外 170m/北界外 400m——OOB 5x 通行，降级警告）。
+        // 根因：① FMM raw 贴 no_fly 膨胀墙（2km）走 → 600m 网格楼梯；② Theta*
+        // 拉直 SEG1 = wp1→(116.6035,40.8452) 距墙 2.10km（刚过 2.00 膨胀线，合法）；
+        // ③ wp1 必经点处转角 67°（球面）> 60° → 插 boundary arc（keep_b U 形弧
+        // r=442m）；④ U 形弧采样点偏墙 ~386m → 段(弧末点→116.6035) 距墙 1.90km
+        // < 2.00km → final verify 拒 → 全链回退 raw 687 点网格楼梯（密集锯齿）。
+        // 修复：arc 插入前逐段净距预检（zone_segment_clearance_km 同 verify 口径）；
+        // 不足 → 弧末点外推到出段直线（E' 距 b = 4×r，clamp 0.75×|bc|）——段 E'→next
+        // 恢复为 b→c 子段净距（≥ 原值），弧内部转角 ≈ 3θ/4 < 60（θ≤80），verify
+        // radius（b,弧中点,E'）≥442（θ=90° 最差 ~902m）；仍不足（转角 ≤65）才豁免。
+        // 结果：687→9 点平滑，必经点经过，277.9km（修复前 354.9km）。
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+        let cand = root.join("data/east_asia_7p5as.arpack");
+        if !cand.exists() {
+            eprintln!("skip zigzag32: real terrain missing ({})", cand.display());
+            return;
+        }
+        let s = r#"{
+            "schema_version":"0.20",
+            "mission":{
+                "start":{"lon":115.9,"lat":39.8,"alt_m":3000},
+                "target":{"lon":116.8,"lat":40.3,"alt_m":3000},
+                "vehicles":[
+                    {"id":"v1","profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":250,"min_turn_radius_m":442,"max_climb_angle_deg":15},
+                     "start_pose":{"lon":117.49643196710215,"lat":39.45217964261854,"alt_m":3000,"heading_deg":45},
+                     "mid_waypoints":[{"lon":116.92011401843381,"lat":40.280864859008126,"alt_m":3000}],
+                     "target_ref":"115.41519624070744,41.063105449335495,3000"}],
+                "red_forces":{"radars":[]},
+                "no_fly_zones":[
+                    {"id":"zone_1786418099258","zone_type":"no_fly","shape":"polygon",
+                     "geometry":{"vertices":[[116.74744508792169,40.54250033772123],[116.04051071102833,39.87068759296977],[116.58825219982235,40.13334649202884]]},
+                     "alt_min_m":0,"alt_max_m":12000,"height_semantics":"msl"}],
+                "restricted_zones":[
+                    {"id":"rz_1786418172746","zone_type":"restricted","shape":"circle",
+                     "geometry":{"center":[116.86855354211916,40.0244769648816],"radius_km":20},
+                     "alt_min_m":1000,"alt_max_m":6000,"height_semantics":"msl"}],
+                "obstacles":[],
+                "terrain":{"source":"path","path":"__P__"},
+                "parameters":{}
+            }
+        }"#;
+        let s = s.replace("__P__", &cand.to_string_lossy().replace('\\', "\\\\"));
+        let input = parse(&s);
+        let out = solve(&input, &SolveParams::default(), 0).unwrap();
+        let v = &out.vehicles[0];
+        assert_eq!(v.status, "planned", "v1 应 planned");
+        assert!(
+            v.path.len() <= 100,
+            "应平滑交付（修复前 687 点网格楼梯），实际 {} 点",
+            v.path.len()
+        );
+        assert!(
+            v.warnings.iter().all(|w| !w.contains("smoothing_failed")),
+            "不应 smoothing_failed，实际 {:?}",
+            v.warnings
+        );
+        let near = v.path.iter().any(|p| {
+            crate::path::haversine_m(p.x, p.y, 116.92011401843381, 40.280864859008126) <= 5_500.0
+        });
+        assert!(near, "wp1 必经点应经过邻域，实际 {:?}", v.path);
     }
 
     #[test]
