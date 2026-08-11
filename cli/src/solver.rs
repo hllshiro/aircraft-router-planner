@@ -261,6 +261,36 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
             .collect::<Result<Vec<_>, AppError>>()?
     };
 
+    // 2b. 起终点地形范围预检（2026-08-11 主管 demo 外部地形暴露）：demo 地图拾取的
+    //     起终点可能落在小范围外部地形（如北京 DEM）数据外——FMM 起点格点 OOB INF →
+    //     笼统 "coarse FMM no path"。改为明确报错（带数据范围，方便调整起终点/换地形）。
+    //     仅检查实际参与规划的每机起点/目标/必经点（specs）；无地形（None）跳过。
+    if let Some(b) = terrain.as_source().and_then(|t| t.bounds()) {
+        for v in &specs {
+            for (label, lon, lat) in [
+                ("起点", v.start.lon, v.start.lat),
+                ("目标", v.target.lon, v.target.lat),
+            ] {
+                if !b.contains(lon, lat) {
+                    return Err(AppError::Data(format!(
+                        "车辆 {} 的{}({:.4}, {:.4}) 超出地形数据范围 \
+                         (lon {:.4}~{:.4}, lat {:.4}~{:.4})；请调整起终点或更换地形",
+                        v.id, label, lon, lat, b.min_lon, b.max_lon, b.min_lat, b.max_lat
+                    )));
+                }
+            }
+            for m in &v.mid_waypoints {
+                if !b.contains(m.lon, m.lat) {
+                    return Err(AppError::Data(format!(
+                        "车辆 {} 的必经点({:.4}, {:.4}) 超出地形数据范围 \
+                         (lon {:.4}~{:.4}, lat {:.4}~{:.4})；请调整必经点或更换地形",
+                        v.id, m.lon, m.lat, b.min_lon, b.max_lon, b.min_lat, b.max_lat
+                    )));
+                }
+            }
+        }
+    }
+
     // 3. 任务区域（所有起点 + target 包围盒 + 缓冲）
     let target = input.mission.target.to_geo()?;
     let region = region_of(&specs, &target);
