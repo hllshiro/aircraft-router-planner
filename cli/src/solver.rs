@@ -840,6 +840,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                                 n - 1,
                                 false,
                                 is_hard,
+                                0,
                             ) {
                                 let arc_len = arc_pts.len();
                                 let e = *arc_pts.last().unwrap();
@@ -893,13 +894,60 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                                             b.lat + ext_m * h_bc.to_radians().cos() / ky,
                                             b.alt_m,
                                         );
-                                        let mut arc_pts2 = arc_pts.clone();
-                                        if let Some(last) = arc_pts2.last_mut() {
-                                            *last = e2;
-                                        }
-                                        if seg_zone_clearance_ok_arc(
-                                            &arc_pts2, &e2, &c2, &all_zones, inflation_m,
-                                        ) {
+                                        // 外推后弧末段 p_{n-1}→E' 可能偏离弧方向（转角超限，
+                                        // verify 拒）——细分弧重试：n 增大 → 末段步进减小 →
+                                        // p_{n-1}→E' 趋近出段方向（2026-08-11 zz33：θ=166.8°
+                                        // 掉头 n=3 时 p2→E' 101°；n=5 时 p4→E' 33°）。
+                                        let mut accepted = false;
+                                        for min_steps in 4..=8usize {
+                                            let Some((arc_pts_sub, _)) =
+                                                crate::smooth::arc_transition(
+                                                    &a,
+                                                    &b,
+                                                    &c,
+                                                    opts.max_turn_deg,
+                                                    opts.turn_radius_m,
+                                                    &check,
+                                                    &prev.points,
+                                                    n - 1,
+                                                    false,
+                                                    is_hard,
+                                                    min_steps,
+                                                )
+                                            else {
+                                                continue;
+                                            };
+                                            let mut arc_pts2 = arc_pts_sub.clone();
+                                            if let Some(last) = arc_pts2.last_mut() {
+                                                *last = e2;
+                                            }
+                                            if !seg_zone_clearance_ok_arc(
+                                                &arc_pts2, &e2, &c2, &all_zones, inflation_m,
+                                            ) {
+                                                continue;
+                                            }
+                                            // 弧点转角（与 verify 同口径 bearing）：入段 a→S
+                                            // 及弧内各段均 ≤ max_turn。外推 E' 只影响末段
+                                            // p_{n-1}→E'（细分后 ≈ 出段方向）。
+                                            let mut prev_h = crate::path::bearing_deg(
+                                                a.lon, a.lat, arc_pts2[0].lon, arc_pts2[0].lat,
+                                            );
+                                            let mut turn_ok = true;
+                                            for w in arc_pts2.windows(2) {
+                                                let h = crate::path::bearing_deg(
+                                                    w[0].lon, w[0].lat, w[1].lon, w[1].lat,
+                                                );
+                                                if crate::path::angle_diff_deg(prev_h, h).abs()
+                                                    > opts.max_turn_deg + 1e-6
+                                                {
+                                                    turn_ok = false;
+                                                    break;
+                                                }
+                                                prev_h = h;
+                                            }
+                                            if !turn_ok {
+                                                continue;
+                                            }
                                             let arc_len2 = arc_pts2.len();
                                             prev.points.truncate(n - 1);
                                             prev.points.extend(arc_pts2);
@@ -913,11 +961,14 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                                             }
                                             if std::env::var_os("ARP_DEBUG_SMOOTH").is_some() {
                                                 eprintln!(
-                                                    "[smooth-dbg] boundary arc ext at ({:.4},{:.4}) turn {:.1}->{} pts (E' {:.0}m)",
+                                                    "[smooth-dbg] boundary arc ext at ({:.4},{:.4}) turn {:.1}->{} pts (E' {:.0}m, steps {min_steps})",
                                                     b.lon, b.lat, d, arc_len2, ext_m
                                                 );
                                             }
-                                        } else if d <= 65.0 {
+                                            accepted = true;
+                                            break;
+                                        }
+                                        if !accepted && d <= 65.0 {
                                             // arc 会破坏净空 → 不插弧，保持 b；该边界转角 ≤65
                                             // 豁免（final verify 后过滤，宁丑勿违）。
                                             turn_exempt.push((b.lon, b.lat));
@@ -927,7 +978,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                                                     b.lon, b.lat, d
                                                 );
                                             }
-                                        } else if std::env::var_os("ARP_DEBUG_SMOOTH").is_some() {
+                                        } else if !accepted && std::env::var_os("ARP_DEBUG_SMOOTH").is_some() {
                                             eprintln!(
                                                 "[smooth-dbg] boundary arc FAIL (clearance, turn {:.1} > 65) at ({:.4},{:.4})",
                                                 d, b.lon, b.lat
@@ -4255,6 +4306,77 @@ mod tests {
             crate::path::haversine_m(p.x, p.y, 116.92011401843381, 40.280864859008126) <= 5_500.0
         });
         assert!(near, "wp1 必经点应经过邻域，实际 {:?}", v.path);
+    }
+
+    #[test]
+    fn zigzag33_two_waypoints_big_u_turn_at_wp2() {
+        // 主管 2026-08-11 输入（zz33）：单机 + 2 必经点（wp1 在 no_fly 三角形西侧
+        // 31km、wp2 在三角形东北） + no_fly 三角形 + restricted 圆（圆心微移）。
+        // 根因：① SEG1（wp1→wp2）北绕 no_fly 三角形（y 爬到 40.58），raw 折返段
+        // 与拉直方向冲突——i=192 处任何跳点拉直转角 91°+>60°，j 递减到相邻点
+        // （raw 折返段微步 ~270m）才插弧 → |bc| 短 → d_m 截断 → r_eff 塌缩 178m
+        // <442m → verify radius 拒 → SEG1 theta_star FAIL → 全链回退 1061 点；
+        // ② wp2 必经点处 166.8° 大掉头（SEG1 东南进、SEG2 西北出）keep_b U 形弧
+        // 末点 E 偏出段线南侧 0.88km → E→c2 在 no_fly A 顶点高度净距 1.75km<2km
+        // 膨胀线 → 净距预检拒 → 外推 E'（出段直线上 4×r）修净距 → 但 n=3 弧倒数
+        // 第二点→E' 转角 101°>60° → final verify 拒。
+        // 修复：① theta_star 跳点（j>i+1）转角超限时也尝试 arc_transition（c=j，
+        // |bc| 大，r_eff 保持 ≥442）——跳点插弧；② boundary arc 外推 E' 前细分弧
+        // 重试（min_steps 4..=8：n 增大 → 末段步进减小 → p_{n-1}→E' 趋近出段
+        // 方向，n=8 时 33.4°<60）——净距+转角双检。
+        // 结果：1061→21 点平滑，必经点偏差 <0.2km，429.6km。
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+        let cand = root.join("data/east_asia_7p5as.arpack");
+        if !cand.exists() {
+            eprintln!("skip zigzag33: real terrain missing ({})", cand.display());
+            return;
+        }
+        let s = r#"{
+            "schema_version":"0.20",
+            "mission":{
+                "start":{"lon":115.9,"lat":39.8,"alt_m":3000},
+                "target":{"lon":116.8,"lat":40.3,"alt_m":3000},
+                "vehicles":[
+                    {"id":"v1","profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":250,"min_turn_radius_m":442,"max_climb_angle_deg":15},
+                     "start_pose":{"lon":117.49643196710215,"lat":39.45217964261854,"alt_m":3000,"heading_deg":45},
+                     "mid_waypoints":[{"lon":116.04302827980699,"lat":40.30245861424856,"alt_m":3000},{"lon":116.87502139486968,"lat":40.43880896740148,"alt_m":3000}],
+                     "target_ref":"115.41519624070744,41.063105449335495,3000"}],
+                "red_forces":{"radars":[]},
+                "no_fly_zones":[
+                    {"id":"zone_1786418099258","zone_type":"no_fly","shape":"polygon",
+                     "geometry":{"vertices":[[116.74744508792169,40.54250033772123],[116.04051071102833,39.87068759296977],[116.58825219982235,40.13334649202884]]},
+                     "alt_min_m":0,"alt_max_m":12000,"height_semantics":"msl"}],
+                "restricted_zones":[
+                    {"id":"rz_1786418172746","zone_type":"restricted","shape":"circle",
+                     "geometry":{"center":[116.87035584365995,40.01756770083293],"radius_km":20},
+                     "alt_min_m":1000,"alt_max_m":6000,"height_semantics":"msl"}],
+                "obstacles":[],
+                "terrain":{"source":"path","path":"__P__"},
+                "parameters":{}
+            }
+        }"#;
+        let s = s.replace("__P__", &cand.to_string_lossy().replace('\\', "\\\\"));
+        let input = parse(&s);
+        let out = solve(&input, &SolveParams::default(), 0).unwrap();
+        let v = &out.vehicles[0];
+        assert_eq!(v.status, "planned", "v1 应 planned");
+        assert!(
+            v.path.len() <= 100,
+            "应平滑交付（修复前 1061 点网格楼梯），实际 {} 点",
+            v.path.len()
+        );
+        assert!(
+            v.warnings.iter().all(|w| !w.contains("smoothing_failed")),
+            "不应 smoothing_failed，实际 {:?}",
+            v.warnings
+        );
+        for (lo, la) in [
+            (116.04302827980699, 40.30245861424856),
+            (116.87502139486968, 40.43880896740148),
+        ] {
+            let near = v.path.iter().any(|p| crate::path::haversine_m(p.x, p.y, lo, la) <= 5_500.0);
+            assert!(near, "必经点 ({lo},{la}) 应经过邻域，实际 {:?}", v.path);
+        }
     }
 
     #[test]

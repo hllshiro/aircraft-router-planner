@@ -139,6 +139,8 @@ pub fn theta_star_smooth(
     out.push(path.points[0]);
     let mut i = 0usize;
     while i < path.len() - 1 {
+        // 跳点插弧（2026-08-11 zz33）成功后已 push 弧点，外层跳过普通 push。
+        let mut advanced = false;
         let mut j = path.len() - 1;
         loop {
             if j == i + 1 || j == i {
@@ -193,6 +195,55 @@ pub fn theta_star_smooth(
                         if std::env::var_os("ARP_DEBUG_SMOOTH").is_some() && out.len() < 4 {
                             eprintln!("[ts-dbg] i={i} j={j} reject=turn {d:.1}>={effective_max} h0={h0:.1} h1={h1:.1} entry={entry_heading:?} outlen={}", out.len());
                         }
+                        // 跳点转角超限：尝试圆弧过渡拆分（2026-08-11 zz33）。
+                        // 绕多边形北缘时 raw 折返段与拉直方向冲突（wp1→wp2 需转
+                        // 91°>60°），j 递减到相邻点（raw 折返段微步 ~270m）才插弧 →
+                        // |bc| 短 → d_m 截断 → r_eff 塌缩（178m<442m）→ verify
+                        // radius 拒 → 全链回退 1061 点密集锯齿。这里直接在拉直目标
+                        // j 处插弧（c=j，|bc| 大，r_eff 保持 ≥ min_r）：弧从入段方向
+                        // 切到 b→j 出段方向，E 在 b→j 直线上，接续点 k 由
+                        // arc_transition 的 E→path[k] 搜索决定。仅非首跳
+                        // （out.len()>=2，有入段 a）可插弧；首跳 entry 约束保持
+                        // （无入段，必经点段首跳放宽 175° 已覆盖）。
+                        if out.len() >= 2 {
+                            let a_prev = out[out.len() - 2];
+                            let b_cur = out[out.len() - 1];
+                            let c_tgt = path.points[j];
+                            if let Some((pts, k)) = arc_transition(
+                                &a_prev,
+                                &b_cur,
+                                &c_tgt,
+                                max_turn,
+                                min_r_m,
+                                check,
+                                &path.points,
+                                i,
+                                true,
+                                false,
+                                0,
+                            ) {
+                                let npts = pts.len();
+                                // 弹出 b（急转弯点）：弧从入段线上的 S 开始，不再经过 b
+                                // （否则 b→S 是掉头 180°，verify 拒）。
+                                out.pop();
+                                for p in pts {
+                                    out.push(p);
+                                }
+                                // 接续点 k == 终点时，弧末点 E 在 b→c 线上（d_m ≤
+                                // 0.75×|bc|）并不等于终点 c——终点必须保留在输出中。
+                                if k == path.len() - 1 {
+                                    out.push(c_tgt);
+                                }
+                                i = k;
+                                advanced = true;
+                                if std::env::var_os("ARP_DEBUG_SMOOTH").is_some() {
+                                    eprintln!(
+                                        "[ts-dbg] jump arc_transition at i={i} j={j} pts={npts} k={k}"
+                                    );
+                                }
+                                break;
+                            }
+                        }
                         j -= 1;
                         continue;
                     }
@@ -202,7 +253,6 @@ pub fn theta_star_smooth(
         }
         // 保 i、j；若 j 直接是下一邻点则普通前进一步
         if j > i {
-            let mut advanced = false;
             if j == i + 1 {
                 // 相邻点：若转弯超限（FMM 楼梯 90° 角，绕窄通道时跳点拉直被墙挡），
                 // 插入圆弧过渡点拆分转弯（2026-08-07 zigzag18）。
@@ -214,7 +264,7 @@ pub fn theta_star_smooth(
                     let h1 = heading_deg_pts(&b, &c);
                     if crate::path::angle_diff_deg(h0, h1).abs() > max_turn {
                         if let Some((pts, k)) =
-                            arc_transition(&a, &b, &c, max_turn, min_r_m, check, &path.points, i, true, false)
+                            arc_transition(&a, &b, &c, max_turn, min_r_m, check, &path.points, i, true, false, 0)
                         {
                             let npts = pts.len();
                             // 弹出 b（急转弯点）：弧从入段线上的 S 开始，不再经过 b
@@ -250,6 +300,16 @@ pub fn theta_star_smooth(
             out.push(path.points[i.min(path.len() - 1)]);
         }
     }
+    if std::env::var_os("ARP_DEBUG_SMOOTH").is_some() {
+        eprintln!(
+            "[ts-dbg] RESULT n={} path={}",
+            out.len(),
+            out.iter()
+                .map(|p| format!("({:.4},{:.4})", p.lon, p.lat))
+                .collect::<Vec<_>>()
+                .join(" -> ")
+        );
+    }
     Path::new(out)
 }
 
@@ -262,6 +322,11 @@ pub fn theta_star_smooth(
 /// None（调用方保持原 fallback，宁丑勿违）。
 /// `find_k`：false 时跳过 E 后的接续点搜索（2026-08-08 solver 段边界修复——
 /// 只需弧点，后续段尚未拼接，k 无意义）。
+/// `min_steps`：最小细分段数（2026-08-11 zz33）。大掉头（θ≈167°）时 ceil(θ/60)=3
+/// 段，弧末段步进 55.6°；boundary arc 外推 E' 到出段直线后，倒数第二点（距 b 仅
+/// ~730m）→E'（距 b 1768m）方向偏离弧末段 → 转角 101°>60° → verify 拒。细分到
+/// 5 段后末段步进 33.4°，p_{n-1}→E' 趋近出段方向（转角≈步进<60）。0 = 默认
+/// ceil(θ/max_turn)。
 pub(crate) fn arc_transition(
     a: &crate::path::PathPoint,
     b: &crate::path::PathPoint,
@@ -273,6 +338,7 @@ pub(crate) fn arc_transition(
     i: usize,
     find_k: bool,
     keep_b: bool,
+    min_steps: usize,
 ) -> Option<(Vec<crate::path::PathPoint>, usize)> {
     use crate::path::{angle_diff_deg, bearing_deg};
     let h_ab = heading_deg_pts(a, b);
@@ -298,7 +364,7 @@ pub(crate) fn arc_transition(
     } else {
         -1.0
     };
-    let n = ((theta / max_turn_deg).ceil() as usize).max(2);
+    let n = ((theta / max_turn_deg).ceil() as usize).max(min_steps).max(2);
     let delta = theta / n as f64;
     // 步长（米）：保证弧半径 ≥ min_r_m，且不小于 2km（避免点过密）。
     // keep_b（必经点/段端点硬点）：用物理转弯半径——弧紧贴 b（切点偏差
