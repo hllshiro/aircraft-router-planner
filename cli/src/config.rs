@@ -773,6 +773,11 @@ pub(crate) fn zone_contains(z: &Zone, p: &Geo) -> bool {
 
 /// 射线法点在多边形内（经纬度平面近似，Phase 1 足够——区域校验用途）。
 pub(crate) fn point_in_polygon(p: &Geo, vertices: &[[f64; 2]]) -> bool {
+    point_in_polygon_xy(p.lon, p.lat, vertices)
+}
+
+/// 点在多边形内（xy 经纬度平面近似，射线法；与 point_in_polygon 同口径）。
+pub(crate) fn point_in_polygon_xy(px: f64, py: f64, vertices: &[[f64; 2]]) -> bool {
     if vertices.len() < 3 {
         return false;
     }
@@ -781,14 +786,61 @@ pub(crate) fn point_in_polygon(p: &Geo, vertices: &[[f64; 2]]) -> bool {
     for i in 0..vertices.len() {
         let (xi, yi) = (vertices[i][0], vertices[i][1]);
         let (xj, yj) = (vertices[j][0], vertices[j][1]);
-        if (yi > p.lat) != (yj > p.lat)
-            && p.lon < (xj - xi) * (p.lat - yi) / (yj - yi) + xi
-        {
+        if (yi > py) != (yj > py) && px < (xj - xi) * (py - yi) / (yj - yi) + xi {
             inside = !inside;
         }
         j = i;
     }
     inside
+}
+
+/// 轴对齐矩形与多边形相交（保守）：任一边相交 / 任一多边形顶点在矩形内 /
+/// 任一矩形角点在多边形内。经纬度平面近似（与 point_in_polygon 同口径）。
+///
+/// 用于代价场墙光栅化——**中心点采样会漏掉 < 1 格的窄带**（多边形尖角/斜边附近
+/// 无格中心命中），FMM 沿漏格穿过 → verify 精确几何（zone_segment_clearance_km）
+/// 拒 → 平滑链全败 → 误报 no_solution（2026-08-11 zz_nosolution_case：禁飞区
+/// 三角形西顶点窄带 ~30m，256 网格下 3.5 列无墙格，FMM 贴顶点 84m 穿入）。
+pub(crate) fn rect_intersects_polygon(
+    rx0: f64,
+    ry0: f64,
+    rx1: f64,
+    ry1: f64,
+    verts: &[[f64; 2]],
+) -> bool {
+    if verts.len() < 3 {
+        return false;
+    }
+    // 1) 多边形任一顶点在矩形内
+    for v in verts {
+        if v[0] >= rx0 && v[0] <= rx1 && v[1] >= ry0 && v[1] <= ry1 {
+            return true;
+        }
+    }
+    // 2) 矩形角点任一在多边形内
+    for (px, py) in [(rx0, ry0), (rx1, ry0), (rx0, ry1), (rx1, ry1)] {
+        if point_in_polygon_xy(px, py, verts) {
+            return true;
+        }
+    }
+    // 3) 任一边与矩形 4 边相交（含端点接触，保守）
+    let rect = [
+        (rx0, ry0, rx1, ry0),
+        (rx1, ry0, rx1, ry1),
+        (rx1, ry1, rx0, ry1),
+        (rx0, ry1, rx0, ry0),
+    ];
+    let n = verts.len();
+    for i in 0..n {
+        let (ax, ay) = (verts[i][0], verts[i][1]);
+        let (bx, by) = (verts[(i + 1) % n][0], verts[(i + 1) % n][1]);
+        for (cx, cy, dx, dy) in rect {
+            if segs_intersect_plane(ax, ay, bx, by, cx, cy, dx, dy) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 // ---- 线段-多边形几何净距（主管 2026-08-06：绕飞太贴边→考虑飞机机动，绕行需留转弯空间）----
@@ -908,7 +960,7 @@ fn pt_seg_plane(px: f64, py: f64, ax: f64, ay: f64, bx: f64, by: f64) -> f64 {
 }
 
 /// 平面线段相交（含端点/共线接触——保守，接触即相交）。
-fn segs_intersect_plane(
+pub(crate) fn segs_intersect_plane(
     ax: f64,
     ay: f64,
     bx: f64,

@@ -334,14 +334,28 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
     // 5. 语义代价场（Land=1 / Water=1 / Lake=1 / NoData=5 / OOB=5（2026-08-11 放开）/
     //    Forbidden=INF；NoFly/Obstacle 墙用 Forbidden——OOB 不再表达墙）
     //    硬墙判定闭包（每格：墙内 → Forbidden 禁行）——par_local 与串行回退共用。
+    //    多边形墙用"格子矩形与多边形相交"（2026-08-11 zz_nosolution_case：中心点
+    //    采样漏掉尖角/斜边 < 1 格窄带 → FMM 贴顶点穿入 → verify 精确几何拒 →
+    //    误报 no_solution；矩形相交保证任何分辨率不漏窄带）；圆形连续无窄带问题，
+    //    保持中心点语义（与 zone_contains 解析一致）。
+    let cell_deg = region.span_deg / grid as f64;
     let walled = |lon: f64, lat: f64| -> bool {
-        if let Ok(g) = Geo::new(lon, lat) {
-            all_zones
-                .iter()
-                .any(|z| z.is_wall() && zone_contains(z, &g))
-        } else {
-            false
-        }
+        let Ok(g) = Geo::new(lon, lat) else {
+            return false;
+        };
+        let half = cell_deg * 0.5;
+        let (rx0, ry0, rx1, ry1) = (lon - half, lat - half, lon + half, lat + half);
+        all_zones.iter().any(|z| {
+            if !z.is_wall() {
+                return false;
+            }
+            match &z.shape {
+                ZoneShape::Circle { .. } => zone_contains(z, &g),
+                ZoneShape::Polygon { vertices } => {
+                    crate::config::rect_intersects_polygon(rx0, ry0, rx1, ry1, vertices)
+                }
+            }
+        })
     };
     let mut field = match &terrain {
         // 候选③：并行 + 无锁批量预取（3.71× vs 串行，对比测试 9504381 之后验证）
@@ -4130,12 +4144,13 @@ mod tests {
             "不应 smoothing_failed，实际 {:?}",
             v.warnings
         );
-        // 地形抬升必须显式报告（段级 2480m 峰 → 2680m）
+        // 地形抬升必须显式报告（段级山峰 → 抬升；具体峰值随墙光栅化/路径微调
+        // 而变，2026-08-11 墙精确化后 2480m→2472m，只断言抬升发生且 terrain 在列）
         assert!(
             v.warnings
                 .iter()
-                .any(|w| w.contains("cruise altitude raised") && w.contains("2480")),
-            "应报告地形抬升至 2680m（terrain 2480m），实际 {:?}",
+                .any(|w| w.contains("cruise altitude raised") && w.contains("terrain")),
+            "应报告地形抬升（段级山峰），实际 {:?}",
             v.warnings
         );
         // 必经点语义：3 个必经点均需经过（球面距离容差 5.5km，同 zigzag29）
@@ -4569,5 +4584,70 @@ mod tests {
             "应保留失败原因，实际 {:?}",
             v.warnings
         );
+    }
+
+    #[test]
+    fn zigzag35_polygon_narrow_tip_wall_rasterization_no_false_no_solution() {
+        // 主管 2026-08-11 输入（zz_nosolution_case）：v1 起点 (117.56,38.96) 目标
+        // (115.51,40.72) + no_fly 三角形（西顶点 A(116.4596,39.5413)）+ 1 雷达 50km。
+        // 修复前 grid256：墙光栅化"格子中心采样"漏掉 A 点附近 <1 格窄带（三角形
+        // 截面 ~30m），墙从列 116 才开始 → FMM 沿列 112（x=116.4605，离 A 84m）走，
+        // 路径段穿过三角形窄带 → verify 精确几何 clearance 0.00 < 2km → 平滑链全败
+        // → 误报 no_solution（grid512 cell 更细恰好命中窄带才成功）。
+        // 修复：walled 多边形改"格子矩形与多边形相交"（rect_intersects_polygon），
+        // 任何分辨率不漏窄带。grid384/320/288/272/260/256/512 全部 planned。
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+        let cand = root.join("data/east_asia_7p5as.arpack");
+        if !cand.exists() {
+            eprintln!("skip zigzag35: real terrain missing ({})", cand.display());
+            return;
+        }
+        let s = r#"{
+            "schema_version":"0.20",
+            "mission":{
+                "start":{"lon":115.9,"lat":39.8,"alt_m":3000},
+                "target":{"lon":116.8,"lat":40.3,"alt_m":3000},
+                "vehicles":[
+                    {"id":"v1","profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":250,"min_turn_radius_m":442,"max_climb_angle_deg":15},
+                     "start_pose":{"lon":117.560718576047,"lat":38.96247381822325,"alt_m":3000,"heading_deg":45},
+                     "mid_waypoints":[],
+                     "target_ref":"115.51277784181079,40.72094100704186,3000"}],
+                "red_forces":{"radars":[
+                    {"id":"radar_1786439379325","lon":115.9099176949948,"lat":40.11567473682985,"radar_type":"tracking","radius_km":50,"alt_m":10}]},
+                "no_fly_zones":[
+                    {"id":"zone_1786439400716","zone_type":"no_fly","shape":"polygon",
+                     "geometry":{"vertices":[[116.45960372107142,39.54130857882594],[117.72747798452006,39.878961668275586],[117.2682607976188,39.54988915269062]]},
+                     "alt_min_m":0,"alt_max_m":12000,"height_semantics":"msl"}],
+                "restricted_zones":[],"obstacles":[],
+                "terrain":{"source":"path","path":"__P__"},
+                "parameters":{}
+            }
+        }"#;
+        let s = s.replace("__P__", &cand.to_string_lossy().replace('\\', "\\\\"));
+        let input = parse(&s);
+        let out = solve(&input, &SolveParams::default(), 0).unwrap();
+        let v = &out.vehicles[0];
+        assert_eq!(v.status, "planned", "窄带多边形不应误报 no_solution，实际 {:?}", v.status);
+        assert!(
+            v.path.len() <= 30,
+            "应平滑交付（修复前 423 点网格楼梯 + no_solution），实际 {} 点",
+            v.path.len()
+        );
+        assert!(
+            v.warnings.iter().all(|w| !w.contains("smoothing_failed")),
+            "不应 smoothing_failed，实际 {:?}",
+            v.warnings
+        );
+        // 绕行路径必须离禁飞区多边形 ≥ 2km（inflation）：v1 路径任何段不得进入
+        // 三角形近邻（用 zone_segment_clearance_km 复验，与 verify 同口径）。
+        let zone = &input.mission.no_fly_zones[0];
+        for w in v.path.windows(2) {
+            let clr = crate::config::zone_segment_clearance_km(w[0].x, w[0].y, w[1].x, w[1].y, zone);
+            assert!(
+                clr >= 2.0 - 1e-6,
+                "路径段应离禁飞区 ≥2km，实际 {:.3}km ({},{})->({},{})",
+                clr, w[0].x, w[0].y, w[1].x, w[1].y
+            );
+        }
     }
 }
