@@ -1488,12 +1488,34 @@ fn bottom_terrain_ok(
     let ZoneShape::Circle { center, radius_km } = z.shape else {
         return false;
     };
-    // raw 穿行段优先：底部剖面实际沿 raw 子段平飞，地形按该子段采样（含进出点）
+    // raw 穿行段优先：底部剖面实际沿 raw 子段平飞，地形按该子段采样（含进出点）。
+    // 2026-08-11 zz31：raw 网格点间隔 ≈ cell（大 span → 2325m），窄山峰（7.5as
+    // ~230m 格）落在点间 → 漏检 → 底部误判可行 → 1500m 剖面穿 1421m 峰（净空
+    // 79-98m < 100m）→ final verify 拒 → 5468 点锯齿。改沿 raw 子段加密采样
+    // （间隔 ≤200m，同 verify 口径）。
     if let Some((raw, i_a, i_b)) = raw_band {
         let (lo, hi) = (i_a.min(i_b), i_a.max(i_b));
+        let mut seg_len_m = 0.0_f64;
+        for k in lo + 1..=hi {
+            seg_len_m += crate::path::haversine_m(
+                raw[k - 1].lon,
+                raw[k - 1].lat,
+                raw[k].lon,
+                raw[k].lat,
+            );
+        }
+        // raw 相邻点间距 ≈ cell（8 邻域回溯），按点序号线性插值足够
+        let n = ((seg_len_m / 200.0).ceil() as usize).clamp(8, 2048);
         let mut max_terr: Option<f64> = None;
-        for k in lo..=hi {
-            if let Sample::Land(h) = t.sample_at(raw[k].lon, raw[k].lat) {
+        for j in 0..=n {
+            let u = j as f64 / n as f64;
+            let idx = lo as f64 + u * (hi - lo) as f64;
+            let i0 = idx.floor() as usize;
+            let i1 = (i0 + 1).min(hi);
+            let f = idx - i0 as f64;
+            let lon = raw[i0].lon + (raw[i1].lon - raw[i0].lon) * f;
+            let lat = raw[i0].lat + (raw[i1].lat - raw[i0].lat) * f;
+            if let Sample::Land(h) = t.sample_at(lon, lat) {
                 max_terr = Some(max_terr.map_or(h, |m: f64| m.max(h)));
             }
         }
@@ -1526,9 +1548,10 @@ fn bottom_terrain_ok(
     if u_out <= u_in {
         return true; // 圆在线段端点之外（FMM 直穿不经过）
     }
-    // 沿穿行段采样地形：穿行段长 ≈ 圆直径（40km），步长 ~2.2km → n ≈ 18；clamp [8,64]
+    // 沿穿行段采样地形：步长 ~200m（同 verify 口径；2.2km 会漏窄峰——2026-08-11
+    // zz31 1421m 峰 ~230m 格；clamp [8,2048] 覆盖 ≤400km 穿行段）
     let seg_km = (u_out - u_in) * (dx * dx + dy * dy).sqrt();
-    let n = ((seg_km / 2.2).round() as usize).clamp(8, 64);
+    let n = ((seg_km / 0.2).round() as usize).clamp(8, 2048);
     let mut max_terr: Option<f64> = None;
     for k in 0..=n {
         let u = u_in + (u_out - u_in) * (k as f64 / n as f64);
@@ -1752,9 +1775,23 @@ fn build_restricted_profiles(
             // 真实几何仍穿圆 → 平滑拉直会穿圆违规（verify 几何精确拦截）→ 回退锯齿。
             // fallback：start→target 直线穿圆（且直线避开全部硬墙）→ 直线参数化剖面
             // （1b1331b 旧方案；仅 raw 未穿圆时启用，主管 2026-08-06 三轮架构保留）。
-            let Some(pass_alt) =
-                restricted_pass_alt(z, alt_m, ceiling_m, terrain, start, target, max_climb_deg, None)
-            else {
+            // 2026-08-11 zz31：底部判定必须用**段首尾**（p0/p1，与剖面 in_out 一致）。
+            // 传全局 start/target 时，若全局直线不穿圆（v2 (103.8,32.5)→(124.7,53.3)
+            // 不穿 rz2）→ bottom_terrain_ok 平面分支 disc<=0 → 直接放行底部 1500m，
+            // 但剖面沿段直线（wp4→wp5）穿圆经过 1421m 峰 → 净空 79-98m < 100m →
+            // final verify 拒 → 5468 点锯齿（zigzag21 只修了 raw_band 分支，此分支漏）。
+            let p0g = Geo::new(p0.lon, p0.lat).unwrap_or(*start);
+            let p1g = Geo::new(p1.lon, p1.lat).unwrap_or(*target);
+            let Some(pass_alt) = restricted_pass_alt(
+                z,
+                alt_m,
+                ceiling_m,
+                terrain,
+                &p0g,
+                &p1g,
+                max_climb_deg,
+                None,
+            ) else {
                 continue;
             };
             if line_hits_wall_km(p0.lon, p0.lat, p1.lon, p1.lat, zones, inflation_km) {
@@ -3780,6 +3817,132 @@ mod tests {
                 d <= 5_500.0
             });
             assert!(near, "wp{} 必经点应经过邻域，实际 {:?}", mi + 1, v.path);
+        }
+    }
+
+    #[test]
+    fn zigzag31_fallback_pass_alt_uses_segment_ends() {
+        // 主管 2026-08-11 输入（zz31）：v1 同 zigzag30（3 必经点 + no_fly + 2 restricted
+        // + 1 radar），v2 新增 **13 必经点**（跨 21°×21° 大区域），no_fly 三角形换位置、
+        // rz1 圆心微移。v1 复现 13 点平滑（zz30 机制），v2 复现 **5468 点网格楼梯
+        // smoothing_failed**。
+        // 根因（zigzag31）：v2 多段往返穿过 rz2（112.998,45.634）。wp4→wp5 段 raw
+        // 穿圆 → bottom_terrain_ok raw_band 采样 raw 网格点（间隔 ~cell 2325m）漏
+        // 1421m 窄峰（7.5as ~230m 格）→ 底部判可行 → 1500m 剖面穿峰（净空 79-98m
+        // < 100m）；wp12→wp13 段 raw 未穿圆（网格离散擦边）→ fallback 直线参数化
+        // 剖面，但 restricted_pass_alt 传**全局** start/target（v2 (103.8,32.5)→
+        // (124.7,53.3) 直线不穿 rz2 → bottom_terrain_ok 平面分支 disc<=0 直接放行
+        // 底部 1500m）→ 剖面沿段直线穿圆经过 1421m 峰 → 判定与剖面不一致 → final
+        // verify 拒 → 全链回退 5468 点。
+        // 修复：① bottom_terrain_ok raw_band 分支改沿 raw 子段加密采样（间隔 ≤200m，
+        // 同 verify 口径）；平面分支步长 2.2km→200m（clamp [8,2048]）；② fallback
+        // 分支 restricted_pass_alt 传**段首尾**（p0/p1，与剖面 in_out 一致）。
+        // 结果：v1 13 点平滑（不变）；v2 5468→37 点平滑，13 必经点全过；wp4→wp5 段
+        // rz2 底部→顶部 6500m（1421m 峰），wp12→wp13 段 1500m（该穿行带地形 ≤1400m）。
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+        let cand = root.join("data/east_asia_7p5as.arpack");
+        if !cand.exists() {
+            eprintln!("skip zigzag31: real terrain missing ({})", cand.display());
+            return;
+        }
+        let s = r#"{
+            "schema_version":"0.20",
+            "mission":{
+                "start":{"lon":115.9,"lat":39.8,"alt_m":3000},
+                "target":{"lon":116.8,"lat":40.3,"alt_m":3000},
+                "vehicles":[
+                    {"id":"v1","profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":250,"min_turn_radius_m":442,"max_climb_angle_deg":15},
+                     "start_pose":{"lon":121.32158437921957,"lat":35.345605078916044,"alt_m":1000,"heading_deg":45},
+                     "mid_waypoints":[
+                        {"lon":122.3852641802933,"lat":37.91301080822844,"alt_m":1000},
+                        {"lon":118.45106783248693,"lat":36.09407976700374,"alt_m":1000},
+                        {"lon":119.64410040053079,"lat":38.42608749463845,"alt_m":1000}],
+                     "target_ref":"106.6800083196283,49.891931490296315,3000"},
+                    {"id":"v2","profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":500,"min_turn_radius_m":800,"max_climb_angle_deg":15},
+                     "start_pose":{"lon":103.80007749527002,"lat":32.492118851168414,"alt_m":5000,"heading_deg":45},
+                     "mid_waypoints":[
+                        {"lon":109.97496463623962,"lat":40.89240709612281,"alt_m":5000},
+                        {"lon":105.05176607466912,"lat":45.12560078345386,"alt_m":5000},
+                        {"lon":107.45453837531355,"lat":47.33920209644489,"alt_m":5000},
+                        {"lon":117.35985238233839,"lat":44.39524022248522,"alt_m":5000},
+                        {"lon":123.01092994596729,"lat":42.94575095184553,"alt_m":5000},
+                        {"lon":117.84672376061431,"lat":38.80107785870063,"alt_m":5000},
+                        {"lon":112.72724669014056,"lat":37.192877051433356,"alt_m":5000},
+                        {"lon":108.30767125147409,"lat":38.39729311871755,"alt_m":5000},
+                        {"lon":105.43569482275211,"lat":40.72490772213813,"alt_m":5000},
+                        {"lon":105.07165169750732,"lat":44.17689617497171,"alt_m":5000},
+                        {"lon":106.27781114030425,"lat":46.905803587744295,"alt_m":5000},
+                        {"lon":109.75971033327446,"lat":46.304227978356174,"alt_m":5000},
+                        {"lon":118.23811461480165,"lat":44.09728961713801,"alt_m":5000}],
+                     "target_ref":"124.7360092361736,53.31522760700038,3000"}],
+                "red_forces":{"radars":[
+                    {"id":"radar_1786409721004","lon":113.00786729664442,"lat":46.21627287139257,"radar_type":"early_warning","radius_km":200,"alt_m":10}]},
+                "no_fly_zones":[
+                    {"id":"zone_1786409515324","zone_type":"no_fly","shape":"polygon",
+                     "geometry":{"vertices":[[118.17769472280284,40.45820431372051],[107.63203137395895,44.11758744295661],[112.15118325335442,40.40008219131184]]},
+                     "alt_min_m":0,"alt_max_m":12000,"height_semantics":"msl"}],
+                "restricted_zones":[
+                    {"id":"rz_1786409547965","zone_type":"restricted","shape":"circle",
+                     "geometry":{"center":[106.78464665022119,36.00663895579695],"radius_km":100},
+                     "alt_min_m":3000,"alt_max_m":6000,"height_semantics":"msl"},
+                    {"id":"rz_1786409606028","zone_type":"restricted","shape":"circle",
+                     "geometry":{"center":[112.99788589051144,45.6335833104839],"radius_km":100},
+                     "alt_min_m":2000,"alt_max_m":6000,"height_semantics":"msl"}],
+                "obstacles":[],
+                "terrain":{"source":"path","path":"__P__"},
+                "parameters":{"p_cross":0.9}
+            }
+        }"#;
+        let s = s.replace("__P__", &cand.to_string_lossy().replace('\\', "\\\\"));
+        let input = parse(&s);
+        let out = solve(&input, &SolveParams::default(), 0).unwrap();
+        // v1：3 必经点（同 zigzag30，抬升 warning）
+        let v1 = &out.vehicles[0];
+        assert_eq!(v1.status, "planned", "v1 应 planned");
+        assert!(
+            v1.path.len() <= 60,
+            "v1 应平滑交付（修复前 13 点），实际 {} 点",
+            v1.path.len()
+        );
+        assert!(
+            v1.warnings.iter().all(|w| !w.contains("smoothing_failed")),
+            "v1 不应 smoothing_failed，实际 {:?}",
+            v1.warnings
+        );
+        // v2：13 必经点全部经过（球面距离容差 5.5km），平滑交付
+        let v2 = &out.vehicles[1];
+        assert_eq!(v2.status, "planned", "v2 应 planned");
+        assert!(
+            v2.path.len() <= 120,
+            "v2 应平滑交付（修复前 5468 点网格楼梯），实际 {} 点",
+            v2.path.len()
+        );
+        assert!(
+            v2.warnings.iter().all(|w| !w.contains("smoothing_failed")),
+            "v2 不应 smoothing_failed，实际 {:?}",
+            v2.warnings
+        );
+        let mids2 = [
+            (109.97496463623962_f64, 40.89240709612281_f64),
+            (105.05176607466912_f64, 45.12560078345386_f64),
+            (107.45453837531355_f64, 47.33920209644489_f64),
+            (117.35985238233839_f64, 44.39524022248522_f64),
+            (123.01092994596729_f64, 42.94575095184553_f64),
+            (117.84672376061431_f64, 38.80107785870063_f64),
+            (112.72724669014056_f64, 37.192877051433356_f64),
+            (108.30767125147409_f64, 38.39729311871755_f64),
+            (105.43569482275211_f64, 40.72490772213813_f64),
+            (105.07165169750732_f64, 44.17689617497171_f64),
+            (106.27781114030425_f64, 46.905803587744295_f64),
+            (109.75971033327446_f64, 46.304227978356174_f64),
+            (118.23811461480165_f64, 44.09728961713801_f64),
+        ];
+        for (mi, (mlon, mlat)) in mids2.iter().enumerate() {
+            let near = v2.path.iter().any(|p| {
+                let d = crate::path::haversine_m(p.x, p.y, *mlon, *mlat);
+                d <= 5_500.0
+            });
+            assert!(near, "v2 wp{} 必经点应经过邻域，实际 {:?}", mi + 1, v2.path);
         }
     }
 }
