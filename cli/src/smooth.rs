@@ -1318,6 +1318,12 @@ pub struct SmoothResult {
     pub warning: Option<String>,
     /// 最后阶段复验报告（供下游签收精度度量）。
     pub verify: VerifyReport,
+    /// 各阶段复验中地形净空不足的最大地形高度（米）；None = 无。
+    /// 2026-08-11 zz30：Theta* 拉直段穿山（check 长段采样 1024 上限截断漏窄峰）
+    /// 时，中间阶段 verify 的 terrain issue 会被"回退楼梯阶段"（沿 FMM 走廊地形
+    /// OK）吞掉 → 最终 verify 无 terrain issue。记录中间阶段最大地形高度供
+    /// solver 抬升重跑。
+    pub terrain_gap_m: Option<f64>,
 }
 
 /// 策略链执行 + 复验门（回退语义，十轮共识）：
@@ -1339,6 +1345,8 @@ pub fn smooth_path_chain<'a>(
             stages.push((s.name().to_string(), cur.clone()));
         }
     }
+    // 各阶段复验中地形净空不足的最大地形高度（供 solver 抬升重跑，见 SmoothResult）
+    let mut terrain_gap_m: Option<f64> = None;
     // 从链末向前回退（包含 input 阶段）
     // Dubins 拟合阶段：输出是"物理修正"圆角（转弯半径 r_m），相对 raw 折线的
     // 弦高可达数百米（绕行 L 形圆角 ~0.7km）——100m 逼近容差会误杀合法绕行，
@@ -1380,7 +1388,22 @@ pub fn smooth_path_chain<'a>(
         if rep.ok && best.is_none_or(|(_, p)| stage.points.len() < p.points.len()) {
             best = Some((idx, stage));
         }
-        // 该阶段复验失败 → 跳过
+        // 该阶段复验失败 → 跳过；若含地形净空不足（"(terrain Nm)"）记录最大地形
+        // 高度（verify 采样 ~200m 密于 check，窄峰不会被漏检）
+        if !rep.ok {
+            let t = rep
+                .issues
+                .iter()
+                .filter_map(|s| {
+                    let pos = s.find("(terrain ")?;
+                    let tail = s[pos + "(terrain ".len()..].trim_end_matches(')').trim();
+                    tail.trim_end_matches('m').trim().parse::<f64>().ok()
+                })
+                .fold(0.0_f64, f64::max);
+            if t > 0.0 {
+                terrain_gap_m = Some(terrain_gap_m.map_or(t, |o| o.max(t)));
+            }
+        }
         if std::env::var_os("ARP_DEBUG_SMOOTH").is_some() {
             let status = if rep.ok { "OK" } else { "FAIL" };
             eprintln!(
@@ -1429,6 +1452,7 @@ pub fn smooth_path_chain<'a>(
             applied,
             warning: None,
             verify: rep,
+            terrain_gap_m,
         };
     }
     // 全链失败：原始折线 + 显式告警
@@ -1438,6 +1462,7 @@ pub fn smooth_path_chain<'a>(
         applied: Vec::new(),
         warning: Some("smoothing_failed: no smoothed stage passed full verification".into()),
         verify: rep,
+        terrain_gap_m,
     }
 }
 

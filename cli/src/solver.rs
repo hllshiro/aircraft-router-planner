@@ -401,7 +401,26 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
         let mut terrain_fallback_done = false; // 已回退无过滤场（保底）
         // 有效巡航高度（可被抬升逻辑更新；初始 = 起点高度）
         let mut alt_eff = v.alt_m;
-        'fmm_attempt: for _attempt in 0..4 {
+        // 平滑终检产物（循环内填充、循环外输出）：
+        let mut warnings: Vec<String> = Vec::new();
+        // loop 无条件进入且每个 break 前必赋值（attempts>6 兜底 / final_rep.ok /
+        // 失败回退），故无需初始值
+        let mut pts: Vec<crate::path::PathPoint>;
+        // 2026-08-11 主管输入（zz30）：抬升决策只采样 seg_ends 直线，Theta* 绕行
+        // 走廊可能经过更高山峰（(107.33,48.36) 2480m > 抬升 2555m 的净空阈值
+        // 2455m；check 长段采样 1024 上限截断 → 928m 间隔漏窄峰、verify ~200m
+        // 采样抓到）→ 平滑链全败回退 1789 点锯齿。修复：平滑+终检移入解算循环，
+        // final_rep 报地形净空不足 → 按 verify issue 地形高度抬升重跑（根治
+        // "走廊地形 > 抬升假设"；verify 采样最密为最终裁判）。抬升严格递增
+        // （>alt_eff+0.5 且 ≤ceiling）单调有界；attempts 上限兜底（FMM 4 次 +
+        // 平滑抬升重跑 2 次）。
+        let mut attempts = 0usize;
+        'fmm_attempt: loop {
+            attempts += 1;
+            if attempts > 6 {
+                pts = raw_joined.points.clone();
+                break;
+            }
             let use_terrain_mask = if terrain_fallback_done {
                 false
             } else if terrain_alt_raised {
@@ -472,7 +491,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                     None
                 };
             let field_ref = veh_field.as_ref().unwrap_or(&field);
-            eprintln!("[debug] fmm attempt {} field ready (veh={})", _attempt, veh_field.is_some());
+            eprintln!("[debug] fmm attempt {} field ready (veh={})", attempts, veh_field.is_some());
             // 逐段 FMM → 回溯 → 拼接（去重段端点）
             let mut raw_segs: Vec<Path> = Vec::new();
             let mut no_solution = false;
@@ -599,47 +618,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                 force_restricted_wall = true;
                 continue 'fmm_attempt;
             }
-            break;
-        }
-        let mut warnings = Vec::new();
-        // 抬升提示（2026-08-10）：巡航高度被抬升必须显式告知（低空任务被地形抬升）。
-        if terrain_alt_raised && alt_eff > v.alt_m + 0.5 {
-            let terr_max = (alt_eff - opts.clearance_m.max(1.0) - 100.0).max(0.0);
-            let msg = format!(
-                "terrain clearance: cruise altitude raised {:.0}->{:.0}m (terrain up to {:.0}m)",
-                v.alt_m, alt_eff, terr_max
-            );
-            warnings.push(msg.clone());
-            degradations.push(msg);
-        }
-        // 降速提示（主管 2026-08-07：速度非锁定，转弯段可降速实现小半径）：
-        // turn_radius < 巡航物理下限 → 转弯段需降到 v_turn = sqrt(r·g·tanφ)。
-        if opts.turn_radius_m > 0.0 {
-            let bank = v
-                .profile
-                .max_bank_deg
-                .unwrap_or(params_merged.default_max_bank_deg);
-            let v_turn = (opts.turn_radius_m * 9.81 * bank.to_radians().tan()).sqrt();
-            let cruise_v = v
-                .profile
-                .cruise_speed_mps
-                .or_else(|| v.profile.speed_range_mps.map(|[a, b]| (a + b) / 2.0))
-                .unwrap_or(match v.profile.aircraft_type {
-                    crate::config::AircraftType::FixedWing => {
-                        params_merged.default_fixed_wing_speed_mps
-                    }
-                    crate::config::AircraftType::Rotorcraft => {
-                        params_merged.default_rotorcraft_speed_mps
-                    }
-                });
-            if v_turn < cruise_v - 1e-9 {
-                warnings.push(format!(
-                    "turn radius {:.0}m: turn segments require speed reduction {:.0}->{:.0} m/s",
-                    opts.turn_radius_m, cruise_v, v_turn
-                ));
-            }
-        }
-        let mut pts = raw_joined.points.clone();
+            pts = raw_joined.points.clone();
         if pts.len() >= 2 {
             let check = make_segment_check(
                 &all_zones,
@@ -692,6 +671,10 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
             let mut smooth_segs: Vec<crate::path::Path> = Vec::new();
             let mut seg_warnings = Vec::new();
             let mut entry_heading: Option<f64> = None;
+            // 段级平滑中间阶段的地形净空不足最大高度（smooth.rs SmoothResult.
+            // terrain_gap_m）：theta_star 拉直段穿山被回退楼梯吞掉时，final verify
+            // 无 terrain issue，靠这里触发抬升重跑（2026-08-11 zz30 2480m 峰）。
+            let mut seg_terr_max: f64 = 0.0;
             // 段边界硬约束点（起点/必经点/目标）：arc 修复会弹出边界点 b，必经点不得
             // 被替代（user 硬约束），否则违反"任何平滑不得移除必经点"。
             let hard_boundary: Vec<(f64, f64)> = seg_ends.iter().map(|g| (g.lon, g.lat)).collect();
@@ -727,6 +710,9 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                     let entry_max_deg = if seg_start_is_hard { 175.0 } else { 95.0 };
                     let chain = default_chain(&opts, &check, entry_heading, entry_max_deg);
                     let result = smooth_path_chain(seg, &chain, &opts, &ctx, Some(phys_min_radius_m));
+                    if let Some(t) = result.terrain_gap_m {
+                        seg_terr_max = seg_terr_max.max(t);
+                    }
                     if let Some(w) = &result.warning {
                         seg_warnings.push(w.clone());
                     }
@@ -837,7 +823,34 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                 pts = joined.points;
                 // extend 而非覆盖：保留 profile 级降速提示（turn_radius 信任输入）
                 warnings.extend(seg_warnings.iter().cloned());
+                break 'fmm_attempt;
             } else {
+                // 地形净空不足 → 抬升重跑（2026-08-11 主管输入 2480m 峰）：verify
+                // issue 采样密（~200m），以其地形高度为准；段级平滑中间阶段的
+                // terrain issue（回退楼梯吞掉，见 seg_terr_max）取 max 并集。
+                // 抬升严格递增（>alt_eff+0.5 且 ≤ceiling）单调有界，attempts 上限
+                // 兜底。原 FAIL 分支（smoothing_failed + 直线替代 + 雷达替代）仅在
+                // 抬升不可行/超限后执行。
+                let terr_max = final_rep.issues.iter().filter_map(|s| {
+                    let pos = s.find("(terrain ")?;
+                    let tail = s[pos + "(terrain ".len()..].trim_end_matches(')').trim();
+                    tail.trim_end_matches('m').trim().parse::<f64>().ok()
+                }).fold(0.0_f64, f64::max).max(seg_terr_max);
+                if terr_max > 0.0 {
+                    let clearance = opts.clearance_m.max(1.0);
+                    let new_alt = (terr_max + clearance + 100.0).max(v.alt_m);
+                    let ceiling_ok = v.profile.ceiling_m.is_none_or(|c| new_alt <= c);
+                    if new_alt > alt_eff + 0.5 && ceiling_ok {
+                        terrain_alt_raised = true;
+                        alt_eff = new_alt;
+                        eprintln!(
+                            "[debug] smooth terrain clearance -> raise cruise alt {:.0}->{:.0}m (terrain {:.0}m, v={})",
+                            v.alt_m, alt_eff, terr_max, v.id
+                        );
+                        continue 'fmm_attempt;
+                    }
+                }
+                // 终检失败 → 回退未平滑拼接（必经点保留，宁丑勿违）
                 if std::env::var_os("ARP_DEBUG_SMOOTH").is_some() {
                     eprintln!(
                         "[smooth-dbg] FINAL VERIFY FAIL points={} issues={} warnings={}",
@@ -959,6 +972,45 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                         }
                     }
                 }
+            }
+        }
+            break 'fmm_attempt;
+        }
+        // 抬升提示（2026-08-10）：巡航高度被抬升必须显式告知（低空任务被地形抬升）。
+        if terrain_alt_raised && alt_eff > v.alt_m + 0.5 {
+            let terr_max = (alt_eff - opts.clearance_m.max(1.0) - 100.0).max(0.0);
+            let msg = format!(
+                "terrain clearance: cruise altitude raised {:.0}->{:.0}m (terrain up to {:.0}m)",
+                v.alt_m, alt_eff, terr_max
+            );
+            warnings.push(msg.clone());
+            degradations.push(msg);
+        }
+        // 降速提示（主管 2026-08-07：速度非锁定，转弯段可降速实现小半径）：
+        // turn_radius < 巡航物理下限 → 转弯段需降到 v_turn = sqrt(r·g·tanφ)。
+        if opts.turn_radius_m > 0.0 {
+            let bank = v
+                .profile
+                .max_bank_deg
+                .unwrap_or(params_merged.default_max_bank_deg);
+            let v_turn = (opts.turn_radius_m * 9.81 * bank.to_radians().tan()).sqrt();
+            let cruise_v = v
+                .profile
+                .cruise_speed_mps
+                .or_else(|| v.profile.speed_range_mps.map(|[a, b]| (a + b) / 2.0))
+                .unwrap_or(match v.profile.aircraft_type {
+                    crate::config::AircraftType::FixedWing => {
+                        params_merged.default_fixed_wing_speed_mps
+                    }
+                    crate::config::AircraftType::Rotorcraft => {
+                        params_merged.default_rotorcraft_speed_mps
+                    }
+                });
+            if v_turn < cruise_v - 1e-9 {
+                warnings.push(format!(
+                    "turn radius {:.0}m: turn segments require speed reduction {:.0}->{:.0} m/s",
+                    opts.turn_radius_m, cruise_v, v_turn
+                ));
             }
         }
         // NoData 退化汇总（空洞策略 2026-08-04：最坏降级警告进 stats.degradations）：
@@ -3634,5 +3686,100 @@ mod tests {
             assert!(near, "wp{} 必经点应经过邻域，实际 {:?}", mi + 1, v.path);
         }
     }
-}
 
+    #[test]
+    fn zigzag30_terrain_gap_raise_on_smoothed_segment() {
+        // 主管 2026-08-11 输入（east_asia 7.5as 真实地形）：单机独立 start_pose +
+        // 3 必经点 + target_ref + no_fly 三角形 + 2 restricted 圆 + 1 雷达。
+        // v1 从 (121.32,35.35) 到 (106.68,49.89) 横跨 21.39° → FMM grid 1024
+        // → cell 2325m，绕行走廊粗楼梯；Theta* 拉直段 (109.86,42.54)→(106.69,49.85)
+        // 经过 2480m 山峰（不在 seg_ends 直线上）。
+        // 根因（zigzag30）：抬升决策只采样 seg_ends 直线（最高 2355m）→ 抬到 2555m，
+        // 但 Theta* 绕行走廊的拉直段穿 2480m 峰 → 净空 75-99m < 100m → verify 拒 →
+        // 全链回退 1789 点网格楼梯（smoothing_failed）。且段级 theta_star 阶段的地形
+        // issue 被"回退楼梯阶段"（沿 FMM 走廊地形 OK）吞掉 → 最终 verify 无 terrain
+        // issue → 原抬升逻辑不触发。
+        // 修复：① 平滑链 + 终检移入 'fmm_attempt 解算循环（final_rep FAIL 时抬升重跑
+        // FMM）；② smooth.rs SmoothResult 新增 terrain_gap_m 记录段级中间阶段最大
+        // 地形高度（verify ~200m 采样密于 check，窄峰不漏检），solver 抬升决策与
+        // final_rep issues 解析取 max。结果：1789→14 点平滑，1000→2680m（抬升链
+        // 2555m→段级 2480m 峰→2680m），smoothing_failed 消失。
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+        let cand = root.join("data/east_asia_7p5as.arpack");
+        if !cand.exists() {
+            eprintln!("skip zigzag30: real terrain missing ({})", cand.display());
+            return;
+        }
+        let s = r#"{
+            "schema_version":"0.20",
+            "mission":{
+                "start":{"lon":115.9,"lat":39.8,"alt_m":3000},
+                "target":{"lon":116.8,"lat":40.3,"alt_m":3000},
+                "vehicles":[
+                    {"id":"v1","profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":250,"min_turn_radius_m":442,"max_climb_angle_deg":15},
+                     "start_pose":{"lon":121.32158437921957,"lat":35.345605078916044,"alt_m":1000,"heading_deg":45},
+                     "mid_waypoints":[
+                        {"lon":122.3852641802933,"lat":37.91301080822844,"alt_m":1000},
+                        {"lon":118.45106783248693,"lat":36.09407976700374,"alt_m":1000},
+                        {"lon":119.64410040053079,"lat":38.42608749463845,"alt_m":1000}],
+                     "target_ref":"106.6800083196283,49.891931490296315,3000"},
+                    {"id":"v2","profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":500,"min_turn_radius_m":800,"max_climb_angle_deg":15},
+                     "start_pose":{"lon":103.80007749527002,"lat":32.492118851168414,"alt_m":5000,"heading_deg":45},
+                     "mid_waypoints":[],
+                     "target_ref":"124.7360092361736,53.31522760700038,3000"}],
+                "red_forces":{"radars":[
+                    {"id":"radar_1786409721004","lon":113.00786729664442,"lat":46.21627287139257,"radar_type":"early_warning","radius_km":200,"alt_m":10}]},
+                "no_fly_zones":[
+                    {"id":"zone_1786409515324","zone_type":"no_fly","shape":"polygon",
+                     "geometry":{"vertices":[[112.56383008070333,44.4855055439424],[117.93020756431244,40.51747800244875],[110.16677625965431,42.442633787371435]]},
+                     "alt_min_m":0,"alt_max_m":12000,"height_semantics":"msl"}],
+                "restricted_zones":[
+                    {"id":"rz_1786409547965","zone_type":"restricted","shape":"circle",
+                     "geometry":{"center":[106.7843768348038,36.24901461339551],"radius_km":100},
+                     "alt_min_m":3000,"alt_max_m":6000,"height_semantics":"msl"},
+                    {"id":"rz_1786409606028","zone_type":"restricted","shape":"circle",
+                     "geometry":{"center":[112.99788589051144,45.6335833104839],"radius_km":100},
+                     "alt_min_m":2000,"alt_max_m":6000,"height_semantics":"msl"}],
+                "obstacles":[],
+                "terrain":{"source":"path","path":"__P__"},
+                "parameters":{"p_cross":0.9}
+            }
+        }"#;
+        let s = s.replace("__P__", &cand.to_string_lossy().replace('\\', "\\\\"));
+        let input = parse(&s);
+        let out = solve(&input, &SolveParams::default(), 0).unwrap();
+        let v = &out.vehicles[0];
+        assert_eq!(v.status, "planned", "v1 应 planned");
+        assert!(
+            v.path.len() <= 60,
+            "应平滑交付（修复前 1789 点网格楼梯），实际 {} 点",
+            v.path.len()
+        );
+        assert!(
+            v.warnings.iter().all(|w| !w.contains("smoothing_failed")),
+            "不应 smoothing_failed，实际 {:?}",
+            v.warnings
+        );
+        // 地形抬升必须显式报告（段级 2480m 峰 → 2680m）
+        assert!(
+            v.warnings
+                .iter()
+                .any(|w| w.contains("cruise altitude raised") && w.contains("2480")),
+            "应报告地形抬升至 2680m（terrain 2480m），实际 {:?}",
+            v.warnings
+        );
+        // 必经点语义：3 个必经点均需经过（球面距离容差 5.5km，同 zigzag29）
+        let mids = [
+            (122.3852641802933_f64, 37.91301080822844_f64),
+            (118.45106783248693_f64, 36.09407976700374_f64),
+            (119.64410040053079_f64, 38.42608749463845_f64),
+        ];
+        for (mi, (mlon, mlat)) in mids.iter().enumerate() {
+            let near = v.path.iter().any(|p| {
+                let d = crate::path::haversine_m(p.x, p.y, *mlon, *mlat);
+                d <= 5_500.0
+            });
+            assert!(near, "wp{} 必经点应经过邻域，实际 {:?}", mi + 1, v.path);
+        }
+    }
+}
