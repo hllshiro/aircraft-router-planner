@@ -18,8 +18,13 @@ export async function fetchTerrain(
   const resp = await fetch('/api/terrain', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    // bbox/grid 缺省（null/undefined）→ server 用数据范围 + 按跨度自适应精度
-    body: JSON.stringify({ path, bbox: bbox ?? undefined, grid: grid ?? undefined }),
+    // bbox/grid 显式 null → server 用数据范围 + 按跨度自适应精度
+    // （注意：不能省略字段——旧 server 的 bbox 非 Option 时缺字段会 400 plain text）
+    body: JSON.stringify({
+      path,
+      bbox: bbox ?? null,
+      grid: grid ?? null,
+    }),
   });
   const data = await resp.json();
   if (data.error) {
