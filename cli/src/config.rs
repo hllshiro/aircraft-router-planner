@@ -1042,7 +1042,7 @@ pub(crate) fn zone_segment_clearance_km(
 }
 
 /// 点到线段最近距离（km；经纬度平面近似，经度按 lat0 余弦缩放）。
-fn pt_seg_dist_km(lon1: f64, lat1: f64, lon2: f64, lat2: f64, plon: f64, plat: f64) -> f64 {
+pub(crate) fn pt_seg_dist_km(lon1: f64, lat1: f64, lon2: f64, lat2: f64, plon: f64, plat: f64) -> f64 {
     let lat0 = lat1.to_radians();
     let kx = 111.320 * lat0.cos();
     let ky = 111.0;

@@ -12,8 +12,8 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use crate::config::{
-    resolve_target_ref, zone_contains, zone_contains_at, Input, Output, PathPoint, Stats,
-    TerrainSourceType, VehicleOutput, Zone, ZoneShape,
+    point_in_polygon_xy, pt_seg_dist_km, resolve_target_ref, zone_contains, zone_contains_at,
+    Input, Output, PathPoint, Stats, TerrainSourceType, VehicleOutput, Zone, ZoneShape,
 };
 use crate::coord::Geo;
 use crate::costfield::{backtrack_path, build_semantic_cost_field, build_semantic_cost_field_par_local, fmm_propagate};
@@ -2421,8 +2421,104 @@ fn seg_zone_clearance_ok_arc(
 ///   （底部 2×|alt−alt_min−500|，顶部 2×|alt_max+500−alt|）→ 垂直机动更少的底部恒优；
 ///   底部不可行（穿行区地形挡住底部 / 爬升距离不足）→ 顶部绕飞（高于任何地形，且须
 ///   ≤ 升限 ceiling_m）；
+/// 点到多边形边界最近距离（km；平面近似，与 pt_seg_dist_km 同口径）。
+/// 点在多边形内部（含边界）→ 0（穿行起点在带内 → 爬升过渡距离不满足）。
+fn pt_polygon_boundary_km(lon: f64, lat: f64, vertices: &[[f64; 2]]) -> f64 {
+    if vertices.len() < 3 {
+        return f64::MAX;
+    }
+    if point_in_polygon_xy(lon, lat, vertices) {
+        return 0.0;
+    }
+    let mut best = f64::MAX;
+    let mut j = vertices.len() - 1;
+    for i in 0..vertices.len() {
+        let d = pt_seg_dist_km(
+            vertices[j][0],
+            vertices[j][1],
+            vertices[i][0],
+            vertices[i][1],
+            lon,
+            lat,
+        );
+        best = best.min(d);
+        j = i;
+    }
+    best
+}
+
+/// 直线段在多边形**内部**的归一化参数带列表（u∈[0,1]；凸多边形 0~1 个，凹多边形多个）。
+/// 局部平面近似（中点纬度等距投影，与圆分支的解析二次方程同口径）。返回空 = 直线不穿
+/// 多边形。算法：直线与每条边求交参数 t 收集去重 → 相邻交点对中点判定多边形内 → 成带；
+/// start/end 端点本身在内时补 [0,first]/[last,1]。
+fn line_polygon_inside_bands(
+    lon1: f64,
+    lat1: f64,
+    lon2: f64,
+    lat2: f64,
+    vertices: &[[f64; 2]],
+) -> Vec<(f64, f64)> {
+    if vertices.len() < 3 {
+        return Vec::new();
+    }
+    let mlat = ((lat1 + lat2) / 2.0).to_radians();
+    let kx = mlat.cos() * 111.32;
+    let ky = 111.32;
+    let (ax, ay) = (lon1 * kx, lat1 * ky);
+    let (bx, by) = (lon2 * kx, lat2 * ky);
+    let (rx, ry) = (bx - ax, by - ay);
+    let mut ts: Vec<f64> = Vec::new();
+    let n = vertices.len();
+    let mut j = n - 1;
+    for i in 0..n {
+        let (cx, cy) = (vertices[j][0] * kx, vertices[j][1] * ky);
+        let (dx, dy) = (vertices[i][0] * kx, vertices[i][1] * ky);
+        let (sx, sy) = (dx - cx, dy - cy);
+        let denom = rx * sy - ry * sx;
+        if denom.abs() < 1e-12 {
+            j = i; // 平行/共线 → 无唯一交点（贴边保守由中点判定兜底）
+            continue;
+        }
+        let (qpx, qpy) = (cx - ax, cy - ay);
+        let t = (qpx * sy - qpy * sx) / denom;
+        let s = (qpx * ry - qpy * rx) / denom;
+        if t >= -1e-9 && t <= 1.0 + 1e-9 && s >= -1e-9 && s <= 1.0 + 1e-9 {
+            ts.push(t.clamp(0.0, 1.0));
+        }
+        j = i;
+    }
+    ts.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    ts.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
+    if ts.is_empty() {
+        // 无边交点：全段在内（start/target 都在多边形内）或全段在外
+        return if point_in_polygon_xy(lon1, lat1, vertices) {
+            vec![(0.0, 1.0)]
+        } else {
+            Vec::new()
+        };
+    }
+    let start_in = point_in_polygon_xy(lon1, lat1, vertices);
+    let end_in = point_in_polygon_xy(lon2, lat2, vertices);
+    let mut bands: Vec<(f64, f64)> = Vec::new();
+    if start_in {
+        bands.push((0.0, ts[0]));
+    }
+    for k in 0..ts.len().saturating_sub(1) {
+        let u = (ts[k] + ts[k + 1]) / 2.0;
+        let (lon, lat) = (lon1 + (lon2 - lon1) * u, lat1 + (lat2 - lat1) * u);
+        if point_in_polygon_xy(lon, lat, vertices) {
+            bands.push((ts[k], ts[k + 1]));
+        }
+    }
+    if end_in {
+        bands.push((*ts.last().unwrap(), 1.0));
+    }
+    bands
+}
+
 /// - None：底部与顶部都不可行 → 需画墙水平绕行（fallback 保底）。
-/// 多边形 restricted 的剖面暂不支持（MVP：仅圆形直穿剖面），返回 None（水平绕行）。
+/// 圆/多边形 restricted 同语义：底部穿行（alt_min−500m）恒优于顶部绕飞
+/// （alt_max+500m）；底部被穿行带地形挡住 → 顶部；都不可行 → None（水平绕行）。
 fn restricted_pass_alt(
     z: &Zone,
     alt_m: f64,
@@ -2433,8 +2529,39 @@ fn restricted_pass_alt(
     max_climb_deg: f64,
     raw_band: Option<(&[RouterPoint], usize, usize)>,
 ) -> Option<f64> {
-    let ZoneShape::Circle { center, radius_km } = z.shape else {
-        return None;
+    let ZoneShape::Circle { center, radius_km } = &z.shape else {
+        // 多边形：d_in/d_out = 点到多边形边界最近距离（点在内 → 0 → 过渡距离不足）
+        let ZoneShape::Polygon { vertices } = &z.shape else {
+            return None;
+        };
+        // 限飞区高度区间必须存在（validate 已强制 Restricted 提供 [alt_min, alt_max]）；
+        // 缺失时按全高度处理（退化输入兜底，不 panic）。
+        let Some(min_alt) = z.alt_min_m else { return None };
+        let Some(max_alt) = z.alt_max_m else { return None };
+        let bottom = min_alt - 500.0;
+        let top = max_alt + 500.0;
+        let climb_dist = |pass: f64| -> f64 {
+            if max_climb_deg > 0.1 {
+                (alt_m - pass).abs() / max_climb_deg.to_radians().tan() * 1.25
+            } else {
+                f64::INFINITY
+            }
+        };
+        let d_in = pt_polygon_boundary_km(start.lon, start.lat, vertices);
+        let d_out = pt_polygon_boundary_km(target.lon, target.lat, vertices);
+        let fit = |pass: f64| d_in * 1000.0 >= climb_dist(pass) && d_out * 1000.0 >= climb_dist(pass);
+        // 顶部绕飞可行性：爬升距离 + 升限（alt_max + 500 ≤ ceiling）
+        let top_ok = fit(top) && ceiling_m.map_or(true, |c| top <= c);
+        // 底部穿行可行性：爬升距离 + 底部严格低于 alt_min + 穿行带（直线穿多边形段）地形
+        let bottom_ok = bottom >= 0.0
+            && bottom < min_alt
+            && fit(bottom)
+            && bottom_terrain_ok(z, terrain, bottom, start, target, raw_band);
+        return match (bottom_ok, top_ok) {
+            (true, _) => Some(bottom), // 底部垂直机动总量更小 → 恒更优
+            (false, true) => Some(top),
+            (false, false) => None,
+        };
     };
     // 限飞区高度区间必须存在（validate 已强制 Restricted 提供 [alt_min, alt_max]）；
     // 缺失时按全高度处理（退化输入兜底，不 panic）。
@@ -2490,9 +2617,6 @@ fn bottom_terrain_ok(
     let Some(t) = terrain else {
         return true;
     };
-    let ZoneShape::Circle { center, radius_km } = z.shape else {
-        return false;
-    };
     // raw 穿行段优先：底部剖面实际沿 raw 子段平飞，地形按该子段采样（含进出点）。
     // 2026-08-11 zz31：raw 网格点间隔 ≈ cell（大 span → 2325m），窄山峰（7.5as
     // ~230m 格）落在点间 → 漏检 → 底部误判可行 → 1500m 剖面穿 1421m 峰（净空
@@ -2529,41 +2653,56 @@ fn bottom_terrain_ok(
             None => true,                    // 穿行段无陆地（水面/无数据）→ 直穿
         };
     }
-    // 平面近似：start→target 直线与圆交点（同 build_restricted_profiles 的解析二次方程）
+    // 平面近似：start→target 直线穿行带（圆：解析二次方程；多边形：边交点成带）
     let mlat = ((start.lat + target.lat) / 2.0).to_radians();
     let kx = mlat.cos() * 111.32;
     let ky = 111.32;
     let dx = (target.lon - start.lon) * kx;
     let dy = (target.lat - start.lat) * ky;
-    let cx = (center[0] - start.lon) * kx;
-    let cy = (center[1] - start.lat) * ky;
     let a = dx * dx + dy * dy;
     if a < 1e-9 {
         return true; // start/target 重合（调用方已过滤）
     }
-    let b = -2.0 * (dx * cx + dy * cy);
-    let c = cx * cx + cy * cy - radius_km * radius_km;
-    let disc = b * b - 4.0 * a * c;
-    if disc <= 0.0 {
-        return true; // 直线不穿圆
+    let bands: Vec<(f64, f64)> = match &z.shape {
+        ZoneShape::Circle { center, radius_km } => {
+            let cx = (center[0] - start.lon) * kx;
+            let cy = (center[1] - start.lat) * ky;
+            let b = -2.0 * (dx * cx + dy * cy);
+            let c = cx * cx + cy * cy - radius_km * radius_km;
+            let disc = b * b - 4.0 * a * c;
+            if disc <= 0.0 {
+                Vec::new()
+            } else {
+                let sq = disc.sqrt();
+                let u_in = ((-b - sq) / (2.0 * a)).max(0.0);
+                let u_out = ((-b + sq) / (2.0 * a)).min(1.0);
+                if u_out <= u_in { Vec::new() } else { vec![(u_in, u_out)] }
+            }
+        }
+        ZoneShape::Polygon { vertices } => line_polygon_inside_bands(
+            start.lon,
+            start.lat,
+            target.lon,
+            target.lat,
+            vertices,
+        ),
+    };
+    if bands.is_empty() {
+        return true; // 直线不穿 restricted（FMM 直穿不经过）
     }
-    let sq = disc.sqrt();
-    let (u_in, u_out) = ((-b - sq) / (2.0 * a), (-b + sq) / (2.0 * a));
-    let (u_in, u_out) = (u_in.max(0.0), u_out.min(1.0));
-    if u_out <= u_in {
-        return true; // 圆在线段端点之外（FMM 直穿不经过）
-    }
-    // 沿穿行段采样地形：步长 ~200m（同 verify 口径；2.2km 会漏窄峰——2026-08-11
+    // 沿穿行带采样地形：步长 ~200m（同 verify 口径；2.2km 会漏窄峰——2026-08-11
     // zz31 1421m 峰 ~230m 格；clamp [8,2048] 覆盖 ≤400km 穿行段）
-    let seg_km = (u_out - u_in) * (dx * dx + dy * dy).sqrt();
-    let n = ((seg_km / 0.2).round() as usize).clamp(8, 2048);
     let mut max_terr: Option<f64> = None;
-    for k in 0..=n {
-        let u = u_in + (u_out - u_in) * (k as f64 / n as f64);
-        let lon = start.lon + (target.lon - start.lon) * u;
-        let lat = start.lat + (target.lat - start.lat) * u;
-        if let Sample::Land(h) = t.sample_at(lon, lat) {
-            max_terr = Some(max_terr.map_or(h, |m: f64| m.max(h)));
+    for (u_in, u_out) in bands {
+        let seg_km = (u_out - u_in) * a.sqrt();
+        let n = ((seg_km / 0.2).round() as usize).clamp(8, 2048);
+        for k in 0..=n {
+            let u = u_in + (u_out - u_in) * (k as f64 / n as f64);
+            let lon = start.lon + (target.lon - start.lon) * u;
+            let lat = start.lat + (target.lat - start.lat) * u;
+            if let Sample::Land(h) = t.sample_at(lon, lat) {
+                max_terr = Some(max_terr.map_or(h, |m: f64| m.max(h)));
+            }
         }
     }
     match max_terr {
@@ -2611,9 +2750,9 @@ fn line_hits_wall_km(
     })
 }
 
-/// 过渡直线（desc_in / out_climb）是否穿任一 restricted 圆高度带：
-/// 线段与圆求交区间内采样 8 点，线性高度插值落入 [alt_min, alt_max] 即命中。
-/// 用于 build 剖面段防御——进入任何 restricted 圆时高度必须已在带外/带下
+/// 过渡直线（desc_in / out_climb）是否穿任一 restricted 圆/多边形高度带：
+/// 线段与圆/多边形求交区间内采样 8 点，线性高度插值落入 [alt_min, alt_max] 即命中。
+/// 用于 build 剖面段防御——进入任何 restricted 圆/多边形时高度必须已在带外/带下
 /// （2026-08-08 主管 zigzag23：rz1 的 desc1 从圆外 0.25km 处爬升，进入圆时
 /// 高度 ~3008m 在带内 [1000,4000] → 拼接后终检拒 → 回退 1967 点锯齿）。
 /// 与 verify 的圆/高度采样口径一致（含 segment_circle_intersect_t 的投影 slack）。
@@ -2633,10 +2772,7 @@ fn line_hits_restricted_band_km(
         if z.zone_type != crate::config::ZoneType::Restricted {
             return false;
         }
-        let crate::config::ZoneShape::Circle { center, radius_km } = z.shape else {
-            return false;
-        };
-        // 端点本身在圆内带内（退化/零长度段覆盖）
+        // 端点本身在带内（退化/零长度段覆盖；圆/多边形同口径 zone_contains）
         let in_band_at = |lon: f64, lat: f64, alt: f64| -> bool {
             match Geo::new(lon, lat) {
                 Ok(g) => crate::config::zone_contains(z, &g)
@@ -2648,17 +2784,36 @@ fn line_hits_restricted_band_km(
         if in_band_at(lon1, lat1, alt1) || in_band_at(lon2, lat2, alt2) {
             return true;
         }
-        let Some((t1, t2)) =
-            segment_circle_intersect_t(lon1, lat1, lon2, lat2, center[0], center[1], radius_km)
-        else {
-            return false;
+        let bands: Vec<(f64, f64)> = match &z.shape {
+            crate::config::ZoneShape::Circle { center, radius_km } => {
+                match segment_circle_intersect_t(
+                    lon1,
+                    lat1,
+                    lon2,
+                    lat2,
+                    center[0],
+                    center[1],
+                    *radius_km,
+                ) {
+                    Some((t1, t2)) => vec![(t1, t2)],
+                    None => Vec::new(),
+                }
+            }
+            crate::config::ZoneShape::Polygon { vertices } => {
+                line_polygon_inside_bands(lon1, lat1, lon2, lat2, vertices)
+            }
         };
-        for kk in 0..=8 {
-            let tt = t1 + (t2 - t1) * kk as f64 / 8.0;
-            let alt = alt1 + (alt2 - alt1) * tt;
-            if z.alt_min_m.is_some_and(|lo| alt >= lo) && z.alt_max_m.is_some_and(|hi| alt <= hi)
-            {
-                return true;
+        for (b1, b2) in bands {
+            for kk in 0..=8 {
+                let tt = b1 + (b2 - b1) * kk as f64 / 8.0;
+                let alt = alt1 + (alt2 - alt1) * tt;
+                if z
+                    .alt_min_m
+                    .is_some_and(|lo| alt >= lo)
+                    && z.alt_max_m.is_some_and(|hi| alt <= hi)
+                {
+                    return true;
+                }
             }
         }
         false
@@ -2697,10 +2852,11 @@ fn build_restricted_profiles(
     if n < 2 {
         return (vec![seg.clone()], vec![false], false);
     }
-    // 该机高度拦截的圆形 restricted（底部/顶部剖面穿行类型）
+    // 该机高度拦截的 restricted 圆/多边形（底部/顶部剖面穿行类型；多边形 2026-08-12
+    // 主管 rz_poly 场景：三角形 [2000,6000]msl，巡航 2282m 直穿带内 → 顶部/底部剖面）
     let hits: Vec<&Zone> = zones
         .iter()
-        .filter(|z| matches!(z.shape, ZoneShape::Circle { .. }) && restricted_blocks_alt(z, alt_m))
+        .filter(|z| restricted_blocks_alt(z, alt_m))
         .collect();
     if hits.is_empty() {
         return (vec![seg.clone()], vec![false], false);
@@ -2733,13 +2889,10 @@ fn build_restricted_profiles(
     // 逐个 hit（已按穿行起点升序）：在当前的尾段上找穿行区间 → 切 [首段, 剖面段, 尾段]
     for z in ordered_hits {
         let tail = out_segs.last().unwrap();
-        let ZoneShape::Circle { center, radius_km } = z.shape else {
-            continue;
-        };
-        let (cx, cy, r) = (center[0], center[1], radius_km);
-        // 找进入索引（第一个与圆相交段的起点）与最后圆内点（穿出点）：
-        // 逐格点 dist<r 判定会漏掉浅穿（锯齿格点全在圆外但线段穿入，如 new_rz
-        // 垂距 19.5km 仅穿入 0.5km）→ 改用"段与圆相交"（最近距离 < r）判定。
+        // 找进入索引（第一个与圆/多边形相交段的起点）与最后带内点（穿出点）：
+        // 逐格点判定会漏掉浅穿（锯齿格点全在外但线段穿入，如 new_rz 垂距 19.5km
+        // 仅穿入 0.5km）→ 改用"段与 zone 相交"（zone_segment_clearance_km ≤ 0）。
+        // 多边形凹形时取 [首次进入, 最后穿出] 覆盖段（凹口外以 pass_alt 平飞合法）。
         let mut in_idx: Option<usize> = None;
         let mut out_idx: Option<usize> = None;
         let mut in_circle = false;
@@ -2754,10 +2907,10 @@ fn build_restricted_profiles(
                 .map_or(false, |g| crate::config::zone_contains(z, &g));
             let b_in = Geo::new(pb.lon, pb.lat)
                 .map_or(false, |g| crate::config::zone_contains(z, &g));
-            let crossing = d <= 1e-9 || a_in || b_in; // 段与圆相交/端点在内
+            let crossing = d <= 1e-9 || a_in || b_in; // 段与 zone 相交/端点在内
             if crossing && !in_circle {
-                // 圆凸：in_idx 只取第一次进入（raw 锯齿在圆边界摆动时可能"出圆→再进"，
-                // 覆盖 in_idx 会把剖面起点推迟到最后一个进入点 → 首段含圆内 3000m 违规）
+                // 凸 zone：in_idx 只取第一次进入（raw 锯齿在边界摆动时可能"出→再进"，
+                // 覆盖 in_idx 会把剖面起点推迟到最后一个进入点 → 首段含带内 3000m 违规）
                 if in_idx.is_none() {
                     in_idx = Some(i);
                 }
@@ -2765,28 +2918,28 @@ fn build_restricted_profiles(
             }
             if in_circle {
                 if b_in {
-                    out_idx = Some(i + 1); // 圆内区间持续（终点更新）
+                    out_idx = Some(i + 1); // 带内区间持续（终点更新）
                 } else if !crossing {
-                    // 段已完全在圆外 → 圆凸，区间结束（out = 段起点，圆外）
+                    // 段已完全在 zone 外 → 凸，区间结束（out = 段起点，带外）
                     out_idx = Some(i);
                     in_circle = false;
                 } else {
-                    // crossing && !b_in：段从圆内穿出 → out = 段终点（圆外点）。
-                    // out 必须是圆外点——否则 out→climb 爬升过渡从圆内开始，
+                    // crossing && !b_in：段从带内穿出 → out = 段终点（带外点）。
+                    // out 必须是带外点——否则 out→climb 爬升过渡从带内开始，
                     // 高度 500→1000+ 进入 restricted 区间违规（verify alt band 拒）。
                     out_idx = Some(i + 1);
                 }
             }
         }
         let (Some(i_in), Some(i_out)) = (in_idx, out_idx) else {
-            // raw 未穿该圆：FMM 网格离散擦边（浅穿深度 < 格距，格点全在圆外）时
-            // 真实几何仍穿圆 → 平滑拉直会穿圆违规（verify 几何精确拦截）→ 回退锯齿。
-            // fallback：start→target 直线穿圆（且直线避开全部硬墙）→ 直线参数化剖面
-            // （1b1331b 旧方案；仅 raw 未穿圆时启用，主管 2026-08-06 三轮架构保留）。
+            // raw 未穿该 zone：FMM 网格离散擦边（浅穿深度 < 格距，格点全在带外）时
+            // 真实几何仍穿 zone → 平滑拉直会穿 zone 违规（verify 几何精确拦截）→ 回退锯齿。
+            // fallback：start→target 直线穿 zone（且直线避开全部硬墙）→ 直线参数化剖面
+            // （1b1331b 旧方案；仅 raw 未穿时启用，主管 2026-08-06 三轮架构保留）。
             // 2026-08-11 zz31：底部判定必须用**段首尾**（p0/p1，与剖面 in_out 一致）。
-            // 传全局 start/target 时，若全局直线不穿圆（v2 (103.8,32.5)→(124.7,53.3)
-            // 不穿 rz2）→ bottom_terrain_ok 平面分支 disc<=0 → 直接放行底部 1500m，
-            // 但剖面沿段直线（wp4→wp5）穿圆经过 1421m 峰 → 净空 79-98m < 100m →
+            // 传全局 start/target 时，若全局直线不穿 zone（v2 (103.8,32.5)→(124.7,53.3)
+            // 不穿 rz2）→ bottom_terrain_ok 平面分支不穿 → 直接放行底部 1500m，
+            // 但剖面沿段直线（wp4→wp5）穿 zone 经过 1421m 峰 → 净空 79-98m < 100m →
             // final verify 拒 → 5468 点锯齿（zigzag21 只修了 raw_band 分支，此分支漏）。
             let p0g = Geo::new(p0.lon, p0.lat).unwrap_or(*start);
             let p1g = Geo::new(p1.lon, p1.lat).unwrap_or(*target);
@@ -2805,23 +2958,37 @@ fn build_restricted_profiles(
             if line_hits_wall_km(p0.lon, p0.lat, p1.lon, p1.lat, zones, inflation_km) {
                 continue; // 直线穿硬墙（如 no_fly）→ 直线剖面不可用
             }
+            // 穿行带：圆 = 解析二次方程（同 bottom_terrain_ok 口径）；多边形 = 边交点成带
             let mlat = ((p0.lat + p1.lat) / 2.0).to_radians();
             let kx = mlat.cos() * 111.32;
             let ky = 111.32;
             let ddx = (p1.lon - p0.lon) * kx;
             let ddy = (p1.lat - p0.lat) * ky;
-            let oox = (cx - p0.lon) * kx;
-            let ooy = (cy - p0.lat) * ky;
             let aa = ddx * ddx + ddy * ddy;
-            let bb = -2.0 * (ddx * oox + ddy * ooy);
-            let cc = oox * oox + ooy * ooy - r * r;
-            let disc = bb * bb - 4.0 * aa * cc;
-            if disc <= 0.0 {
+            let pass_bands: Vec<(f64, f64)> = match &z.shape {
+                ZoneShape::Circle { center, radius_km } => {
+                    let oox = (center[0] - p0.lon) * kx;
+                    let ooy = (center[1] - p0.lat) * ky;
+                    let bb = -2.0 * (ddx * oox + ddy * ooy);
+                    let cc = oox * oox + ooy * ooy - radius_km * radius_km;
+                    let disc = bb * bb - 4.0 * aa * cc;
+                    if disc <= 0.0 {
+                        Vec::new()
+                    } else {
+                        let sq = disc.sqrt();
+                        let u1v = ((-bb - sq) / (2.0 * aa)).clamp(0.0, 1.0);
+                        let u2v = ((-bb + sq) / (2.0 * aa)).clamp(0.0, 1.0);
+                        vec![(u1v, u2v)]
+                    }
+                }
+                ZoneShape::Polygon { vertices } => {
+                    line_polygon_inside_bands(p0.lon, p0.lat, p1.lon, p1.lat, vertices)
+                }
+            };
+            let Some((fst, lst)) = pass_bands.first().zip(pass_bands.last()) else {
                 continue;
-            }
-            let sq = disc.sqrt();
-            let u1 = ((-bb - sq) / (2.0 * aa)).clamp(0.0, 1.0);
-            let u2 = ((-bb + sq) / (2.0 * aa)).clamp(0.0, 1.0);
+            };
+            let (u1, u2) = (fst.0, lst.1);
             if u2 <= 0.0 || u1 >= 1.0 {
                 continue;
             }
@@ -2914,14 +3081,14 @@ fn build_restricted_profiles(
         };
         let p0pt = tail.points[0];
         let plast = *tail.points.last().unwrap();
-        // 点是否位于**其他** restricted 圆带内（排除自身）。2026-08-08 主管 zigzag22：
+        // 点是否位于**其他** restricted 圆/多边形带内（排除自身）。2026-08-08 主管 zigzag22：
         // rz2 的 out_climb 过渡完成点选在 rz1 圆内（距圆心 41km<50km，@3000m 在 rz1
         // 带内）→ rz1 处理时 tail 起点在圆内 → in_idx=0 → head 退化成单点带内段 →
         // 平滑全败 → join 后 FINAL 在 rz1 处带内直穿 → 1967 点锯齿。desc/climb 锚点
-        // 都必须避开其他 restricted 圆带内点。
+        // 都必须避开其他 restricted 圆/多边形带内点。
         let in_other_band = |lon: f64, lat: f64| -> bool {
             zones.iter().any(|z2| {
-                if std::ptr::eq(z2, z) || !matches!(z2.shape, ZoneShape::Circle { .. }) {
+                if std::ptr::eq(z2, z) {
                     return false;
                 }
                 if !restricted_blocks_alt(z2, alt_m) {
@@ -3734,6 +3901,178 @@ mod tests {
             v.distance_m < 192_000.0,
             "1500m 直穿距离应 ≈187km，实际 {}km",
             v.distance_m / 1000.0
+        );
+    }
+
+    #[test]
+    fn line_polygon_inside_bands_triangle_and_concave() {
+        // 三角形（主管 rz_poly 场景）：直线斜穿 → 单个带；带端点应在三角形边上
+        let tri = [[116.90767296501929, 40.99465146600213], [115.36066171773774, 40.05644513239613], [116.34715136271842, 40.336691478802884]];
+        let bands = line_polygon_inside_bands(117.5633, 38.9892, 115.0644, 41.1679, &tri);
+        assert_eq!(bands.len(), 1, "三角形穿行应单带，实际 {:?}", bands);
+        let (u1, u2) = bands[0];
+        assert!(u1 > 0.0 && u1 < 1.0 && u2 > u1 && u2 < 1.0);
+        // 带端点（穿行出入口）应落在三角形边上：入口在 BC 边、出口在 AB 边
+        let (lon_in, lat_in) = (117.5633 + (115.0644 - 117.5633) * u1, 38.9892 + (41.1679 - 38.9892) * u1);
+        let (lon_out, lat_out) = (117.5633 + (115.0644 - 117.5633) * u2, 38.9892 + (41.1679 - 38.9892) * u2);
+        // BC 边：B(115.3607,40.0564)→C(116.3472,40.3367)；AB 边：A(116.9077,40.9947)→B(115.3607,40.0564)
+        let on_edge = |lon: f64, lat: f64, a: [f64; 2], b: [f64; 2]| {
+            let d = pt_seg_dist_km(a[0], a[1], b[0], b[1], lon, lat);
+            d < 0.5
+        };
+        assert!(
+            on_edge(lon_in, lat_in, tri[1], tri[2]) || on_edge(lon_in, lat_in, tri[2], tri[0]),
+            "入口 ({:.4},{:.4}) 不在三角形边上",
+            lon_in,
+            lat_in
+        );
+        assert!(
+            on_edge(lon_out, lat_out, tri[0], tri[1]) || on_edge(lon_out, lat_out, tri[1], tri[2]),
+            "出口 ({:.4},{:.4}) 不在三角形边上",
+            lon_out,
+            lat_out
+        );
+        // 不穿（直线在多边形外）→ 空
+        let no_bands = line_polygon_inside_bands(117.5633, 38.9892, 118.5, 39.0, &tri);
+        assert!(no_bands.is_empty(), "直线不穿三角形应无带，实际 {:?}", no_bands);
+        // 凹四边形（U 形：底部条带 + 左右柱，中间凹口外部）：水平线 y=5 从 -1→11
+        // 穿左柱 [0,4] → 凹口外 → 右柱 [6,10] → 两个带
+        let concave = [[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [6.0, 10.0], [6.0, 4.0], [4.0, 4.0], [4.0, 10.0], [0.0, 10.0]];
+        let cb = line_polygon_inside_bands(-1.0, 5.0, 11.0, 5.0, &concave);
+        assert_eq!(cb.len(), 2, "凹多边形水平线两次进入应双带，实际 {:?}", cb);
+        let (a1, a2) = cb[0];
+        let (b1, b2) = cb[1];
+        assert!(a1 < a2 && a2 < b1 && b1 < b2, "带序异常 {:?}", cb);
+        assert!((a1 - 1.0 / 12.0).abs() < 1e-3 && (a2 - 5.0 / 12.0).abs() < 1e-3, "左柱带异常 {:?}", cb[0]);
+        assert!((b1 - 7.0 / 12.0).abs() < 1e-3 && (b2 - 11.0 / 12.0).abs() < 1e-3, "右柱带异常 {:?}", cb[1]);
+    }
+
+    #[test]
+    fn pt_polygon_boundary_km_basic() {
+        let tri = [[0.0, 0.0], [10.0, 0.0], [10.0, 10.0]];
+        // 外部点 (11,5)：到直边 x=10 距离 1°（lat≈0 → 1° 经度 ≈ 111.32km）
+        let d = pt_polygon_boundary_km(11.0, 5.0, &tri);
+        assert!((d - 111.32).abs() < 0.5, "外部点距直边应 ≈111.32km，实际 {d}");
+        // 内部点 → 0
+        let d2 = pt_polygon_boundary_km(5.0, 5.0, &tri);
+        assert_eq!(d2, 0.0);
+    }
+
+    #[test]
+    fn restricted_pass_alt_polygon_decides_bottom_or_top() {
+        // 多边形 restricted [2000,6000]msl：巡航 2282m，起点/终点距多边形 > 爬升距离
+        // → 底部 1500m 可行（无地形）→ 恒选底部。
+        let z = Zone {
+            id: "rzp".into(),
+            zone_type: crate::config::ZoneType::Restricted,
+            shape: ZoneShape::Polygon {
+                vertices: vec![
+                    [116.90767296501929, 40.99465146600213],
+                    [115.36066171773774, 40.05644513239613],
+                    [116.34715136271842, 40.336691478802884],
+                ],
+            },
+            alt_min_m: Some(2000.0),
+            alt_max_m: Some(6000.0),
+            height_semantics: crate::config::HeightSemantics::Msl,
+        };
+        let s = Geo::new(117.5633, 38.9892).unwrap();
+        let t = Geo::new(115.0644, 41.1679).unwrap();
+        let pass = restricted_pass_alt(&z, 2282.0, None, None, &s, &t, 15.0, None);
+        assert_eq!(pass, Some(1500.0), "底部穿行应恒优（无地形），实际 {:?}", pass);
+        // alt_min=0 → 底部 = -500 负高不可行 → 顶部 6500m
+        let z0 = Zone {
+            id: "rzp0".into(),
+            zone_type: crate::config::ZoneType::Restricted,
+            shape: z.shape.clone(),
+            alt_min_m: Some(0.0),
+            alt_max_m: Some(6000.0),
+            height_semantics: crate::config::HeightSemantics::Msl,
+        };
+        let pass0 = restricted_pass_alt(&z0, 2282.0, None, None, &s, &t, 15.0, None);
+        assert_eq!(pass0, Some(6500.0), "alt_min=0 底部负高 → 顶部绕飞，实际 {:?}", pass0);
+        // 升限低于顶部 → 顶部也不可行 → None（水平绕行兜底）
+        let pass_c = restricted_pass_alt(&z0, 2282.0, Some(5000.0), None, &s, &t, 15.0, None);
+        assert_eq!(pass_c, None, "升限 5000 < 顶部 6500 → 不可行，实际 {:?}", pass_c);
+    }
+
+    #[test]
+    fn polygon_restricted_profile_bottom_pass() {
+        // 主管 2026-08-12 rz_poly 场景（无地形版）：多边形 restricted [2000,6000]msl
+        // 三角形挡在 start→target 直线上，巡航 3000m 在区间内 → 底部 1500m 剖面直穿
+        //（desc→1500 平飞→climb），不水平绕行、不回退密集锯齿。
+        let s = r#"{
+            "schema_version":"0.20",
+            "mission":{
+                "start":{"lon":117.56330714245705,"lat":38.98919664864976,"alt_m":3000},
+                "target":{"lon":115.0643644570711,"lat":41.16789261835432,"alt_m":3000},
+                "terrain":{"source":"none"},
+                "restricted_zones":[{"id":"rzp","zone_type":"restricted","shape":"polygon",
+                    "geometry":{"vertices":[
+                        [116.90767296501929,40.99465146600213],
+                        [115.36066171773774,40.05644513239613],
+                        [116.34715136271842,40.336691478802884]]},
+                    "alt_min_m":2000,"alt_max_m":6000}]
+            }
+        }"#;
+        let input = parse(s);
+        let out = solve(&input, &SolveParams::default(), 42).unwrap();
+        let v = &out.vehicles[0];
+        assert_eq!(v.status, "planned");
+        assert!(
+            v.path.len() <= 8,
+            "多边形底部剖面直穿应 ≈6 点，实际 {} 点",
+            v.path.len()
+        );
+        assert!(
+            v.path.iter().any(|p| p.alt_m < 2000.0),
+            "剖面应在穿行区降高到 <2000m，实际最小 {}m",
+            v.path.iter().map(|p| p.alt_m).fold(f64::MAX, f64::min)
+        );
+        assert!(
+            v.warnings.iter().all(|w| !w.contains("smoothing_failed")),
+            "不应 smoothing_failed，实际 {:?}",
+            v.warnings
+        );
+        // 穿行段长度 = 直线穿多边形的弦长（~62km）→ 总距离 ≈ 直线（323km）+ 机动余量
+        assert!(
+            v.distance_m < 340_000.0,
+            "剖面直穿距离应 <340km（直线 323km），实际 {}km",
+            v.distance_m / 1000.0
+        );
+    }
+
+    #[test]
+    fn polygon_restricted_profile_top_flyover() {
+        // 多边形 restricted [0,6000]msl：底部 -500 负高不可行 → 顶部 6500m 绕飞剖面
+        //（多边形内部 6500m 平飞，高于区间上界 6000）。
+        let s = r#"{
+            "schema_version":"0.20",
+            "mission":{
+                "start":{"lon":117.56330714245705,"lat":38.98919664864976,"alt_m":3000},
+                "target":{"lon":115.0643644570711,"lat":41.16789261835432,"alt_m":3000},
+                "terrain":{"source":"none"},
+                "restricted_zones":[{"id":"rzp","zone_type":"restricted","shape":"polygon",
+                    "geometry":{"vertices":[
+                        [116.90767296501929,40.99465146600213],
+                        [115.36066171773774,40.05644513239613],
+                        [116.34715136271842,40.336691478802884]]},
+                    "alt_min_m":0,"alt_max_m":6000}]
+            }
+        }"#;
+        let input = parse(s);
+        let out = solve(&input, &SolveParams::default(), 42).unwrap();
+        let v = &out.vehicles[0];
+        assert_eq!(v.status, "planned");
+        assert!(
+            v.path.iter().any(|p| p.alt_m > 6000.0),
+            "剖面应在穿行区升到 >6000m（顶部 6500），实际最大 {}m",
+            v.path.iter().map(|p| p.alt_m).fold(0.0, f64::max)
+        );
+        assert!(
+            v.warnings.iter().all(|w| !w.contains("smoothing_failed")),
+            "不应 smoothing_failed，实际 {:?}",
+            v.warnings
         );
     }
 

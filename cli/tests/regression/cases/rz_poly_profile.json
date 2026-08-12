@@ -1,0 +1,33 @@
+{
+  "schema_version": "0.20",
+  "mission": {
+    "start": {"lon": 115.9, "lat": 39.8, "alt_m": 3000},
+    "target": {"lon": 116.8, "lat": 40.3, "alt_m": 3000},
+    "vehicles": [
+      {
+        "id": "v1",
+        "profile": {"aircraft_type": "FIXED_WING", "cruise_speed_mps": 250, "min_turn_radius_m": 442, "max_climb_angle_deg": 15},
+        "start_pose": {"lon": 117.56330714245705, "lat": 38.98919664864976, "alt_m": 1000, "heading_deg": 45},
+        "mid_waypoints": [],
+        "target_ref": "115.0643644570711,41.16789261835432,3000"
+      }
+    ],
+    "red_forces": {"radars": []},
+    "no_fly_zones": [],
+    "restricted_zones": [
+      {
+        "id": "rz_1786522701876",
+        "zone_type": "restricted",
+        "shape": "polygon",
+        "geometry": {"vertices": [[116.90767296501929,40.99465146600213],[115.36066171773774,40.05644513239613],[116.34715136271842,40.336691478802884]]},
+        "alt_min_m": 2000,
+        "alt_max_m": 6000,
+        "height_semantics": "msl"
+      }
+    ],
+    "obstacles": [],
+    "weapons": [],
+    "terrain": {"source": "path", "path": "data/east_asia_7p5as.arpack"},
+    "parameters": {}
+  }
+}
