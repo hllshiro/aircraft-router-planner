@@ -669,6 +669,13 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                     distance_m: 0.0,
                     warnings: vec!["coarse FMM no path".into()],
                 });
+                // P3 分类结论出口（docs/12 §3.4/§12.4）：粗层真无通道 → 几何无解分类
+                emit_classified(
+                    &v.id,
+                    "geometrically_impossible",
+                    "coarse FMM no path (docs/12 §11.2)",
+                    &mut degradations,
+                );
                 continue 'veh;
             }
             // 段端点（必经点/目标）是硬约束：任何平滑不得移除
@@ -1511,6 +1518,14 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
         if smoothing_failed {
             let mut diag = warnings.clone();
             diag.push("no valid smoothed path; raw fallback withheld (hard-gate)".into());
+            // P3 分类结论出口（docs/12 §3.4/§12.4）：smoothing_failed 硬闸拒交付 →
+            // 复用 P2 patch 归因（C2/C3 标注）或默认 fitting_defect（可迭代缺陷）。
+            emit_classified(
+                &v.id,
+                category_from_degradations(&degradations),
+                "smoothing_failed; raw fallback withheld (hard-gate)",
+                &mut degradations,
+            );
             out_vehicles.push(VehicleOutput {
                 id: v.id.clone(),
                 status: "no_solution".into(),
@@ -1635,6 +1650,45 @@ fn region_of(specs: &[VehicleSpec], target: &Geo) -> Region {
         min_lon,
         min_lat,
         span_deg: span,
+    }
+}
+
+/// P3 分类结论出口（docs/12 §3.4/§12.4 拍板）：stderr 分类 JSON + stdout
+/// stats.degradations 汇总；不升 schema 0.20（零 schema 负担）。
+/// 类别（C2/C3 决策树）：geometrically_impossible（真无解）/ search_truncated
+/// （可见图上限截断，≠几何无解）/ fitting_defect（拟合缺陷，可迭代）。
+pub(crate) fn emit_classified(
+    vehicle_id: &str,
+    category: &str,
+    detail: &str,
+    degradations: &mut Vec<String>,
+) {
+    let json = serde_json::json!({
+        "event": "classified",
+        "vehicle": vehicle_id,
+        "category": category,
+        "detail": detail,
+    });
+    eprintln!(
+        "{}",
+        serde_json::to_string(&json)
+            .unwrap_or_else(|_| r#"{"event":"classified","serialize_error":true}"#.into())
+    );
+    degradations.push(format!("classified: {category}"));
+}
+
+/// 从已收集的 patch 归因标注（P2 挂接 push 的 C2/C3 标注）映射分类类别；
+/// 无标注 → 默认 fitting_defect（平滑链失败默认可迭代拟合缺陷）。
+fn category_from_degradations(degradations: &[String]) -> &'static str {
+    if degradations
+        .iter()
+        .any(|d| d.contains("geometrically_impossible"))
+    {
+        "geometrically_impossible"
+    } else if degradations.iter().any(|d| d.contains("search_truncated")) {
+        "search_truncated"
+    } else {
+        "fitting_defect"
     }
 }
 
@@ -4838,6 +4892,99 @@ mod tests {
                 .any(|w| w.contains("smoothing_failed") || w.contains("hard-gate")),
             "应保留失败原因，实际 {:?}",
             v.warnings
+        );
+    }
+
+    #[test]
+    fn classified_on_smoothing_failed() {
+        // P3 验收 1（docs/12 §8/§12.4）：C 类失败（smoothing_failed 硬闸拒交付）
+        // 100% 获得分类结论——stdout stats.degradations 汇总（stderr classified
+        // JSON 由 emit_classified 输出）。该场景 patch 不适用（3 必经点 +
+        // turn_radius 100km）→ 默认 fitting_defect。
+        let s = r#"{
+            "schema_version":"0.20",
+            "mission":{
+                "start":{"lon":115.9,"lat":39.8,"alt_m":3000},
+                "target":{"lon":116.8,"lat":40.3,"alt_m":3000},
+                "vehicles":[
+                    {"id":"v1","profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":250,"min_turn_radius_m":100000,"max_climb_angle_deg":15},
+                     "start_pose":{"lon":115.0,"lat":39.0,"alt_m":3000,"heading_deg":90},
+                     "mid_waypoints":[
+                        {"lon":116.0,"lat":39.0,"alt_m":3000},
+                        {"lon":116.0,"lat":39.5,"alt_m":3000},
+                        {"lon":117.0,"lat":39.5,"alt_m":3000}],
+                     "target_ref":"117.0,39.0,3000"}
+                ],
+                "red_forces":{"radars":[]},
+                "no_fly_zones":[
+                    {"id":"wall","zone_type":"no_fly","shape":"polygon",
+                     "geometry":{"vertices":[[116.2,39.25],[116.8,39.25],[116.8,39.75],[116.2,39.75]]},
+                     "alt_min_m":0,"alt_max_m":12000,"height_semantics":"msl"}],
+                "restricted_zones":[],"obstacles":[],
+                "terrain":{"source":"none"}
+            }
+        }"#;
+        let input = parse(s);
+        let out = solve(&input, &SolveParams::default(), 0).unwrap();
+        let v = &out.vehicles[0];
+        assert_eq!(v.status, "no_solution");
+        assert!(
+            out.stats.degradations
+                .iter()
+                .any(|d| d == "classified: fitting_defect"),
+            "degradations 应有 classified 汇总，实际 {:?}",
+            out.stats.degradations
+        );
+    }
+
+    #[test]
+    fn classified_on_coarse_no_path() {
+        // P3 验收 1：coarse FMM 真无通道 → geometrically_impossible 分类汇总。
+        let s = r#"{
+            "schema_version":"0.20",
+            "mission":{
+                "start":{"lon":115.0,"lat":39.0,"alt_m":3000},
+                "target":{"lon":116.5,"lat":39.9,"alt_m":3000},
+                "vehicles":[
+                    {"id":"v1","profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":250,"min_turn_radius_m":442,"max_climb_angle_deg":15},
+                     "start_pose":{"lon":115.0,"lat":39.0,"alt_m":3000,"heading_deg":90}}
+                ],
+                "red_forces":{"radars":[]},
+                "no_fly_zones":[
+                    {"id":"wall","zone_type":"no_fly","shape":"polygon",
+                     "geometry":{"vertices":[[115.2,39.0],[117.0,39.0],[117.0,40.5],[115.2,40.5]]},
+                     "alt_min_m":0,"alt_max_m":10000,"height_semantics":"msl"}],
+                "restricted_zones":[],"obstacles":[],
+                "terrain":{"source":"none"}
+            }
+        }"#;
+        let input = parse(s);
+        let out = solve(&input, &SolveParams::default(), 0).unwrap();
+        assert_eq!(out.vehicles[0].status, "no_solution");
+        assert!(
+            out.stats.degradations
+                .iter()
+                .any(|d| d == "classified: geometrically_impossible"),
+            "degradations 应有 geometrically_impossible 分类，实际 {:?}",
+            out.stats.degradations
+        );
+    }
+
+    #[test]
+    fn category_from_degradations_maps_patch_labels() {
+        // P3 归因映射（docs/12 §3.4 C3 决策树）：patch 归因标注 → 分类类别。
+        assert_eq!(category_from_degradations(&[]), "fitting_defect");
+        assert_eq!(
+            category_from_degradations(&["patch: geometrically_impossible (docs/12 §13.1 C3)".into()]),
+            "geometrically_impossible"
+        );
+        assert_eq!(
+            category_from_degradations(&["patch: search_truncated (visible-graph cap, docs/12 §13.1 C2)".into()]),
+            "search_truncated"
+        );
+        assert_eq!(
+            category_from_degradations(&["patch: fitting_defect (turn margin, docs/12 §13.1 C3)".into()]),
+            "fitting_defect"
         );
     }
 
