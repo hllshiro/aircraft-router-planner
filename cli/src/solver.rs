@@ -293,12 +293,49 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
     // 3b. 障碍感知外扩（2026-08-11 zz_region_block2）：硬墙（NoFly/Obstacle）bbox
     // 超出任务区域时并入——墙占满 region 短边方向时绕行被迫出 region（region 外
     // 无代价场 → coarse FMM no path → 误报 no_solution）。Restricted 不画墙不纳入。
+    // 2026-08-12 rz_poly3：restricted **画墙绕行**时同样必须外扩——多边形两端
+    // （尖角顶点 B(114.691,40.625)/A(116.941,42.027)）超出任务 bbox+pad → 东绕
+    // （A 北侧 lat>41.56）/南绕（B 西侧 lon<114.97）走廊全被 region 边界截断 →
+    // coarse FMM no path → 误报 geometrically_impossible；同形状禁飞区因 is_wall()
+    // 纳入外扩能绕行。画墙判定与 vehicle 循环内 restricted_wall_for 同源
+    // （restricted_blocks_alt + restricted_pass_alt 不可行）；region 构建在抬升
+    // 前，用初始 alt_m（低高度更可能 blocks → 外扩保守侧）。
+    let params_merged = crate::config::DefaultParams::default().merge(&input.mission.parameters);
+    let spec_climb: Vec<(f64, Option<f64>)> = specs
+        .iter()
+        .map(|s| {
+            let (opts, _) = crate::smooth::smooth_options_for(&s.profile, &params_merged);
+            (opts.max_climb_deg, s.profile.ceiling_m)
+        })
+        .collect();
+    let restricted_wall_zs: Vec<&Zone> = input
+        .mission
+        .restricted_zones
+        .iter()
+        .filter(|z| {
+            specs.iter().zip(&spec_climb).any(|(s, (mcd, ceil))| {
+                restricted_blocks_alt(z, s.alt_m)
+                    && restricted_pass_alt(
+                        z,
+                        s.alt_m,
+                        *ceil,
+                        terrain.as_source(),
+                        &s.start,
+                        &s.target,
+                        *mcd,
+                        None,
+                    )
+                    .is_none()
+            })
+        })
+        .collect();
     let wall_zones = input
         .mission
         .no_fly_zones
         .iter()
         .chain(input.mission.obstacles.iter())
-        .filter(|z| z.is_wall());
+        .filter(|z| z.is_wall())
+        .chain(restricted_wall_zs.iter().copied());
     let region = expand_region_for_walls(base_region, wall_zones, REGION_PAD_DEG);
     // 3c. 网格自适应（主管 2026-08-06 双大雷达/多边形场景）：**仅大区域**（span > 2.5°）时
     // 固定 256 格 → 格距粗 → FMM 绕行弧锯齿曲率 < 物理转弯半径 → 平滑链转弯半径
@@ -360,7 +397,6 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
     //     下限；小半径经转弯段降速实现）；绕行弧需要 ≥r 的转弯空间，把 NoFly/Obstacle
     //     硬墙向外膨胀 max(0.5×r)（clamp [2km, 10km]）——FMM 绕行自然远离边界，
     //     Dubins 转弯弧留足空间（不再因贴边急弯被物理复验拒绝）。
-    let params_merged = crate::config::DefaultParams::default().merge(&input.mission.parameters);
     let mut degradations = Vec::new();
     radar_param_degradations(input, &mut degradations);
     let inflation_m = specs
