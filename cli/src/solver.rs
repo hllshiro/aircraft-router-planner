@@ -120,6 +120,9 @@ struct VehicleSpec {
     profile: crate::config::VehicleProfile,
     /// 中途必经点（Phase 4 M5：start → mid[0..] → target 分段拼接）。
     mid_waypoints: Vec<Geo>,
+    /// 关联武器（P7：按 `<vehicle_id>_w1` 查 mission.weapons；仅启用的武器——
+    /// `effective_range_km()` 非 None 才参与）。None = 无武器 → 点目标语义。
+    weapon: Option<crate::config::WeaponEntry>,
 }
 
 /// 端到端解算。elapsed_ms 为端到端耗时（main 计时传入）。
@@ -248,6 +251,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
             target_alt_m: input.mission.target.alt_m,
             profile: crate::config::VehicleProfile::default(),
             mid_waypoints: Vec::new(),
+            weapon: vehicle_weapon("v1", &input.mission.weapons),
         }]
     } else {
         let mission_target = input.mission.target.to_geo()?;
@@ -276,6 +280,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                     ),
                     profile: v.profile.clone(),
                     mid_waypoints: mid,
+                    weapon: vehicle_weapon(&v.id, &input.mission.weapons),
                 })
             })
             .collect::<Result<Vec<_>, AppError>>()?
@@ -745,14 +750,50 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
             // 逐段 FMM → 回溯 → 拼接（去重段端点）
             let mut raw_segs: Vec<Path> = Vec::new();
             let mut no_solution = false;
-            for seg in seg_ends.windows(2) {
+            // P7：环带目标集只作用于最后一段（→ target）；有武器时 FMM 传播
+            // 到环带 [Rmin, Rmax] 内 T 最小可达 cell 即停（docs/技术方案 §4.2）。
+            let ring_range: Option<[f64; 2]> = v
+                .weapon
+                .as_ref()
+                .and_then(|w| w.effective_range_km());
+            let seg_total = seg_ends.windows(2).len();
+            for (si, seg) in seg_ends.windows(2).enumerate() {
                 let (s, e) = (seg[0], seg[1]);
+                let is_target_seg = si == seg_total - 1;
                 let (sr, sc) = lonlat_cell(s.lon, s.lat, &region, grid);
                 let (dr, dc) = lonlat_cell(e.lon, e.lat, &region, grid);
                 let t0 = Instant::now();
                 let res = fmm_propagate(field_ref, sr, sc);
                 fmm_ms += t0.elapsed().as_secs_f64() * 1000.0;
-                let Some(mut cells) = backtrack_path(field_ref, &res, dr, dc, sr, sc) else {
+                let mut cells_opt: Option<Vec<(usize, usize)>> = None;
+                if is_target_seg {
+                    if let Some([rmin_km, rmax_km]) = ring_range {
+                        if let Some((rr, rc)) = ring_target_cell(&res, &v.target, &region, grid, rmin_km, rmax_km)
+                        {
+                            cells_opt = backtrack_path(field_ref, &res, rr, rc, sr, sc);
+                        }
+                        if cells_opt.is_none() {
+                            // 环带内无可达 cell → 仅当目标点本身落在环带内（Rmin≈0）
+                            // 才回退点目标；否则"带最小射程的武器不得停在 Rmin 内"
+                            // → 几何无解（degradations 标注，后续随 no_solution 出口）。
+                            let d_km = crate::path::haversine_m(e.lon, e.lat, v.target.lon, v.target.lat) / 1000.0;
+                            if d_km >= rmin_km && d_km <= rmax_km {
+                                cells_opt = backtrack_path(field_ref, &res, dr, dc, sr, sc);
+                            }
+                            if cells_opt.is_none() {
+                                degradations.push(format!(
+                                    "ring target unreachable: no cell in [{rmin_km}, {rmax_km}] km of target (v={})",
+                                    v.id
+                                ));
+                            }
+                        }
+                    } else {
+                        cells_opt = backtrack_path(field_ref, &res, dr, dc, sr, sc);
+                    }
+                } else {
+                    cells_opt = backtrack_path(field_ref, &res, dr, dc, sr, sc);
+                }
+                let Some(mut cells) = cells_opt else {
                     no_solution = true;
                     break;
                 };
@@ -933,6 +974,22 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
             let mut turn_exempt: Vec<(f64, f64)> = Vec::new();
             let mut seg_warnings = Vec::new();
             let mut entry_heading: Option<f64> = None;
+            // P7：发射包线终端航向下放平滑级（docs/技术方案 §4.2：终端姿态不只是
+            // 到达判据，作为平滑级输入）——最后一段末点 heading_deg = 窗口中心，
+            // Dubins 拟合天然吃终端 pose（docs/08：heading 已支持）。不提供 heading
+            // 窗口 → 不约束（现状点目标语义）。
+            if let Some([lo, hi]) = v
+                .weapon
+                .as_ref()
+                .and_then(|w| w.envelope.as_ref())
+                .and_then(|e| e.heading_deg)
+            {
+                if let Some(last_seg) = smooth_src.last_mut() {
+                    if let Some(p) = last_seg.points.last_mut() {
+                        p.heading_deg = Some(heading_window_center(lo, hi));
+                    }
+                }
+            }
             // 段级平滑中间阶段的地形净空不足最大高度（smooth.rs SmoothResult.
             // terrain_gap_m）：theta_star 拉直段穿山被回退楼梯吞掉时，final verify
             // 无 terrain issue，靠这里触发抬升重跑（2026-08-11 zz30 2480m 峰）。
@@ -1711,14 +1768,98 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
         // 距离线性过渡到目标高度（起终点不同高时轨迹呈现爬升/下降，而非恒为
         // 巡航高度的水平直线）；地形可用时保底（下降段不穿山）。起终点同高 →
         // 曲线水平，行为与既往一致（含受限区剖面/抬升巡航语义）。
+        // P7：发射包线高度窗口优先（docs/技术方案 §4.2：区域与包线冲突时以包线
+        // 优先）——终点目标高度 clamp 到 [lo, hi] 窗口（若提供）。
+        let target_alt_eff = v
+            .weapon
+            .as_ref()
+            .and_then(|w| w.envelope.as_ref())
+            .and_then(|e| e.alt_m)
+            .map_or(v.target_alt_m, |[lo, hi]| v.target_alt_m.clamp(lo, hi));
         apply_vertical_profile(
             &mut pts,
             v.alt_m,
-            v.target_alt_m,
+            target_alt_eff,
             alt_eff,
             terrain.as_source(),
             opts.clearance_m,
         );
+        // P7：发射包线到达判定（docs/技术方案 §4.2：落点 ∈ [Rmin,Rmax] ∧ 发射包线
+        // 都满足才算到达）。heading/alt/环带距离 = 硬校验（不满足 → 未到达 →
+        // no_solution，宁可不给路径，不给违禁路径）；speed 是常量输入（规划不可
+        // 调）→ 软校验（degradation 告警）。无武器 / 无 envelope → 不校验（现状
+        // 点目标语义，零回归）。
+        if let Some(w) = &v.weapon {
+            // Rmin 未定（lo ≤ 0）→ 显式告警（docs/技术方案 §4.2：不静默当无下限处理）
+            if let Some([lo, _]) = w.effective_range_km() {
+                if lo <= 0.0 {
+                    degradations.push(format!(
+                        "weapon {}: Rmin {lo} km undefined (treated as no minimum, ring = [0, Rmax])",
+                        w.weapon_id
+                    ));
+                }
+            }
+            let mut env_fail: Vec<String> = Vec::new();
+            if let Some(last) = pts.last() {
+                if let Some([rmin_km, rmax_km]) = w.effective_range_km() {
+                    let d_km = crate::path::haversine_m(last.lon, last.lat, v.target.lon, v.target.lat) / 1000.0;
+                    if !(d_km >= rmin_km - 1e-6 && d_km <= rmax_km + 1e-6) {
+                        env_fail.push(format!(
+                            "terminal {d_km:.1} km from target outside weapon ring [{rmin_km}, {rmax_km}] km"
+                        ));
+                    }
+                }
+            }
+            if let Some(env) = &w.envelope {
+                if let Some([lo, hi]) = env.heading_deg {
+                    let h_last = if pts.len() >= 2 {
+                        let a = &pts[pts.len() - 2];
+                        let b = pts.last().unwrap();
+                        crate::path::bearing_deg(a.lon, a.lat, b.lon, b.lat)
+                    } else {
+                        f64::NAN
+                    };
+                    if h_last.is_finite() && !heading_in_window(h_last, lo, hi) {
+                        env_fail.push(format!("terminal heading {h_last:.1} deg outside [{lo}, {hi}]"));
+                    }
+                }
+                if let Some([lo, hi]) = env.alt_m {
+                    let alt_last = pts.last().map_or(f64::NAN, |p| p.alt_m);
+                    if alt_last.is_finite() && !(alt_last >= lo && alt_last <= hi) {
+                        env_fail.push(format!("terminal alt {alt_last:.0} m outside [{lo}, {hi}]"));
+                    }
+                }
+                if let Some([lo, hi]) = env.speed_mps {
+                    let cruise = v
+                        .profile
+                        .cruise_speed_mps
+                        .or_else(|| v.profile.speed_range_mps.map(|r| r[0]))
+                        .unwrap_or(f64::NAN);
+                    if cruise.is_finite() && !(cruise >= lo && cruise <= hi) {
+                        degradations.push(format!(
+                            "launch envelope: cruise speed {cruise:.0} m/s outside weapon speed window [{lo}, {hi}] (speed is input constant, soft)"
+                        ));
+                    }
+                }
+            }
+            if !env_fail.is_empty() {
+                warnings.push(format!("launch envelope not satisfied: {}", env_fail.join("; ")));
+                emit_classified(
+                    &v.id,
+                    "geometrically_impossible",
+                    "launch envelope not satisfied (docs/技术方案 §4.2)",
+                    &mut degradations,
+                );
+                out_vehicles.push(VehicleOutput {
+                    id: v.id.clone(),
+                    status: "no_solution".into(),
+                    path: Vec::new(),
+                    distance_m: 0.0,
+                    warnings,
+                });
+                continue 'veh;
+            }
+        }
         let dist = Path::new(pts.clone()).length_m();
         out_vehicles.push(VehicleOutput {
             id: v.id.clone(),
@@ -2001,6 +2142,65 @@ pub(crate) fn detect_multi_vehicle_crossings(vehicles: &mut [VehicleOutput]) {
 /// 数十公里），大余量会让本就接近任务边界的圆撑出 region（zz19 教训，见
 /// expand_region_for_walls 注释）。
 const REGION_CIRCLE_MARGIN_DEG: f64 = 0.03;
+
+/// P7：按 demo 契约（docs/02 §3.6）`weapon_id = "<vehicle_id>_w1"` 从 mission.weapons
+/// 查该车关联武器。仅返回**启用**的武器（`effective_range_km()` 非 None ——
+/// weapon_type 缺省 = 不启用，即使提供了 range_km）。
+fn vehicle_weapon(
+    id: &str,
+    weapons: &[crate::config::WeaponEntry],
+) -> Option<crate::config::WeaponEntry> {
+    let wid = format!("{id}_w1");
+    weapons
+        .iter()
+        .find(|w| w.weapon_id == wid && w.effective_range_km().is_some())
+        .cloned()
+}
+
+/// P7：环带目标集——在距目标 ∈ [rmin_km, rmax_km] 的网格 cell 中选 FMM 到达时间
+/// 最小的可达 cell（等价"传播到环带即停"，docs/技术方案 §4.2）。环带超出 region
+/// 的 cell 自然 clip（cell 索引在 grid 内）。环带内无可达 → None。
+fn ring_target_cell(
+    res: &crate::costfield::FmmResult,
+    target: &Geo,
+    region: &Region,
+    grid: usize,
+    rmin_km: f64,
+    rmax_km: f64,
+) -> Option<(usize, usize)> {
+    let mut best: Option<(f32, usize, usize)> = None;
+    for r in 0..grid {
+        for c in 0..grid {
+            let idx = r * grid + c;
+            let t = res.times[idx];
+            if !t.is_finite() {
+                continue;
+            }
+            let (lon, lat) = cell_lonlat(r, c, region, grid);
+            let d_km = crate::path::haversine_m(lon, lat, target.lon, target.lat) / 1000.0;
+            if d_km >= rmin_km && d_km <= rmax_km
+                && best.is_none_or(|(bt, _, _)| t < bt)
+            {
+                best = Some((t, r, c));
+            }
+        }
+    }
+    best.map(|(_, r, c)| (r, c))
+}
+
+/// P7：发射包线 heading 窗口判定。窗口语义 = 从 lo 顺时针扫到 hi 的角距
+/// （`rem_euclid` 处理跨 0°，如 [350,10] = 20° 宽窗；[10,350] = 340° 宽窗）。
+fn heading_in_window(h: f64, lo: f64, hi: f64) -> bool {
+    let d = (h - lo).rem_euclid(360.0);
+    let span = (hi - lo).rem_euclid(360.0);
+    d <= span + 1e-6
+}
+
+/// P7：heading 窗口中心（顺时针中点，归一到 [0,360)）。供 Dubins 终端 pose 下放
+/// （docs/技术方案 §4.2：终端姿态不只是到达判据，作为平滑级输入）。
+fn heading_window_center(lo: f64, hi: f64) -> f64 {
+    (lo + (hi - lo).rem_euclid(360.0) / 2.0).rem_euclid(360.0)
+}
 
 /// 任务区域：所有起点 + 每机目标 + mission.target 的方形包围盒 + 缓冲
 /// （保证源/目标不贴边）。
@@ -6184,5 +6384,235 @@ mod tests {
                 clr, w[0].x, w[0].y, w[1].x, w[1].y
             );
         }
+    }
+
+    // ---------- P7 Rmin-Rmax 环带目标集 + 发射包线（2026-08-12 主管拍板启动） ----------
+    #[test]
+    fn p7_ring_target_lands_in_ring_not_on_point() {
+        // 单机（隐式 v1）+ v1_w1 agm [3,120]：FMM 传播到环带即停——路径终点停在
+        // **进入环带处（Rmax 外边界）**（T 最小 = 距源最近 = 刚进入发射阵位，
+        // docs/技术方案 §4.2"传播到环带即停"），而非目标点本身（Rmin 内不得停留）。
+        let s = r#"{
+            "schema_version":"0.20",
+            "mission":{
+                "start":{"lon":115.0,"lat":39.0,"alt_m":3000},
+                "target":{"lon":116.5,"lat":39.9,"alt_m":3000},
+                "terrain":{"source":"none"},
+                "weapons":[{"weapon_id":"v1_w1","weapon_type":"agm","range_km":[3.0,120.0]}]
+            }
+        }"#;
+        let input = parse(s);
+        let out = solve(&input, &SolveParams::default(), 0).unwrap();
+        let v = &out.vehicles[0];
+        assert_eq!(v.status, "planned", "{:?}", v.warnings);
+        let last = v.path.last().unwrap();
+        let d_km = dist_km(last.x, last.y, 116.5, 39.9);
+        assert!(
+            (115.0..=125.0).contains(&d_km),
+            "终点应落在 Rmax≈120km 环带外边界（进入发射阵位即停），实际距目标 {d_km:.2} km"
+        );
+        assert!(
+            d_km >= 3.0 - 1e-6,
+            "带最小射程的武器不得停在 Rmin 内，实际 {d_km:.2} km"
+        );
+    }
+
+    #[test]
+    fn p7_ring_target_honors_large_rmin() {
+        // agm 显式 [60,120]：终点距目标必须 ∈ [60,120]（Rmin 大 → 不得进入
+        // 60km 内）；路径停在 Rmax 外边界（进入发射阵位即停）。
+        let s = r#"{
+            "schema_version":"0.20",
+            "mission":{
+                "start":{"lon":115.0,"lat":39.0,"alt_m":3000},
+                "target":{"lon":116.5,"lat":39.9,"alt_m":3000},
+                "terrain":{"source":"none"},
+                "weapons":[{"weapon_id":"v1_w1","weapon_type":"agm","range_km":[60.0,120.0]}]
+            }
+        }"#;
+        let input = parse(s);
+        let out = solve(&input, &SolveParams::default(), 0).unwrap();
+        let v = &out.vehicles[0];
+        assert_eq!(v.status, "planned", "{:?}", v.warnings);
+        let last = v.path.last().unwrap();
+        let d_km = dist_km(last.x, last.y, 116.5, 39.9);
+        assert!(
+            (60.0..=125.0).contains(&d_km),
+            "终点应在环带 [60,120] 内，实际距目标 {d_km:.2} km"
+        );
+        assert!(
+            d_km >= 60.0 - 1e-6,
+            "Rmin=60 不得停在 60km 内，实际 {d_km:.2} km"
+        );
+    }
+
+    #[test]
+    fn p7_no_weapon_keeps_point_target() {
+        // 无武器 → 点目标语义不回归：终点应贴近目标（<1km，网格 cell 精度内）。
+        let input = parse(BASE);
+        let out = solve(&input, &SolveParams::default(), 0).unwrap();
+        let v = &out.vehicles[0];
+        assert_eq!(v.status, "planned", "{:?}", v.warnings);
+        let last = v.path.last().unwrap();
+        let d_km = dist_km(last.x, last.y, 116.5, 39.9);
+        assert!(d_km < 1.0, "无武器应到达目标点，实际距目标 {d_km:.2} km");
+    }
+
+    #[test]
+    fn p7_rmin_zero_warns_degradation() {
+        // Rmin 未定（0）→ 显式告警（docs/技术方案 §4.2：不静默当无下限处理）。
+        let s = r#"{
+            "schema_version":"0.20",
+            "mission":{
+                "start":{"lon":115.0,"lat":39.0,"alt_m":3000},
+                "target":{"lon":116.5,"lat":39.9,"alt_m":3000},
+                "terrain":{"source":"none"},
+                "weapons":[{"weapon_id":"v1_w1","weapon_type":"agm","range_km":[0.0,40.0]}]
+            }
+        }"#;
+        let input = parse(s);
+        let out = solve(&input, &SolveParams::default(), 0).unwrap();
+        let v = &out.vehicles[0];
+        assert_eq!(v.status, "planned", "{:?}", v.warnings);
+        assert!(
+            out.stats
+                .degradations
+                .iter()
+                .any(|d| d.contains("Rmin 0 km undefined")),
+            "Rmin 未定应显式告警，实际 {:?}",
+            out.stats.degradations
+        );
+    }
+
+    #[test]
+    fn p7_ring_unreachable_is_no_solution() {
+        // 环带 [10,120] 被两同心 no_fly 圆（100km / 130km）围死 → 环带内无可达
+        // cell → 点目标回退被 Rmin 挡住（dist=0 < 10）→ no_solution + 标注。
+        let s = r#"{
+            "schema_version":"0.20",
+            "mission":{
+                "start":{"lon":115.0,"lat":39.0,"alt_m":3000},
+                "target":{"lon":116.5,"lat":39.9,"alt_m":3000},
+                "terrain":{"source":"none"},
+                "weapons":[{"weapon_id":"v1_w1","weapon_type":"agm","range_km":[10.0,120.0]}],
+                "no_fly_zones":[
+                    {"id":"nf_in","zone_type":"no_fly","shape":"circle","geometry":{"center":[116.5,39.9],"radius_km":100},"alt_min_m":0,"alt_max_m":12000},
+                    {"id":"nf_out","zone_type":"no_fly","shape":"circle","geometry":{"center":[116.5,39.9],"radius_km":130},"alt_min_m":0,"alt_max_m":12000}
+                ]
+            }
+        }"#;
+        let input = parse(s);
+        let out = solve(&input, &SolveParams::default(), 0).unwrap();
+        let v = &out.vehicles[0];
+        assert_eq!(v.status, "no_solution", "实际 status={}", v.status);
+        assert!(
+            out.stats
+                .degradations
+                .iter()
+                .any(|d| d.contains("ring target unreachable")),
+            "应标注 ring target unreachable，实际 {:?}",
+            out.stats.degradations
+        );
+    }
+
+    #[test]
+    fn p7_heading_window_unit() {
+        // heading 窗口环绕语义：跨 0° 与常规窗口。
+        assert!(heading_in_window(355.0, 350.0, 10.0));
+        assert!(!heading_in_window(100.0, 350.0, 10.0));
+        assert!(heading_in_window(34.0, 20.0, 50.0));
+        assert!(!heading_in_window(100.0, 20.0, 50.0));
+        assert_eq!(heading_window_center(350.0, 10.0), 0.0);
+        assert!((heading_window_center(20.0, 50.0) - 35.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn p7_envelope_alt_clamped_into_window() {
+        // 发射包线 alt 窗口优先（docs/技术方案 §4.2）：目标高度 3000 但窗口
+        // [1000,2000] → 终点高度 clamp 到 2000（垂直剖面目标高度取窗口上界），
+        // 硬校验通过 → planned。
+        let s = r#"{
+            "schema_version":"0.20",
+            "mission":{
+                "start":{"lon":115.0,"lat":39.0,"alt_m":3000},
+                "target":{"lon":116.5,"lat":39.9,"alt_m":3000},
+                "terrain":{"source":"none"},
+                "weapons":[{"weapon_id":"v1_w1","weapon_type":"agm","range_km":[3.0,120.0],
+                            "envelope":{"alt_m":[1000.0,2000.0]}}]
+            }
+        }"#;
+        let input = parse(s);
+        let out = solve(&input, &SolveParams::default(), 0).unwrap();
+        let v = &out.vehicles[0];
+        assert_eq!(v.status, "planned", "{:?}", v.warnings);
+        let last = v.path.last().unwrap();
+        assert!(
+            (1000.0..=2000.0).contains(&last.alt_m),
+            "终点高度应 clamp 到 alt 窗口 [1000,2000]，实际 {:.0} m",
+            last.alt_m
+        );
+    }
+
+    #[test]
+    fn p7_envelope_speed_mismatch_warns_soft() {
+        // speed 是常量输入（规划不可调）→ 软校验：巡航 250 m/s 不在窗口 [50,80]
+        // → degradation 告警，但路径正常交付（不误伤可用性）。
+        let s = r#"{
+            "schema_version":"0.20",
+            "mission":{
+                "start":{"lon":115.0,"lat":39.0,"alt_m":3000},
+                "target":{"lon":116.5,"lat":39.9,"alt_m":3000},
+                "vehicles":[
+                    {"id":"v1","profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":250,"min_turn_radius_m":5000},
+                     "start_pose":{"lon":115.0,"lat":39.0,"alt_m":3000}}],
+                "terrain":{"source":"none"},
+                "weapons":[{"weapon_id":"v1_w1","weapon_type":"agm","range_km":[3.0,120.0],
+                            "envelope":{"speed_mps":[50.0,80.0]}}]
+            }
+        }"#;
+        let input = parse(s);
+        let out = solve(&input, &SolveParams::default(), 0).unwrap();
+        let v = &out.vehicles[0];
+        assert_eq!(v.status, "planned", "{:?}", v.warnings);
+        assert!(
+            out.stats
+                .degradations
+                .iter()
+                .any(|d| d.contains("cruise speed 250 m/s outside weapon speed window")),
+            "速度窗口不匹配应软告警，实际 {:?}",
+            out.stats.degradations
+        );
+    }
+
+    #[test]
+    fn p7_envelope_heading_forced_by_dubins() {
+        // 发射包线 heading 下放平滑级：窗口 [20,50]（自然末段方向 ≈ 34° 东北），
+        // 终端 heading = 窗口中心 35° 进 Dubins → 交付路径末段航向 ∈ 窗口。
+        let s = r#"{
+            "schema_version":"0.20",
+            "mission":{
+                "start":{"lon":115.0,"lat":39.0,"alt_m":3000},
+                "target":{"lon":116.5,"lat":39.9,"alt_m":3000},
+                "vehicles":[
+                    {"id":"v1","profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":250,"min_turn_radius_m":5000},
+                     "start_pose":{"lon":115.0,"lat":39.0,"alt_m":3000}}],
+                "terrain":{"source":"none"},
+                "weapons":[{"weapon_id":"v1_w1","weapon_type":"agm","range_km":[3.0,120.0],
+                            "envelope":{"heading_deg":[20.0,50.0]}}]
+            }
+        }"#;
+        let input = parse(s);
+        let out = solve(&input, &SolveParams::default(), 0).unwrap();
+        let v = &out.vehicles[0];
+        assert_eq!(v.status, "planned", "{:?}", v.warnings);
+        let n = v.path.len();
+        assert!(n >= 2, "路径至少 2 点");
+        let h_last = crate::path::bearing_deg(
+            v.path[n - 2].x, v.path[n - 2].y, v.path[n - 1].x, v.path[n - 1].y,
+        );
+        assert!(
+            heading_in_window(h_last, 20.0, 50.0),
+            "末端航向应满足发射包线窗口 [20,50]，实际 {h_last:.1}°"
+        );
     }
 }
