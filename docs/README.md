@@ -39,7 +39,7 @@
 - **status 四态**：`success` / `degraded_timeout` / `no_solution` / `input_invalid`
 - **性能指标**：每百公里 ≤ 3s（端到端典型值），绝对不能崩溃（B9）
 - **核心链路**：语义代价场 → FMM → 回溯 → Theta\* → 样条/Dubins → 抽稀 → 全链复验
-- **主要占位项**：探测概率 base_p（0.1 待标定）、LOS mask 未进静态代价场、Rmin–Rmax 环带/发射包线、多边形受限区剖面、多机交叉检测、CCC Dubins（见 01 文档 §7.1；3s 预算硬护栏已实现于 P6-B，docs/07 §5）
+- **主要占位项**：探测概率 base_p（0.1 待标定）、LOS mask 未进静态代价场、Rmin–Rmax 环带/发射包线、多边形受限区剖面、CCC Dubins（见 01 文档 §7.1；3s 预算硬护栏已实现于 P6-B，docs/07 §5；多机交叉检测已实现于 P6-C，武器类型+射程语义已定案于 P6-D）
 
 ## 维护约定
 

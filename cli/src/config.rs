@@ -365,20 +365,61 @@ impl VerticalDatumName {
     }
 }
 
-/// 武器映射条目（十一轮共识结构：射程区间 / 引信 / 发射包线 / 打击目标引用）。
+/// 武器类型（2026-08-12 主管定案：空空导弹 / 空地导弹 / 航空炸弹；**默认不启用**）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WeaponType {
+    /// 空空导弹（AAM）
+    Aam,
+    /// 空地导弹（AGM）
+    Agm,
+    /// 航空炸弹（JDAM）
+    Bomb,
+}
+
+impl WeaponType {
+    /// 该类型默认射程 [Rmin, Rmax] km（主管 2026-08-12：按类型设置默认值；
+    /// 沿用占位表 aam_medium / asm_air_ground / jdam，docs/02 §3.6）。
+    pub fn default_range_km(self) -> [f64; 2] {
+        match self {
+            WeaponType::Aam => [5.0, 40.0],
+            WeaponType::Agm => [3.0, 120.0],
+            WeaponType::Bomb => [1.0, 15.0],
+        }
+    }
+}
+
+/// 武器映射条目（2026-08-12 主管定案：语义 = 武器类型 + 武器射程；默认不启用）。
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WeaponEntry {
     pub weapon_id: String,
-    /// 射程 [Rmin, Rmax] km（Rmin 可为 0；带最小射程不得停在 Rmin 内，九轮共识）
-    pub range_km: [f64; 2],
+    /// 武器类型（aam / agm / bomb）。**缺省 = 该武器默认不启用**
+    ///（不参与规划计算，与既往“仅解析不消费”一致；启用与否由后续威胁建模消费）。
+    #[serde(default)]
+    pub weapon_type: Option<WeaponType>,
+    /// 射程 [Rmin, Rmax] km。**缺省 = 按 weapon_type 对应默认射程**
+    ///（aam [5,40] / agm [3,120] / bomb [1,15]；weapon_type 也缺省 → 不启用）。
+    #[serde(default)]
+    pub range_km: Option<[f64; 2]>,
+    /// （保留兼容，仅解析）引信类型。
     #[serde(default)]
     pub fuze_type: String,
+    /// （保留兼容，仅解析）发射包线。
     #[serde(default)]
     pub envelope: Option<LaunchEnvelope>,
-    /// 打击目标引用（缺省 = mission.target）
+    /// （保留兼容，仅解析）打击目标引用（缺省 = mission.target）。
     #[serde(default)]
     pub target_ref: Option<String>,
+}
+
+impl WeaponEntry {
+    /// 有效射程：**weapon_type 缺省 → None（该武器不启用）**；启用时射程 =
+    /// 显式 range_km 优先，否则按类型默认。
+    pub fn effective_range_km(&self) -> Option<[f64; 2]> {
+        self.weapon_type
+            .map(|t| self.range_km.unwrap_or_else(|| t.default_range_km()))
+    }
 }
 
 /// 发射包线（航向/高度/速度窗）。
@@ -512,26 +553,29 @@ impl Default for DefaultParams {
 }
 
 impl DefaultParams {
-    /// 默认武器映射表（占位条目，Phase 0 校准填充；表外武器走兜底 + 告警）。
+    /// 默认武器映射表（2026-08-12 主管定案：类型 + 按类型默认射程；表外武器走兜底 + 告警）。
     pub fn default_weapon_map() -> Vec<WeaponEntry> {
         vec![
             WeaponEntry {
                 weapon_id: "aam_medium".into(),
-                range_km: [5.0, 40.0],
+                weapon_type: Some(WeaponType::Aam),
+                range_km: None, // 按类型默认 [5, 40]
                 fuze_type: "proximity".into(),
                 envelope: None,
                 target_ref: None,
             },
             WeaponEntry {
                 weapon_id: "asm_air_ground".into(),
-                range_km: [3.0, 120.0],
+                weapon_type: Some(WeaponType::Agm),
+                range_km: None, // 按类型默认 [3, 120]
                 fuze_type: "impact".into(),
                 envelope: None,
                 target_ref: None,
             },
             WeaponEntry {
                 weapon_id: "jdam".into(),
-                range_km: [1.0, 15.0],
+                weapon_type: Some(WeaponType::Bomb),
+                range_km: None, // 按类型默认 [1, 15]
                 fuze_type: "impact".into(),
                 envelope: None,
                 target_ref: None,
@@ -778,6 +822,16 @@ pub fn validate(input: &Input) -> Result<(), AppError> {
         .chain(&input.mission.obstacles)
     {
         validate_zone(z)?;
+    }
+    // 武器射程（2026-08-12 主管定案：类型 + 射程，默认不启用）：
+    // 显式 range_km 提供时校验有限且 lo < hi（倒置/非有限 → out_of_bounds）；
+    // weapon_type 与 range_km 都缺省 → 该武器不启用（不报错）。
+    for w in &input.mission.weapons {
+        if let Some([lo, hi]) = w.range_km {
+            if !(lo.is_finite() && hi.is_finite() && lo < hi) {
+                return Err(AppError::InputInvalid(InputInvalidReason::OutOfBounds));
+            }
+        }
     }
     Ok(())
 }
@@ -1319,6 +1373,45 @@ mod tests {
         }"#;
         let input = Input::from_json_str(s).unwrap();
         match validate(&input) {
+            Err(AppError::InputInvalid(InputInvalidReason::OutOfBounds)) => {}
+            other => panic!("expected out_of_bounds, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn weapon_semantics_type_and_default_range() {
+        // 2026-08-12 主管定案：武器语义 = 类型 + 射程；类型缺省 = 不启用；
+        // 射程缺省 = 按类型默认值（aam [5,40] / agm [3,120] / bomb [1,15]）。
+        let s = r#"{
+            "schema_version":"0.20",
+            "mission":{
+                "start":{"lon":115.0,"lat":39.0,"alt_m":0},
+                "target":{"lon":117.0,"lat":40.0,"alt_m":0},
+                "weapons":[
+                    {"weapon_id":"w_aam","weapon_type":"aam"},
+                    {"weapon_id":"w_agm","weapon_type":"agm","range_km":[2.0,80.0]},
+                    {"weapon_id":"w_bomb","weapon_type":"bomb"},
+                    {"weapon_id":"w_disabled","range_km":[1.0,10.0]}
+                ]
+            }
+        }"#;
+        let input = Input::from_json_str(s).unwrap();
+        let ws = &input.mission.weapons;
+        assert_eq!(ws.len(), 4);
+        // 缺省射程按类型
+        assert_eq!(ws[0].effective_range_km(), Some([5.0, 40.0]));
+        // 显式射程优先
+        assert_eq!(ws[1].effective_range_km(), Some([2.0, 80.0]));
+        assert_eq!(ws[2].effective_range_km(), Some([1.0, 15.0]));
+        // 无类型无射程 → 不启用
+        assert!(ws[3].effective_range_km().is_none());
+        if let Err(e) = validate(&input) {
+            panic!("expected ok, got {e:?}");
+        }
+        // 倒置射程 → out_of_bounds
+        let bad = s.replace("[2.0,80.0]", "[80.0,2.0]");
+        let input2 = Input::from_json_str(&bad).unwrap();
+        match validate(&input2) {
             Err(AppError::InputInvalid(InputInvalidReason::OutOfBounds)) => {}
             other => panic!("expected out_of_bounds, got {other:?}"),
         }

@@ -91,11 +91,15 @@ fn point_in_polygon(verts: &[[f64; 2]], p: &Geo) -> bool {
     inside
 }
 
-/// 高度带判定（与 zone_contains_at 同语义：MSL 直接比较；AGL 无地面 → 保守视为在带内）。
+/// 高度带判定（与 zone_contains_at 同语义：MSL 直接比较；AGL 无地面 → 保守视为在带内；
+/// 无高度区间（NoFly/Obstacle 全高度）→ 拦截）。
 fn alt_in_band(z: &Zone, alt_m: f64) -> bool {
-    match z.height_semantics {
-        HeightSemantics::Msl => alt_m >= z.alt_min_m && alt_m <= z.alt_max_m,
-        HeightSemantics::Agl => true, // 无地面高度 → 保守拦截
+    match (z.alt_min_m, z.alt_max_m) {
+        (Some(lo), Some(hi)) => match z.height_semantics {
+            HeightSemantics::Msl => alt_m >= lo && alt_m <= hi,
+            HeightSemantics::Agl => true, // 无地面高度 → 保守拦截
+        },
+        _ => true, // 无高度区间 → 全高度拦截
     }
 }
 

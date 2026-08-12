@@ -1681,6 +1681,10 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
         });
     }
 
+    // P6-C（docs/01 §7.1）：多机路径空间交叉检测——输出后处理，检出显式告警；
+    // 时间维 out-of-scope（不判是否同时到达）。
+    detect_multi_vehicle_crossings(&mut out_vehicles);
+
     Ok(Output {
         schema_version: crate::config::SCHEMA_VERSION.into(),
         status: "success".into(),
@@ -1722,6 +1726,157 @@ fn default_mask_candidates() -> Option<PathBuf> {
 /// 任务区域缓冲（度）：保证源/目标不贴边；同时是障碍感知外扩的机动余量
 /// （2026-08-11 zz_region_block2：墙占满 region 短边方向时绕行被迫出 region）。
 const REGION_PAD_DEG: f64 = 0.15;
+
+// ==================== P6-C 多机交叉检测 ====================
+// docs/01 §7.1 方案：输出后处理检测多机路径空间交叉，检出显式告警；
+// 时间维 out-of-scope（不判是否同时到达，仅空间接近告警）。
+const CROSS_H_KM: f64 = 1.0; // 水平间隔阈值（km）
+const CROSS_V_M: f64 = 150.0; // 垂直间隔阈值（m）
+const CROSS_BBOX_PAD_DEG: f64 = 0.02; // 段包围盒粗筛延展（~2km）
+
+/// 点 p 到段 q1-q2 的最近点（2D 局部平面，经度按 cos(mid_lat) 折算 km）。
+/// 返回 (最近距离 km, 段参数 t, 垂足经度, 垂足纬度)。
+fn closest_on_seg(
+    px: f64,
+    py: f64,
+    q1x: f64,
+    q1y: f64,
+    q2x: f64,
+    q2y: f64,
+    mid_lat: f64,
+) -> (f64, f64, f64, f64) {
+    let kx = 111.32 * mid_lat.to_radians().cos().max(1e-6);
+    let ky = 111.32;
+    let dx = (q2x - q1x) * kx;
+    let dy = (q2y - q1y) * ky;
+    let len2 = dx * dx + dy * dy;
+    let t = if len2 <= 0.0 {
+        0.0
+    } else {
+        ((((px - q1x) * kx) * dx + ((py - q1y) * ky) * dy) / len2).clamp(0.0, 1.0)
+    };
+    let qx = q1x + (q2x - q1x) * t;
+    let qy = q1y + (q2y - q1y) * t;
+    let h = (((px - qx) * kx).powi(2) + ((py - qy) * ky).powi(2)).sqrt();
+    (h, t, qx, qy)
+}
+
+/// 段-段水平最近距离与最近点参数（2D；候选 = 4 端点距离 + 4 端点-对段投影）。
+/// 返回 (最近水平距离 km, t_a, t_b)。
+fn seg_seg_closest(
+    a1: &PathPoint,
+    a2: &PathPoint,
+    b1: &PathPoint,
+    b2: &PathPoint,
+    mid_lat: f64,
+) -> (f64, f64, f64) {
+    let mut best_h = f64::INFINITY;
+    let mut best_ta = 0.0;
+    let mut best_tb = 0.0;
+    let mut consider = |h: f64, ta: f64, tb: f64| {
+        if h < best_h {
+            best_h = h;
+            best_ta = ta;
+            best_tb = tb;
+        }
+    };
+    // 端点-对段投影
+    for (ta0, p) in [(0.0, a1), (1.0, a2)] {
+        let (h, tb, _, _) = closest_on_seg(p.x, p.y, b1.x, b1.y, b2.x, b2.y, mid_lat);
+        consider(h, ta0, tb);
+    }
+    for (tb0, p) in [(0.0, b1), (1.0, b2)] {
+        let (h, ta, _, _) = closest_on_seg(p.x, p.y, a1.x, a1.y, a2.x, a2.y, mid_lat);
+        consider(h, ta, tb0);
+    }
+    // 端点-端点
+    for (ta0, p) in [(0.0, a1), (1.0, a2)] {
+        for (tb0, q) in [(0.0, b1), (1.0, b2)] {
+            let kx = 111.32 * mid_lat.to_radians().cos().max(1e-6);
+            let h = (((p.x - q.x) * kx).powi(2) + ((p.y - q.y) * 111.32).powi(2)).sqrt();
+            consider(h, ta0, tb0);
+        }
+    }
+    // 段-段内部最近（两直线最近点都在段内；相交 → 交点距离 0）。
+    // 线性坐标（km）下解 da·s − db·t = b1 − a1。
+    let kx = 111.32 * mid_lat.to_radians().cos().max(1e-6);
+    let ky = 111.32;
+    let ax = (a2.x - a1.x) * kx;
+    let ay = (a2.y - a1.y) * ky;
+    let bx = (b2.x - b1.x) * kx;
+    let by = (b2.y - b1.y) * ky;
+    let wx = (b1.x - a1.x) * kx;
+    let wy = (b1.y - a1.y) * ky;
+    let det = bx * ay - ax * by;
+    if det.abs() > 1e-9 {
+        let s = (bx * wy - wx * by) / det;
+        let t = (ax * wy - ay * wx) / det;
+        if (0.0..=1.0).contains(&s) && (0.0..=1.0).contains(&t) {
+            let hx = wx + bx * t - ax * s;
+            let hy = wy + by * t - ay * s;
+            consider((hx * hx + hy * hy).sqrt(), s, t);
+        }
+    }
+    (best_h, best_ta, best_tb)
+}
+
+/// P6-C：多机路径空间交叉检测（输出后处理）。对 path 非空的车辆两两检测：
+/// 段-段水平最近距离 < CROSS_H_KM 且垂直最近差 < CROSS_V_M → 视为交叉，
+/// 两车 warnings 各追加一条 `multi_vehicle_conflict`（时间维 out-of-scope）。
+pub(crate) fn detect_multi_vehicle_crossings(vehicles: &mut [VehicleOutput]) {
+    for i in 0..vehicles.len() {
+        for j in (i + 1)..vehicles.len() {
+            let pi = vehicles[i].path.clone();
+            let pj = vehicles[j].path.clone();
+            if pi.len() < 2 || pj.len() < 2 {
+                continue;
+            }
+            let mid_lat = pi.iter().chain(pj.iter()).map(|p| p.y).sum::<f64>()
+                / (pi.len() + pj.len()) as f64;
+            let mut best: Option<(f64, f64, f64, f64)> = None; // (h_km, v_m, lon, lat)
+            for a in pi.windows(2) {
+                for b in pj.windows(2) {
+                    // 包围盒粗筛（经纬度延展 pad；垂直在候选命中后再判）
+                    if a[0].x.max(a[1].x) + CROSS_BBOX_PAD_DEG < b[0].x.min(b[1].x)
+                        || b[0].x.max(b[1].x) + CROSS_BBOX_PAD_DEG < a[0].x.min(a[1].x)
+                        || a[0].y.max(a[1].y) + CROSS_BBOX_PAD_DEG < b[0].y.min(b[1].y)
+                        || b[0].y.max(b[1].y) + CROSS_BBOX_PAD_DEG < a[0].y.min(a[1].y)
+                    {
+                        continue;
+                    }
+                    let (h, ta, tb) = seg_seg_closest(&a[0], &a[1], &b[0], &b[1], mid_lat);
+                    if h > CROSS_H_KM {
+                        continue;
+                    }
+                    let alt_a = a[0].alt_m + (a[1].alt_m - a[0].alt_m) * ta;
+                    let alt_b = b[0].alt_m + (b[1].alt_m - b[0].alt_m) * tb;
+                    let v = (alt_a - alt_b).abs();
+                    if v > CROSS_V_M {
+                        continue;
+                    }
+                    let lon = a[0].x + (a[1].x - a[0].x) * ta;
+                    let lat = a[0].y + (a[1].y - a[0].y) * ta;
+                    match best {
+                        Some((bh, bv, _, _)) if (h, v) >= (bh, bv) => {}
+                        _ => best = Some((h, v, lon, lat)),
+                    }
+                }
+            }
+            if let Some((h, v, lon, lat)) = best {
+                let msg = format!(
+                    "multi_vehicle_conflict: crossing with {} near ({:.4},{:.4}) h={:.1}km v={:.0}m (time-dimension out-of-scope)",
+                    vehicles[j].id, lon, lat, h, v
+                );
+                let msg2 = format!(
+                    "multi_vehicle_conflict: crossing with {} near ({:.4},{:.4}) h={:.1}km v={:.0}m (time-dimension out-of-scope)",
+                    vehicles[i].id, lon, lat, h, v
+                );
+                vehicles[i].warnings.push(msg);
+                vehicles[j].warnings.push(msg2);
+            }
+        }
+    }
+}
 
 /// 圆墙外扩机动余量（度）：绕圆墙需求 ≈ inflation（2km）+ 转弯半径（~0.5km）+
 /// 净空 ≈ 0.03°（3.3km）。比多边形墙的 REGION_PAD_DEG 小——圆墙 bbox 大（半径
@@ -3001,6 +3156,81 @@ mod tests {
             "terrain":{"source":"none"}
         }
     }"#;
+
+    // ---------- P6-C 多机交叉检测 ----------
+    fn vo(id: &str, pts: &[(f64, f64, f64)]) -> VehicleOutput {
+        VehicleOutput {
+            id: id.into(),
+            status: "planned".into(),
+            path: pts
+                .iter()
+                .map(|&(x, y, alt)| PathPoint {
+                    x,
+                    y,
+                    alt_m: alt,
+                })
+                .collect(),
+            distance_m: 0.0,
+            warnings: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn p6c_detect_crossing() {
+        // 两条路径在中段交叉（x 形），高度相同 → 两车都应出 multi_vehicle_conflict
+        let mut vs = vec![
+            vo("v1", &[(115.0, 39.0, 3000.0), (116.5, 40.0, 3000.0)]),
+            vo("v2", &[(116.5, 39.0, 3000.0), (115.0, 40.0, 3000.0)]),
+        ];
+        detect_multi_vehicle_crossings(&mut vs);
+        assert!(
+            vs[0]
+                .warnings
+                .iter()
+                .any(|w| w.contains("multi_vehicle_conflict") && w.contains("v2")),
+            "v1 warnings: {:?}",
+            vs[0].warnings
+        );
+        assert!(
+            vs[1]
+                .warnings
+                .iter()
+                .any(|w| w.contains("multi_vehicle_conflict") && w.contains("v1")),
+            "v2 warnings: {:?}",
+            vs[1].warnings
+        );
+    }
+
+    #[test]
+    fn p6c_no_crossing_far_apart() {
+        // 平行远离（水平 ~133km > 1km）→ 无告警
+        let mut vs = vec![
+            vo("v1", &[(115.0, 39.0, 3000.0), (116.0, 39.0, 3000.0)]),
+            vo("v2", &[(115.0, 40.2, 3000.0), (116.0, 40.2, 3000.0)]),
+        ];
+        detect_multi_vehicle_crossings(&mut vs);
+        assert!(vs[0].warnings.is_empty(), "{:?}", vs[0].warnings);
+        assert!(vs[1].warnings.is_empty(), "{:?}", vs[1].warnings);
+    }
+
+    #[test]
+    fn p6c_no_crossing_alt_separated() {
+        // 同水平位置但高度差 2000m > 150m → 无告警
+        let mut vs = vec![
+            vo("v1", &[(115.5, 39.5, 3000.0), (116.0, 39.5, 3000.0)]),
+            vo("v2", &[(115.5, 39.5, 5000.0), (116.0, 39.5, 5000.0)]),
+        ];
+        detect_multi_vehicle_crossings(&mut vs);
+        assert!(vs[0].warnings.is_empty(), "{:?}", vs[0].warnings);
+        assert!(vs[1].warnings.is_empty(), "{:?}", vs[1].warnings);
+    }
+
+    #[test]
+    fn p6c_single_vehicle_no_detection() {
+        let mut vs = vec![vo("v1", &[(115.0, 39.0, 3000.0), (116.0, 39.0, 3000.0)])];
+        detect_multi_vehicle_crossings(&mut vs);
+        assert!(vs[0].warnings.is_empty(), "{:?}", vs[0].warnings);
+    }
 
     #[test]
     fn m1_end_to_end_plain() {
