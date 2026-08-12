@@ -13,6 +13,7 @@
 //! - C5：求交/贴边判定用保守侧常量 `GEOM_EPS_DEG`；
 //! - C6：feature-flag 默认关（`ARP_PATCH=1` 开启）。
 
+use crate::threat::ThreatModel;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
@@ -639,4 +640,571 @@ mod tests {
         // 必经点 → 排除
         assert!(!patch_applicable(&[poly_wall], false, true));
     }
+
+    // ---------- P2 ----------
+
+    #[test]
+    fn cluster_failures_merges_within_patch_r() {
+        let issues = vec![
+            "sample (lon=116.0,lat=39.0) fail".to_string(),
+            "sample (lon=116.1,lat=39.0) fail".to_string(),
+            "sample (lon=117.5,lat=40.5) fail".to_string(),
+        ];
+        // 前两点相距 ~11km（PATCH_R=30km 内合并），第三点 ~180km 外（新簇）
+        let clusters = cluster_failures(&issues, PATCH_R_DEG);
+        assert_eq!(clusters.len(), 2);
+        // 簇心 = 字典序首点（确定性）
+        assert_eq!(clusters[0], [116.0, 39.0]);
+        assert_eq!(clusters[1], [117.5, 40.5]);
+    }
+
+    #[test]
+    fn cluster_failures_deterministic_order() {
+        let issues = vec![
+            "sample (lon=117.5,lat=40.5) fail".to_string(),
+            "sample (lon=116.1,lat=39.0) fail".to_string(),
+            "sample (lon=116.0,lat=39.0) fail".to_string(),
+        ];
+        let a = cluster_failures(&issues, PATCH_R_DEG);
+        let b = cluster_failures(&issues, PATCH_R_DEG);
+        assert_eq!(a, b);
+        // 字典序：116.0 先于 117.5
+        assert!(a[0][0] < a[1][0]);
+    }
+
+    #[test]
+    fn boundary_anchors_finds_enter_exit() {
+        let rect = PatchRect::from_center([116.5, 39.5], PATCH_R_DEG);
+        let skel = [
+            [116.0, 39.0],
+            [116.5, 39.0],  // 进入 patch（x 方向）
+            [116.5, 39.5],
+            [116.5, 40.0],  // 离开 patch
+            [117.0, 40.0],
+        ];
+        let (ein, eout) = boundary_anchors(&skel, &rect);
+        assert!(ein.is_some(), "enter anchor missing");
+        assert!(eout.is_some(), "exit anchor missing");
+        let ein = ein.unwrap();
+        let eout = eout.unwrap();
+        // 进入点在下边界（y = c - half）：骨架从 y=39.0 进入矩形（x=116.5 已居中）
+        assert!((ein[1] - (39.5 - PATCH_R_DEG)).abs() < 1e-6, "enter on bottom edge: {ein:?}");
+        // 离开点在上边界（y = c + half）：骨架沿 x=116.5 从 y=40.0 方向离开矩形
+        assert!((eout[1] - (39.5 + PATCH_R_DEG)).abs() < 1e-6, "exit on top edge: {eout:?}");
+    }
+
+    #[test]
+    fn plan_patch_multi_two_obstacles() {
+        let obs1 = [[116.30, 39.30], [116.50, 39.30], [116.50, 39.70], [116.30, 39.70]];
+        let obs2 = [[116.70, 39.30], [116.90, 39.30], [116.90, 39.70], [116.70, 39.70]];
+        let out = plan_patch_multi([116.0, 39.0], [117.0, 40.0], &[obs1.to_vec(), obs2.to_vec()], &[], 5_000.0, 3000.0, None);
+        match out {
+            PatchOutcome::Path(p, d) => {
+                assert!(p.len() >= 3, "should detour two obstacles: {p:?}");
+                let straight = crate::path::haversine_m(116.0, 39.0, 117.0, 40.0) / 1000.0;
+                assert!(d > straight, "detour longer than straight: {d} vs {straight}");
+            }
+            other => panic!("expected path, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn plan_patch_multi_restricted_chord_check() {
+        use crate::config::{Zone, ZoneShape, ZoneType};
+        // 限飞区（多边形）覆盖直线路径；高度 3000 在禁行带 [2000, 4000] 内 → 边被拒；
+        // 高度 1000（禁行带外底部）→ 直穿合法。
+        let z = Zone {
+            id: "rz".into(),
+            zone_type: ZoneType::Restricted,
+            shape: ZoneShape::Polygon { vertices: vec![[116.30, 39.30], [116.70, 39.30], [116.70, 39.70], [116.30, 39.70]] },
+            alt_min_m: 2000.0,
+            alt_max_m: 4000.0,
+            height_semantics: Default::default(),
+        };
+        let restricted = vec![z];
+        // 带内 → 直线被拒（restricted 覆盖直线）→ 无路径（单障碍 none → 直线但受限拒）
+        let out_blocked = plan_patch_multi(
+            [116.0, 39.0],
+            [117.0, 40.0],
+            &[],
+            &[&restricted[0]],
+            5_000.0,
+            3000.0,
+            None,
+        );
+        match out_blocked {
+            PatchOutcome::GeometricImpossible => {}
+            other => panic!("expected blocked (in band), got {other:?}"),
+        }
+        // 带外底部 → 直穿合法
+        let out_pass = plan_patch_multi(
+            [116.0, 39.0],
+            [117.0, 40.0],
+            &[],
+            &[&restricted[0]],
+            5_000.0,
+            1000.0,
+            None,
+        );
+        match out_pass {
+            PatchOutcome::Path(p, _) => assert_eq!(p.len(), 2, "straight pass under band: {p:?}"),
+            other => panic!("expected pass (under band), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stitch_joins_skeleton_and_patch() {
+        let skel = [[116.0, 39.0], [116.4, 39.4], [116.8, 39.8], [117.0, 40.0]];
+        let patch = [[116.4, 39.4], [116.55, 39.7], [116.8, 39.8]];
+        let out = stitch(&skel, &patch, [116.4, 39.4], [116.8, 39.8]);
+        assert_eq!(out[0], skel[0]);
+        assert_eq!(*out.last().unwrap(), skel[3]);
+        // 拼接后经过 patch 中点（绕行点）
+        assert!(out.contains(&[116.55, 39.7]));
+        // 无重复接缝点（相邻点不相等）
+        for w in out.windows(2) {
+            assert!(w[0] != w[1], "duplicate seam point: {:?}", w);
+        }
+    }
+
+    #[test]
+    fn boundary_anchors_none_when_skeleton_fully_in_out() {
+        let rect = PatchRect::from_center([116.5, 39.5], PATCH_R_DEG);
+        // 骨架全程在矩形内 → 无进入/离开锚点
+        let inside = [[116.5, 39.4], [116.5, 39.5], [116.5, 39.6]];
+        let (ein, eout) = boundary_anchors(&inside, &rect);
+        assert!(ein.is_none() && eout.is_none(), "fully inside -> no anchors: {ein:?} {eout:?}");
+        // 骨架全程在矩形外 → 无锚点
+        let outside = [[116.0, 39.0], [116.0, 39.1], [116.0, 39.2]];
+        let (ein, eout) = boundary_anchors(&outside, &rect);
+        assert!(ein.is_none() && eout.is_none(), "fully outside -> no anchors: {ein:?} {eout:?}");
+    }
+
+    #[test]
+    fn plan_patch_multi_anchor_in_obstacle_impossible() {
+        // start/target 被障碍吞入（膨胀后）→ 无机动空间 → 几何无解
+        let obs = [[116.30, 39.30], [116.70, 39.30], [116.70, 39.70], [116.30, 39.70]];
+        let out = plan_patch_multi([116.5, 39.5], [117.0, 40.0], &[obs.to_vec()], &[], 10_000.0, 3000.0, None);
+        assert!(
+            matches!(out, PatchOutcome::GeometricImpossible),
+            "anchor swallowed by obstacle -> impossible: {out:?}"
+        );
+    }
+
+    #[test]
+    fn stitch_exact_skeleton_no_duplicate() {
+        // patch 与骨架完全重合（无绕行）→ 拼接后与骨架一致且无重复点
+        let skel = [[116.0, 39.0], [116.5, 39.5], [117.0, 40.0]];
+        let patch = skel.to_vec();
+        let out = stitch(&skel, &patch, skel[0], skel[2]);
+        assert_eq!(out, skel, "coincident patch -> skeleton unchanged: {out:?}");
+    }
+
+    #[test]
+    fn patch_retry_budget_fixed_steps() {
+        // C7：重试上限 + 固定扩张步长（确定性，不写死绝对耗时）
+        assert_eq!(PATCH_RETRY_MAX, 2);
+        assert_eq!(PATCH_RETRY_EXPAND, 1.5);
+        let mut rect = PatchRect::from_center([116.5, 39.5], PATCH_R_DEG);
+        let h0 = rect.half_deg;
+        for _ in 0..PATCH_RETRY_MAX {
+            rect.half_deg *= PATCH_RETRY_EXPAND;
+        }
+        assert!((rect.half_deg - h0 * 1.5f64.powi(PATCH_RETRY_MAX as i32)).abs() < 1e-12);
+        assert!(rect.half_deg > h0, "retry expands patch deterministically");
+    }
+
+    #[test]
+    fn multi_patch_stitch_two_clusters() {
+        // 多 patch 串接（§11.2）：两簇独立 patch 依次拼入骨架，首尾锚点保留
+        let skel = [[116.0, 38.0], [116.5, 38.5], [116.5, 39.0], [116.5, 39.5], [117.0, 40.0]];
+        let rect1 = PatchRect::from_center([116.5, 38.5], PATCH_R_DEG);
+        let rect2 = PatchRect::from_center([116.5, 39.5], PATCH_R_DEG);
+        let (ein1, eout1) = boundary_anchors(&skel, &rect1);
+        let (ein2, eout2) = boundary_anchors(&skel, &rect2);
+        assert!(ein1.is_some() && eout1.is_some() && ein2.is_some() && eout2.is_some());
+        // patch1 绕第一个簇（右侧绕行），patch2 绕第二个簇（左侧绕行）
+        let patch1 = vec![ein1.unwrap(), [116.9, 38.7], eout1.unwrap()];
+        let mid1 = stitch(&skel, &patch1, ein1.unwrap(), eout1.unwrap());
+        let patch2 = vec![ein2.unwrap(), [116.1, 39.7], eout2.unwrap()];
+        let mid2 = stitch(&mid1, &patch2, ein2.unwrap(), eout2.unwrap());
+        // 串接后：起点保留、两个绕行点都在、终点保留
+        assert_eq!(mid2[0], skel[0]);
+        assert_eq!(*mid2.last().unwrap(), skel[4]);
+        assert!(mid2.contains(&[116.9, 38.7]));
+        assert!(mid2.contains(&[116.1, 39.7]));
+        // 无重复接缝点
+        for w in mid2.windows(2) {
+            assert!(w[0] != w[1], "duplicate seam: {:?}", w);
+        }
+    }
+
+    #[test]
+    fn radar_edge_weight_detours_high_cost() {
+        use crate::config::{Radar, RadarType};
+        use crate::threat::{SphericalRadarThreat, ThreatParams};
+        let radar = Radar {
+            id: "r".into(),
+            lon: 116.5,
+            lat: 39.5,
+            radar_type: RadarType::Tracking,
+            radius_km: 40.0,
+            alt_m: 10.0,
+            suppression_post_range_km: None,
+            suppression_factor: None,
+        };
+        let params = ThreatParams::default();
+        let threat = SphericalRadarThreat::new(std::slice::from_ref(&radar), params);
+        // 穿雷达中心线段（中点距雷达 0）→ 代价显著高于远离线
+        let w_center = edge_weight([116.0, 39.5], [117.0, 39.5], Some((&threat, 200.0)), 3000.0);
+        let w_far = edge_weight([116.0, 38.0], [117.0, 38.0], Some((&threat, 200.0)), 3000.0);
+        assert!(w_center > w_far, "center pass should cost more: {w_center} vs {w_far}");
+        // 无雷达 → 纯几何
+        let w_plain = edge_weight([116.0, 39.5], [117.0, 39.5], None, 3000.0);
+        assert_eq!(w_plain.to_bits(), (crate::path::haversine_m(116.0, 39.5, 117.0, 39.5) / 1000.0).to_bits());
+    }
+}
+
+// ==================== P2：patch 矩形 + 多簇 + 锚点 + 拼接（docs/12 §3.2/3.3/3.5） ====================
+
+/// C7：接缝重试硬上限（次）——不写死绝对耗时（大输入误报 degraded_timeout），
+/// 预算 = 重试次数上限 × 固定扩张步长（契约 2 终止性 + 确定性）。
+pub const PATCH_RETRY_MAX: usize = 2;
+/// 接缝重试固定扩张步长：每次 patch 半径 × 1.5。
+pub const PATCH_RETRY_EXPAND: f64 = 1.5;
+
+/// patch 矩形（§3.2：以触发点为中心的矩形走廊段，尺寸 PATCH_R=30km）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PatchRect {
+    pub c: [f64; 2],
+    pub half_deg: f64,
+}
+
+impl PatchRect {
+    pub fn from_center(c: [f64; 2], r_deg: f64) -> Self {
+        PatchRect { c, half_deg: r_deg }
+    }
+    pub fn contains(&self, p: [f64; 2]) -> bool {
+        (p[0] - self.c[0]).abs() <= self.half_deg && (p[1] - self.c[1]).abs() <= self.half_deg
+    }
+}
+
+/// 多簇聚类：verify 硬闸失败点按 `patch_r_deg` 合并（§3.2：距离 < PATCH_R 合并）。
+///
+/// 确定性（§3.2/§7）：先按坐标字典序（`total_cmp`）排序，再贪心合并——簇心取
+/// 字典序首点，合并顺序与平局全部显式固定。
+pub fn cluster_failures(issues: &[String], patch_r_deg: f64) -> Vec<[f64; 2]> {
+    let mut pts: Vec<[f64; 2]> = Vec::new();
+    for s in issues {
+        if let Some((lon, lat)) = extract_issue_coord(s) {
+            pts.push([lon, lat]);
+        }
+    }
+    if pts.is_empty() {
+        return Vec::new();
+    }
+    pts.sort_by(|a, b| a[0].total_cmp(&b[0]).then_with(|| a[1].total_cmp(&b[1])));
+    let mut clusters: Vec<[f64; 2]> = Vec::new();
+    for p in pts {
+        let d_min = clusters
+            .iter()
+            .map(|c| crate::path::haversine_m(c[0], c[1], p[0], p[1]) / 1000.0)
+            .fold(f64::INFINITY, f64::min);
+        if d_min <= patch_r_deg * 111.32 + 1.0 {
+            // 并入已有簇（簇心保持字典序首点——确定性）
+        } else {
+            clusters.push(p);
+        }
+    }
+    clusters
+}
+
+/// 线段与矩形边界交点（参数 t ∈ [0,1] 排序）；矩形用 4 条边半平面表示。
+fn seg_rect_crossings(a: [f64; 2], b: [f64; 2], rect: &PatchRect) -> Vec<(f64, [f64; 2])> {
+    let mut out = Vec::new();
+    let corners = [
+        [rect.c[0] - rect.half_deg, rect.c[1] - rect.half_deg],
+        [rect.c[0] + rect.half_deg, rect.c[1] - rect.half_deg],
+        [rect.c[0] + rect.half_deg, rect.c[1] + rect.half_deg],
+        [rect.c[0] - rect.half_deg, rect.c[1] + rect.half_deg],
+    ];
+    let edges = [
+        (corners[0], corners[1]),
+        (corners[1], corners[2]),
+        (corners[2], corners[3]),
+        (corners[3], corners[0]),
+    ];
+    for (p1, p2) in edges {
+        // 两线段求交（参数法）
+        let d1 = [b[0] - a[0], b[1] - a[1]];
+        let d2 = [p2[0] - p1[0], p2[1] - p1[1]];
+        let denom = d1[0] * d2[1] - d1[1] * d2[0];
+        if denom.abs() < 1e-15 {
+            continue; // 平行/共线（沿矩形边行走由 seg_intersects_convex 兜底）
+        }
+        let t1 = ((p1[0] - a[0]) * d2[1] - (p1[1] - a[1]) * d2[0]) / denom;
+        let t2 = ((p1[0] - a[0]) * d1[1] - (p1[1] - a[1]) * d1[0]) / denom;
+        if (0.0..=1.0).contains(&t1) && (0.0..=1.0).contains(&t2) {
+            out.push((t1, [a[0] + t1 * d1[0], a[1] + t1 * d1[1]]));
+        }
+    }
+    out.sort_by(|x, y| x.0.total_cmp(&y.0));
+    out
+}
+
+/// 边界锚点（§3.2/§7）：骨架与 patch 矩形边界的交点——进入锚点（外→内首个）与
+/// 离开锚点（内→外最后一个）。平局按骨架点索引序（遍历序即索引序，显式确定）。
+pub fn boundary_anchors(skeleton: &[[f64; 2]], rect: &PatchRect) -> (Option<[f64; 2]>, Option<[f64; 2]>) {
+    let mut in_anchor: Option<[f64; 2]> = None;
+    let mut out_anchor: Option<[f64; 2]> = None;
+    for w in skeleton.windows(2) {
+        let a = w[0];
+        let b = w[1];
+        let a_in = rect.contains(a);
+        let b_in = rect.contains(b);
+        if !a_in && b_in {
+            // 进入：取段与边界最小 t 交点
+            let cr = seg_rect_crossings(a, b, rect);
+            if let Some((_, p)) = cr.first() {
+                if in_anchor.is_none() {
+                    in_anchor = Some(*p);
+                }
+            }
+        } else if a_in && !b_in {
+            // 离开：取最大 t 交点（最后离开）
+            let cr = seg_rect_crossings(a, b, rect);
+            if let Some((_, p)) = cr.last() {
+                out_anchor = Some(*p);
+            }
+        }
+    }
+    (in_anchor, out_anchor)
+}
+
+/// P2 多障碍可见图规划（docs/12 §3.3）：
+/// - 顶点 = start/target 锚点 + 各硬墙凸化（C1）后矢量膨胀（C4）顶点；
+/// - 边合法性：不穿任何凸化障碍（C5 epsilon 保守）+ 限飞区弦判据（高度判定 +
+///   净距，restricted 不凸化）+ 雷达同源代价不进合法性（只进边权）；
+/// - 边权（P2 口径，§3.3/§12.2）：几何长度 × (1 + radar_cost_coef × (p + geom))，
+///   与 FMM 同源（×/同款 static_penetration），避免接缝处两套口径冲突。
+///
+/// `radar` = Some((threat, radar_cost_coef)) 时启用雷达同源边权；None → 纯几何（P1）。
+pub fn plan_patch_multi(
+    start: [f64; 2],
+    target: [f64; 2],
+    obstacles: &[Vec<[f64; 2]>],
+    restricted: &[&crate::config::Zone],
+    inflation_m: f64,
+    alt_m: f64,
+    radar: Option<(&crate::threat::SphericalRadarThreat, f64)>,
+) -> PatchOutcome {
+    // 各障碍凸化 + 膨胀
+    let mut hulls: Vec<Vec<[f64; 2]>> = Vec::new();
+    let mut inflated: Vec<Vec<[f64; 2]>> = Vec::new();
+    for obs in obstacles {
+        let hull = convex_hull(obs);
+        if hull.len() < 3 {
+            continue; // 退化（共线/单点）不构成障碍
+        }
+        let inf = inflate_convex(&hull, inflation_m / 111_320.0);
+        if inf.len() < 3 {
+            continue;
+        }
+        hulls.push(hull);
+        inflated.push(inf);
+    }
+
+    // 无有效障碍 → 直线（仍过限飞区弦判据与雷达代价）
+    if inflated.is_empty() {
+        if restricted_edge_ok(restricted, alt_m, start, target).is_err() {
+            return PatchOutcome::GeometricImpossible;
+        }
+        let w = edge_weight(start, target, radar, alt_m);
+        return PatchOutcome::Path(vec![start, target], w);
+    }
+
+    // 节点：0=start，1=target，之后各障碍凸顶点（按障碍序 + 顶点序，确定性）
+    let mut nodes: Vec<[f64; 2]> = Vec::new();
+    nodes.push(start);
+    nodes.push(target);
+    for inf in &inflated {
+        nodes.extend(inf.iter().copied());
+    }
+    let n_nodes = nodes.len();
+    if n_nodes > MAX_VIS_VERTICES {
+        return PatchOutcome::SearchTruncated;
+    }
+
+    // 起点/终点被任一膨胀障碍吞入 → 无机动空间，几何无解
+    for inf in &inflated {
+        if point_in_convex(start, inf, GEOM_EPS_DEG) || point_in_convex(target, inf, GEOM_EPS_DEG) {
+            return PatchOutcome::GeometricImpossible;
+        }
+    }
+
+    // 邻接表：边不穿任何障碍 + 不违限飞区弦判据
+    let mut adj: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n_nodes];
+    for i in 0..n_nodes {
+        for j in (i + 1)..n_nodes {
+            let pi = nodes[i];
+            let pj = nodes[j];
+            let mut legal = true;
+            for inf in &inflated {
+                if seg_intersects_convex(pi, pj, inf, GEOM_EPS_DEG) {
+                    legal = false;
+                    break;
+                }
+            }
+            if !legal {
+                continue;
+            }
+            // 限飞区弦判据（§3.3：不凸化；高度判定 + 直线穿行带净距）
+            if restricted_edge_ok(restricted, alt_m, pi, pj).is_err() {
+                continue;
+            }
+            let w = edge_weight(pi, pj, radar, alt_m);
+            adj[i].push((j, w));
+            adj[j].push((i, w));
+        }
+    }
+
+    dijkstra_path(n_nodes, &adj, &nodes)
+}
+
+/// P2 边权：几何长度 × 雷达同源代价——与 FMM 完全同款（solver.rs:454-465 口径）：
+/// 只在探测概率 p > 0 时应用 ×(1 + coef×(p + geom))；geom = 深穿惩罚（u<1 时 1-u）。
+fn edge_weight(
+    a: [f64; 2],
+    b: [f64; 2],
+    radar: Option<(&crate::threat::SphericalRadarThreat, f64)>,
+    alt_m: f64,
+) -> f64 {
+    let base = crate::path::haversine_m(a[0], a[1], b[0], b[1]) / 1000.0;
+    if let Some((threat, coef)) = radar {
+        // 中点采样（与 FMM 格点采样同口径；P2 段长 ≤ 60km 采样密度足够）
+        let mid = [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0];
+        let p = threat.static_union_probability(mid[0], mid[1]);
+        if p > 0.0 {
+            let u = threat.static_penetration(mid[0], mid[1], alt_m);
+            let geom = if u < 1.0 { 1.0 - u } else { 0.0 };
+            base * (1.0 + coef * (p + geom))
+        } else {
+            base
+        }
+    } else {
+        base
+    }
+}
+
+/// 限飞区弦判据边检查（docs/12 §3.3）：restricted 不进入可见图，作为段合法性检查。
+///
+/// - 高度在禁行区间外（底部穿行/顶部绕飞语义，契约 7/8）→ 直穿合法；
+/// - 高度在禁行区间内 → 段净距 ≤ 0（穿入/贴边）→ 拒绝。
+fn restricted_edge_ok(
+    restricted: &[&crate::config::Zone],
+    alt_m: f64,
+    a: [f64; 2],
+    b: [f64; 2],
+) -> Result<(), ()> {
+    for z in restricted {
+        if !crate::solver::restricted_blocks_alt(z, alt_m) {
+            continue; // 高度在禁行带外 → 直穿合法
+        }
+        let cl = crate::config::zone_segment_clearance_km(a[0], a[1], b[0], b[1], z);
+        if cl <= 0.0 {
+            return Err(());
+        }
+    }
+    Ok(())
+}
+
+/// Dijkstra 最短路径（确定性：total_cmp + 整数索引 tie-break）。
+fn dijkstra_path(n_nodes: usize, adj: &[Vec<(usize, f64)>], nodes: &[[f64; 2]]) -> PatchOutcome {
+    let mut dist = vec![f64::INFINITY; n_nodes];
+    let mut prev = vec![usize::MAX; n_nodes];
+    let mut heap = BinaryHeap::new();
+    dist[0] = 0.0;
+    heap.push(State { cost: 0.0, id: 0 });
+    while let Some(State { cost, id }) = heap.pop() {
+        if cost > dist[id] {
+            continue;
+        }
+        if id == 1 {
+            break;
+        }
+        for &(nid, w) in &adj[id] {
+            let nc = cost + w;
+            if nc < dist[nid] {
+                dist[nid] = nc;
+                prev[nid] = id;
+                heap.push(State { cost: nc, id: nid });
+            }
+        }
+    }
+    if !dist[1].is_finite() {
+        return PatchOutcome::GeometricImpossible;
+    }
+    let mut path = Vec::new();
+    let mut cur = 1;
+    while cur != usize::MAX {
+        path.push(nodes[cur]);
+        if cur == 0 {
+            break;
+        }
+        cur = prev[cur];
+    }
+    path.reverse();
+    PatchOutcome::Path(path, dist[1])
+}
+
+/// 拼接（§3.5）：patch 路径在边界锚点处并入走廊骨架。
+///
+/// 骨架在进入锚点之前的点 + patch 路径 + 离开锚点之后的点；接缝重复点去重
+/// （patch 首尾 = 锚点）。`in_anchor`/`out_anchor` 必须位于 patch 路径首尾。
+pub fn stitch(
+    skeleton: &[[f64; 2]],
+    patch: &[[f64; 2]],
+    in_anchor: [f64; 2],
+    out_anchor: [f64; 2],
+) -> Vec<[f64; 2]> {
+    let dist2 = |p: [f64; 2], q: [f64; 2]| (p[0] - q[0]).powi(2) + (p[1] - q[1]).powi(2);
+    let i_idx = skeleton
+        .iter()
+        .enumerate()
+        .min_by(|(_, p), (_, q)| dist2(**p, in_anchor).total_cmp(&dist2(**q, in_anchor)))
+        .map(|(i, _)| i)
+        .unwrap_or(0);
+    let j_idx = skeleton
+        .iter()
+        .enumerate()
+        .min_by(|(_, p), (_, q)| dist2(**p, out_anchor).total_cmp(&dist2(**q, out_anchor)))
+        .map(|(i, _)| i)
+        .unwrap_or(skeleton.len().saturating_sub(1));
+    let mut out: Vec<[f64; 2]> = Vec::new();
+    if i_idx < skeleton.len() {
+        out.extend_from_slice(&skeleton[..=i_idx]);
+    }
+    // 去重接缝：patch 首点若与骨架尾点重合则跳过
+    let start_skip = patch.first().map_or(0, |p| {
+        if out.last().map_or(false, |q| q[0].to_bits() == p[0].to_bits() && q[1].to_bits() == p[1].to_bits()) {
+            1
+        } else {
+            0
+        }
+    });
+    out.extend_from_slice(&patch[start_skip..]);
+    let end_skip = patch.last().map_or(0, |p| {
+        if skeleton.get(j_idx).map_or(false, |q| q[0].to_bits() == p[0].to_bits() && q[1].to_bits() == p[1].to_bits()) {
+            1
+        } else {
+            0
+        }
+    });
+    if end_skip == 1 {
+        out.pop();
+    }
+    if j_idx < skeleton.len() {
+        out.extend_from_slice(&skeleton[j_idx..]);
+    }
+    out
 }

@@ -1181,10 +1181,12 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                         eprintln!("[smooth-dbg]   seg{si}: {} pts", seg.points.len());
                     }
                 }
-                // P1 可见图 patch 绕过（docs/12 §8/§13；feature-flag 默认关，C6）
-                // 触发：终检硬闸失败 → 单簇失败点 → 单多边形硬墙（NoFly/Obstacle）→
-                // 可见图最短路径 → verify 复验。成功交付 + degradations 标注；失败
-                // 按 C3 归因分层标注（截断 ≠ 几何无解，C2），归原 raw 回退流程。
+                // P2 可见图 patch 绕过（docs/12 §8/§13；feature-flag 默认关，C6）
+                // 触发：终检硬闸失败 → 失败点多簇（PATCH_R=30km 合并，字典序 tie-break）
+                // → 每簇 patch 矩形 → 边界锚点（骨架首个可通交点，§7）→ 可见图
+                // （多障碍 + 限飞区弦判据接线 + 雷达同源边权）→ 拼接回骨架 →
+                // 接缝复验（C7 扩张重试硬上限 + 固定步长）。成功交付 + degradations
+                // 标注；失败按 C3 归因分层（截断 ≠ 几何无解，C2），归原 raw 回退。
                 if crate::patch::patch_enabled()
                     && crate::patch::patch_applicable(
                         &input
@@ -1198,94 +1200,148 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                         !v.mid_waypoints.is_empty(),
                     )
                 {
-                    let wall_polys: Vec<&Zone> = input
-                        .mission
-                        .no_fly_zones
-                        .iter()
-                        .chain(input.mission.obstacles.iter())
-                        .filter(|z| z.is_wall() && matches!(z.shape, ZoneShape::Polygon { .. }))
-                        .collect();
-                    if let (Some(fail_pt), Some(a), Some(b)) = (
-                        crate::patch::locate_single_cluster(&final_rep.issues, crate::patch::PATCH_R_DEG),
-                        joined.points.first(),
-                        joined.points.last(),
-                    ) {
-                        if wall_polys.len() == 1 {
-                            let ZoneShape::Polygon { vertices } = &wall_polys[0].shape else {
-                                unreachable!()
-                            };
-                            let cx = vertices.iter().map(|v| v[0]).sum::<f64>() / vertices.len() as f64;
-                            let cy = vertices.iter().map(|v| v[1]).sum::<f64>() / vertices.len() as f64;
-                            let obs_span = vertices
-                                .iter()
-                                .map(|v| crate::path::haversine_m(cx, cy, v[0], v[1]) / 1000.0)
-                                .fold(0.0_f64, f64::max);
-                            let d_fail = crate::path::haversine_m(fail_pt[0], fail_pt[1], cx, cy) / 1000.0;
-                            let inflation_m = (opts.turn_radius_m * 0.5).clamp(2_000.0, 10_000.0);
-                            if d_fail <= crate::patch::PATCH_R_DEG * 111.32 + obs_span {
-                                match crate::patch::plan_patch(
-                                    [a.lon, a.lat],
-                                    [b.lon, b.lat],
-                                    vertices,
-                                    inflation_m,
-                                ) {
-                                    crate::patch::PatchOutcome::Path(patch_pts, _len_km) => {
-                                        let patch_path = crate::path::Path::new(
-                                            patch_pts
-                                                .iter()
-                                                .map(|[lon, lat]| crate::path::PathPoint::new(*lon, *lat, alt_eff))
-                                                .collect(),
-                                        );
-                                        let rep_p = crate::smooth::verify_path(
-                                            &patch_path,
-                                            None,
-                                            &opts,
-                                            &ctx,
-                                            Some(phys_min_radius_m),
-                                        );
-                                        if rep_p.ok {
-                                            pts = patch_path.points;
-                                            degradations.push(
-                                                "patch: visibility-graph bypass adopted (docs/12 §3.3)".into(),
-                                            );
-                                            warnings.extend(rep_p.warnings.iter().cloned());
-                                            warnings.extend(seg_warnings.iter().cloned());
-                                            break 'fmm_attempt;
-                                        }
-                                        // C3 归因：verify 硬闸失败 → 归因分层（拟合缺陷 vs 几何无解）
-                                        let hull = crate::patch::convex_hull(vertices);
-                                        let inflated =
-                                            crate::patch::inflate_convex(&hull, inflation_m / 111_320.0);
-                                        match crate::patch::classify_verify_failure(
-                                            &patch_pts,
-                                            &rep_p.issues,
-                                            &inflated,
-                                            2.0 * inflation_m / 111_320.0,
-                                        ) {
-                                            crate::patch::PatchFailureClass::FittingDefect => {
-                                                degradations.push(
-                                                    "patch: fitting_defect (turn margin, docs/12 §13.1 C3)"
-                                                        .into(),
-                                                )
-                                            }
-                                            crate::patch::PatchFailureClass::GeometricImpossible => {
-                                                degradations.push(
-                                                    "patch: geometrically_impossible (docs/12 §13.1 C3)"
-                                                        .into(),
-                                                )
-                                            }
-                                        }
-                                    }
-                                    crate::patch::PatchOutcome::SearchTruncated => {
-                                        // C2：截断 ≠ 几何无解；标注降级，归原 raw 回退
-                                        degradations.push(
-                                            "patch: search_truncated (visible-graph cap, docs/12 §13.1 C2)"
-                                                .into(),
-                                        );
-                                    }
-                                    crate::patch::PatchOutcome::GeometricImpossible => {}
-                                }
+                    let skeleton: Vec<[f64; 2]> =
+                        raw_joined.points.iter().map(|p| [p.lon, p.lat]).collect();
+                    let clusters =
+                        crate::patch::cluster_failures(&final_rep.issues, crate::patch::PATCH_R_DEG);
+                    if !clusters.is_empty() && skeleton.len() >= 2 {
+                        let wall_polys: Vec<&Zone> = input
+                            .mission
+                            .no_fly_zones
+                            .iter()
+                            .chain(input.mission.obstacles.iter())
+                            .filter(|z| z.is_wall() && matches!(z.shape, ZoneShape::Polygon { .. }))
+                            .collect();
+                        let restricted: Vec<&Zone> = input.mission.restricted_zones.iter().collect();
+                        let inflation_m = (opts.turn_radius_m * 0.5).clamp(2_000.0, 10_000.0);
+                        let radar_opt = if input.mission.red_forces.radars.is_empty() {
+                            None
+                        } else {
+                            Some((&threat, params_merged.radar_cost_coef))
+                        };
+                        let mut adopted: Option<Vec<crate::path::PathPoint>> = None;
+                        for c in &clusters {
+                            // 多 patch 串接默认模式（§11.2）：逐簇 patch，首个成功交付
+                            if adopted.is_some() {
+                                break;
                             }
+                            let mut rect =
+                                crate::patch::PatchRect::from_center(*c, crate::patch::PATCH_R_DEG);
+                            let mut retry = 0;
+                            loop {
+                                let (ein, eout) = crate::patch::boundary_anchors(&skeleton, &rect);
+                                if let (Some(a), Some(b)) = (ein, eout) {
+                                    let obstacles: Vec<Vec<[f64; 2]>> = wall_polys
+                                        .iter()
+                                        .filter_map(|z| match &z.shape {
+                                            ZoneShape::Polygon { vertices } => {
+                                                if vertices.iter().any(|v| rect.contains([v[0], v[1]])) {
+                                                    Some(vertices.clone())
+                                                } else {
+                                                    None
+                                                }
+                                            }
+                                            _ => None,
+                                        })
+                                        .collect();
+                                    if !obstacles.is_empty() || !restricted.is_empty() {
+                                        match crate::patch::plan_patch_multi(
+                                            a,
+                                            b,
+                                            &obstacles,
+                                            &restricted,
+                                            inflation_m,
+                                            alt_eff,
+                                            radar_opt,
+                                        ) {
+                                            crate::patch::PatchOutcome::Path(patch_pts, _len_km) => {
+                                                let joined_pts = crate::patch::stitch(
+                                                    &skeleton, &patch_pts, a, b,
+                                                );
+                                                let joined_path = crate::path::Path::new(
+                                                    joined_pts
+                                                        .iter()
+                                                        .map(|[lon, lat]| {
+                                                            crate::path::PathPoint::new(
+                                                                *lon, *lat, alt_eff,
+                                                            )
+                                                        })
+                                                        .collect(),
+                                                );
+                                                let rep_j = crate::smooth::verify_path(
+                                                    &joined_path,
+                                                    None,
+                                                    &opts,
+                                                    &ctx,
+                                                    Some(phys_min_radius_m),
+                                                );
+                                                if rep_j.ok {
+                                                    adopted = Some(joined_path.points);
+                                                    degradations.push(
+                                                        "patch: visibility-graph bypass adopted (docs/12 §3.3/§3.5)"
+                                                            .into(),
+                                                    );
+                                                    warnings.extend(rep_j.warnings.iter().cloned());
+                                                    break;
+                                                }
+                                                // 接缝违规 → C7：扩张 patch 重试（硬上限 + 固定步长）
+                                                if retry < crate::patch::PATCH_RETRY_MAX {
+                                                    rect.half_deg *= crate::patch::PATCH_RETRY_EXPAND;
+                                                    retry += 1;
+                                                    continue;
+                                                }
+                                                // C3 归因：verify 硬闸失败 → 拟合缺陷 vs 几何无解
+                                                let all_inflated: Vec<Vec<[f64; 2]>> = obstacles
+                                                    .iter()
+                                                    .map(|v| {
+                                                        let hull = crate::patch::convex_hull(v);
+                                                        crate::patch::inflate_convex(
+                                                            &hull,
+                                                            inflation_m / 111_320.0,
+                                                        )
+                                                    })
+                                                    .filter(|h| h.len() >= 3)
+                                                    .collect();
+                                                match crate::patch::classify_verify_failure(
+                                                    &patch_pts,
+                                                    &rep_j.issues,
+                                                    all_inflated
+                                                        .first()
+                                                        .map_or(&[], |h| h.as_slice()),
+                                                    2.0 * inflation_m / 111_320.0,
+                                                ) {
+                                                    crate::patch::PatchFailureClass::FittingDefect => {
+                                                        degradations.push(
+                                                            "patch: fitting_defect (turn margin, docs/12 §13.1 C3)"
+                                                                .into(),
+                                                        )
+                                                    }
+                                                    crate::patch::PatchFailureClass::GeometricImpossible => {
+                                                        degradations.push(
+                                                            "patch: geometrically_impossible (docs/12 §13.1 C3)"
+                                                                .into(),
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                            crate::patch::PatchOutcome::SearchTruncated => {
+                                                // C2：截断 ≠ 几何无解；标注降级，归原 raw 回退
+                                                degradations.push(
+                                                    "patch: search_truncated (visible-graph cap, docs/12 §13.1 C2)"
+                                                        .into(),
+                                                );
+                                            }
+                                            crate::patch::PatchOutcome::GeometricImpossible => {}
+                                        }
+                                    }
+                                }
+                                break;
+                            }
+                        }
+                        if let Some(p) = adopted {
+                            pts = p;
+                            warnings.extend(seg_warnings.iter().cloned());
+                            break 'fmm_attempt;
                         }
                     }
                 }
@@ -1898,7 +1954,8 @@ fn make_segment_check<'a>(
 
 /// Restricted 是否按该飞行高度视为禁行墙（底部可通行语义，主管 2026-08-06）：
 /// 飞行高度落在 restricted 高度区间内 → 该机 FMM 画墙绕行（否则直穿）。
-fn restricted_blocks_alt(z: &Zone, alt_m: f64) -> bool {
+/// pub(crate)：patch.rs 限飞区弦判据边检查复用（docs/12 §3.3）。
+pub(crate) fn restricted_blocks_alt(z: &Zone, alt_m: f64) -> bool {
     matches!(z.zone_type, crate::config::ZoneType::Restricted)
         && alt_m >= z.alt_min_m
         && alt_m <= z.alt_max_m
