@@ -2312,7 +2312,29 @@ fn make_segment_check<'a>(
                     }
                 }
             } else if clr <= 1e-9 {
-                // restricted 多边形：净距相交（段-边相交=0）→ 高度层采样
+                // restricted 多边形：解析求交成带（线段×各边交点参数）→ 带内加密采样。
+                // 旧 N=16 整段等距采样会漏掉长段上的短穿带（2026-08-12 主管 rz_poly2：
+                // 250km theta_star 拉直弦穿多边形北端 ~15km，16 等距点恰全落带外 →
+                // check 放行直穿弦 → verify 拒 → 全链 smooth 失败 → 无解）。
+                let ZoneShape::Polygon { vertices } = &z.shape else {
+                    continue; // 非圆非墙（理论不可达）
+                };
+                let bands = segment_polygon_bands_t(lon1, lat1, lon2, lat2, vertices);
+                for (t1, t2) in bands {
+                    for i in 0..=N {
+                        let t = t1 + (t2 - t1) * i as f64 / N as f64;
+                        let lon = lon1 + (lon2 - lon1) * t;
+                        let lat = lat1 + (lat2 - lat1) * t;
+                        let alt = alt1 + (alt2 - alt1) * t;
+                        if let Ok(g) = Geo::new(lon, lat) {
+                            if zone_contains_at(z, &g, alt, None) {
+                                return false;
+                            }
+                        }
+                    }
+                }
+                // 层 2：整段等距采样（与 verify 的 sample inside zone 完全同口径；
+                // 求交退化/共线兜底，双保险）
                 for i in 0..=N {
                     let t = i as f64 / N as f64;
                     let lon = lon1 + (lon2 - lon1) * t;
@@ -2349,6 +2371,71 @@ fn make_segment_check<'a>(
         }
         true
     }
+}
+
+/// 线段与多边形（经纬度平面，中纬等距缩放，同 zone_segment_clearance_km 口径）
+/// 各边求交 → 穿行参数区间列表（进/出成对）。端点在内 → 补 0/1。共线退化保守
+/// 并入边端点投影参数。2026-08-12 主管 rz_poly2：make_segment_check 多边形分支
+/// 用此函数替代 N=16 整段等距采样（长段短穿带漏检）。
+fn segment_polygon_bands_t(
+    lon1: f64,
+    lat1: f64,
+    lon2: f64,
+    lat2: f64,
+    vertices: &[[f64; 2]],
+) -> Vec<(f64, f64)> {
+    if vertices.len() < 3 {
+        return Vec::new();
+    }
+    let mlat = ((lat1 + lat2) / 2.0).to_radians();
+    let kx = 111.320 * mlat.cos();
+    let ky = 111.0;
+    let (ax, ay) = (lon1 * kx, lat1 * ky);
+    let (bx, by) = (lon2 * kx, lat2 * ky);
+    let (dx1, dy1) = (bx - ax, by - ay);
+    let len2 = dx1 * dx1 + dy1 * dy1;
+    if len2 < 1e-12 {
+        return Vec::new();
+    }
+    let mut ts: Vec<f64> = Vec::new();
+    let mut j = vertices.len() - 1;
+    for i in 0..vertices.len() {
+        let (cx, cy) = (vertices[j][0] * kx, vertices[j][1] * ky);
+        let (dx2, dy2) = (vertices[i][0] * kx - cx, vertices[i][1] * ky - cy);
+        let denom = dx1 * dy2 - dy1 * dx2;
+        let (rx, ry) = (cx - ax, cy - ay);
+        if denom.abs() > 1e-9 {
+            let t = (rx * dy2 - ry * dx2) / denom;
+            let u = (rx * dy1 - ry * dx1) / denom;
+            if t >= -1e-9 && t <= 1.0 + 1e-9 && u >= -1e-9 && u <= 1.0 + 1e-9 {
+                ts.push(t.clamp(0.0, 1.0));
+            }
+        } else if (rx * dy1 - ry * dx1).abs() < 1e-6 {
+            // 平行且共线：边两端点投影到段上的参数并入（重合段保守采样）
+            let te0 = ((cx - ax) * dx1 + (cy - ay) * dy1) / len2;
+            let te1 = ((cx + dx2 - ax) * dx1 + (cy + dy2 - ay) * dy1) / len2;
+            ts.push(te0.clamp(0.0, 1.0));
+            ts.push(te1.clamp(0.0, 1.0));
+        }
+        j = i;
+    }
+    if crate::config::point_in_polygon_xy(lon1, lat1, vertices) {
+        ts.push(0.0);
+    }
+    if crate::config::point_in_polygon_xy(lon2, lat2, vertices) {
+        ts.push(1.0);
+    }
+    ts.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let mut bands: Vec<(f64, f64)> = Vec::new();
+    let mut k = 0;
+    while k + 1 < ts.len() {
+        let (t0, t1) = (ts[k], ts[k + 1]);
+        if t1 - t0 > 1e-9 {
+            bands.push((t0.max(0.0), t1.min(1.0)));
+        }
+        k += 2;
+    }
+    bands
 }
 
 /// Restricted 是否按该飞行高度视为禁行墙（底部可通行语义，主管 2026-08-06）：
@@ -3956,6 +4043,35 @@ mod tests {
         // 内部点 → 0
         let d2 = pt_polygon_boundary_km(5.0, 5.0, &tri);
         assert_eq!(d2, 0.0);
+    }
+
+    #[test]
+    fn segment_polygon_bands_t_catches_short_crossing() {
+        // 主管 rz_poly2（2026-08-12）：三角形 restricted [2000,6000]msl，
+        // theta_star 拉直弦 start→(115.812,41.505) 穿多边形北端 ~15km。
+        // 旧 N=16 整段等距采样恰好漏检（穿带 t∈[0.9385,0.9978]，16 等距点
+        // 0.9375 差 250m）→ 解析求交必须捕捉到。
+        let tri = [
+            [116.11516863940805, 41.612788219567264],
+            [114.56815739212651, 40.67458188596126],
+            [115.55464703710719, 40.954828232368016],
+        ];
+        let bands = segment_polygon_bands_t(117.5625, 38.9921, 115.812, 41.505, &tri);
+        assert!(!bands.is_empty(), "穿北端弦应有带，实际 {:?}", bands);
+        let (t1, t2) = bands[0];
+        assert!(t1 > 0.9 && t2 > t1, "穿带应在弦末段，实际 ({t1:.4},{t2:.4})");
+        // 北端外水平弦（lat 41.7 > 顶点 41.613）→ 无带
+        let outer = segment_polygon_bands_t(116.5, 41.7, 114.0, 41.7, &tri);
+        assert!(outer.is_empty(), "多边形上方水平弦应无带，实际 {:?}", outer);
+        // 端点在内 → 补 0/1 带（lat 41.0 内范围 [115.104,115.593]、lat 41.2 内 [115.434,115.764]）
+        let inside = segment_polygon_bands_t(115.3, 41.0, 115.6, 41.2, &tri);
+        assert!(!inside.is_empty(), "端点在内应有带，实际 {:?}", inside);
+        let (i1, i2) = inside[0];
+        assert!(i1 <= 1e-9, "起点在内应补 0，实际 {i1}");
+        assert!(i2 >= 1.0 - 1e-9, "终点在内应补 1，实际 {i2}");
+        // 不穿（远离多边形）→ 空
+        let far = segment_polygon_bands_t(117.5, 38.9, 118.5, 39.5, &tri);
+        assert!(far.is_empty(), "远离多边形应无带，实际 {:?}", far);
     }
 
     #[test]
