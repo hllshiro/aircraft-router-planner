@@ -154,9 +154,7 @@ export function ControlPanel({
         ],
         radius_km: 20,
       },
-      alt_min_m: 0,
-      alt_max_m: 12000,
-      height_semantics: 'msl',
+      // 禁飞区无高度范围（全高度禁入，2026-08-12）
     };
     updateMission({ no_fly_zones: [...mission.no_fly_zones, zone] });
   }, [mission]);
@@ -186,6 +184,7 @@ export function ControlPanel({
         ],
         radius_km: 20,
       },
+      // 限飞区需要高度区间（[alt_min, alt_max] 高度带禁入）
       alt_min_m: 0,
       alt_max_m: 12000,
       height_semantics: 'msl',
@@ -761,43 +760,7 @@ export function ControlPanel({
               </div>
             </>
           )}
-          <div className="field-row" style={{ marginTop: 4 }}>
-            <div>
-              <label>最低高 (m)</label>
-              <input
-                type="number"
-                value={z.alt_min_m}
-                onChange={(e) =>
-                  updateZone(z.id, { alt_min_m: +e.target.value })
-                }
-              />
-            </div>
-            <div>
-              <label>最高高 (m)</label>
-              <input
-                type="number"
-                value={z.alt_max_m}
-                onChange={(e) =>
-                  updateZone(z.id, { alt_max_m: +e.target.value })
-                }
-              />
-            </div>
-            <div>
-              <label>类型</label>
-              <select
-                value={z.zone_type}
-                onChange={(e) =>
-                  updateZone(z.id, {
-                    zone_type: e.target.value as Zone['zone_type'],
-                  })
-                }
-              >
-                <option value="no_fly">禁飞</option>
-                <option value="restricted">限飞</option>
-                <option value="obstacle">障碍</option>
-              </select>
-            </div>
-          </div>
+          {/* 禁飞区无高度范围、无类型选择（全高度禁入，2026-08-12） */}
         </div>
       ))}
       <button
@@ -938,9 +901,28 @@ export function ControlPanel({
                     </button>
                   </div>
                 ))}
-                <div style={{ color: '#88aacc', fontSize: 10, marginTop: 2 }}>
-                  顶点用经纬度表格编辑（至少 3 个形成多边形）
-                </div>
+                <button
+                  className={`btn-small ${editingZoneId === z.id && activeClickMode === 'polygon' ? 'active' : ''}`}
+                  style={{ marginTop: 4 }}
+                  onClick={() => {
+                    if (editingZoneId === z.id && activeClickMode === 'polygon') {
+                      onEditingZoneId(null);
+                      onSetClickMode(null);
+                    } else {
+                      onEditingZoneId(z.id);
+                      onSetClickMode('polygon');
+                    }
+                  }}
+                >
+                  {editingZoneId === z.id && activeClickMode === 'polygon'
+                    ? '✓ 完成拾取'
+                    : '🗺 在场景拾取顶点'}
+                </button>
+                {(g.vertices?.length ?? 0) < 3 && (
+                  <div style={{ color: '#ffaa44', fontSize: 10, marginTop: 2 }}>
+                    至少 3 个顶点（场景点击地面添加）
+                  </div>
+                )}
               </div>
             )}
             <div className="field-row" style={{ marginTop: 4 }}>
@@ -948,7 +930,7 @@ export function ControlPanel({
                 <label>最低高 (m)</label>
                 <input
                   type="number"
-                  value={z.alt_min_m}
+                  value={z.alt_min_m ?? 0}
                   onChange={(e) =>
                     updateRestrictedZone(z.id, { alt_min_m: +e.target.value })
                   }
@@ -958,7 +940,7 @@ export function ControlPanel({
                 <label>最高高 (m)</label>
                 <input
                   type="number"
-                  value={z.alt_max_m}
+                  value={z.alt_max_m ?? 0}
                   onChange={(e) =>
                     updateRestrictedZone(z.id, { alt_max_m: +e.target.value })
                   }

@@ -72,8 +72,9 @@ export interface Zone {
   zone_type: ZoneType;
   shape: 'circle' | 'polygon';
   geometry: ZoneGeometry;
-  alt_min_m: number;
-  alt_max_m: number;
+  /** 仅限飞区（restricted）需要高度区间；禁飞/障碍全高度禁入，省略（2026-08-12） */
+  alt_min_m?: number;
+  alt_max_m?: number;
   height_semantics?: 'msl' | 'agl';
 }
 

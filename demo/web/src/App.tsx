@@ -228,9 +228,28 @@ export default function App() {
           return { ...prev, mission: { ...prev.mission, vehicles } };
         });
       } else if (clickMode === 'polygon' && editingZoneId) {
-        // 向多边形禁飞区追加顶点
+        // 场景拾取追加多边形顶点（禁飞区或限飞区，2026-08-12 补限飞区支持）
         setConfig((prev) => {
-          const zones = prev.mission.no_fly_zones.map((z) => {
+          // 先查禁飞区数组（zone_ 前缀），未命中则查限飞区数组（rz_ 前缀）
+          const inNoFly = prev.mission.no_fly_zones.some(
+            (z) => z.id === editingZoneId,
+          );
+          if (inNoFly) {
+            const zones = prev.mission.no_fly_zones.map((z) => {
+              if (z.id !== editingZoneId || z.shape !== 'polygon') return z;
+              return {
+                ...z,
+                geometry: {
+                  vertices: [
+                    ...(z.geometry as { vertices: [number, number][] }).vertices,
+                    [wp.lon, wp.lat] as [number, number],
+                  ],
+                },
+              };
+            });
+            return { ...prev, mission: { ...prev.mission, no_fly_zones: zones } };
+          }
+          const rzones = prev.mission.restricted_zones.map((z) => {
             if (z.id !== editingZoneId || z.shape !== 'polygon') return z;
             return {
               ...z,
@@ -242,7 +261,10 @@ export default function App() {
               },
             };
           });
-          return { ...prev, mission: { ...prev.mission, no_fly_zones: zones } };
+          return {
+            ...prev,
+            mission: { ...prev.mission, restricted_zones: rzones },
+          };
         });
       }
     },

@@ -1782,8 +1782,8 @@ mod chain_tests {
                 center: [0.5, 0.0],
                 radius_km: 10.0,
             },
-            alt_min_m: 0.0,
-            alt_max_m: 1000.0,
+            alt_min_m: Some(0.0),
+            alt_max_m: Some(1000.0),
             height_semantics: crate::config::HeightSemantics::Msl,
         };
         let zones = [z];

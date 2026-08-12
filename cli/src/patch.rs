@@ -648,8 +648,8 @@ mod tests {
             id: "z".into(),
             zone_type: t,
             shape: s,
-            alt_min_m: 0.0,
-            alt_max_m: 10000.0,
+            alt_min_m: Some(0.0),
+            alt_max_m: Some(10000.0),
             height_semantics: Default::default(),
         };
         let poly_wall = mk(ZoneType::NoFly, ZoneShape::Polygon { vertices: vec![[116.0, 39.0], [117.0, 39.0], [117.0, 40.0]] });
@@ -746,8 +746,8 @@ mod tests {
             id: "rz".into(),
             zone_type: ZoneType::Restricted,
             shape: ZoneShape::Polygon { vertices: vec![[116.30, 39.30], [116.70, 39.30], [116.70, 39.70], [116.30, 39.70]] },
-            alt_min_m: 2000.0,
-            alt_max_m: 4000.0,
+            alt_min_m: Some(2000.0),
+            alt_max_m: Some(4000.0),
             height_semantics: Default::default(),
         };
         let restricted = vec![z];

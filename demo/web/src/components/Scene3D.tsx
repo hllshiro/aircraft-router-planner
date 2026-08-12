@@ -132,6 +132,9 @@ const ZONE_COLORS: Record<string, string> = {
   obstacle: '#ff4455',
 };
 
+/** 禁飞/障碍全高度禁入的可视高度上限（米，乘 zScale；2026-08-12 起无高度区间） */
+const WALL_VISUAL_TOP_M = 30000;
+
 /** 地形 z 夸张系数（与 TerrainMesh 共用，Scene3D 统一计算后传给所有含高度对象）：
  * 无地形数据 → 1（航路绝对高度显示）；有 → 场景跨度/高度范围 × 0.08，clamp [3, 20]。
  * 主管 2026-08-10：原 ×0.25 clamp [10,60] 过大不协调 → 降为 ×0.08 clamp [3,20]。 */
@@ -259,14 +262,18 @@ export function Scene3D({
     radiusM: r.radius_km * 1000,
   }));
 
-  const zoneMeshes = zones.map((z) => ({
-    id: z.id,
-    color: ZONE_COLORS[z.zone_type] ?? '#ff8800',
-    boundary: zoneBoundaryLocal(z, geoRef),
-    // zone 高度范围（相对海平面）乘同一 zScale，与地形/航路同尺度
-    altMin: z.alt_min_m * zScale,
-    altMax: z.alt_max_m * zScale,
-  }));
+  const zoneMeshes = zones.map((z) => {
+    // 禁飞/障碍全高度禁入：无高度范围 → 从地面拉到可视顶部；
+    // 限飞区用 [alt_min, alt_max]（缺省 0..12000 兜底）
+    const wall = z.zone_type === 'no_fly' || z.zone_type === 'obstacle';
+    return {
+      id: z.id,
+      color: ZONE_COLORS[z.zone_type] ?? '#ff8800',
+      boundary: zoneBoundaryLocal(z, geoRef),
+      altMin: wall ? 0 : (z.alt_min_m ?? 0) * zScale,
+      altMax: wall ? WALL_VISUAL_TOP_M * zScale : (z.alt_max_m ?? 12000) * zScale,
+    };
+  });
 
   // 多边形 zone 顶点（可视化编辑锚点）
   const polygonVerts = useMemo(
@@ -275,7 +282,7 @@ export function Scene3D({
         if (z.shape !== 'polygon') return [];
         return (z.geometry as { vertices: [number, number][] }).vertices.map(
           ([lon, lat]) => {
-            const p = geoPointToLocal(lon, lat, z.alt_min_m, geoRef, zScale);
+            const p = geoPointToLocal(lon, lat, z.alt_min_m ?? 0, geoRef, zScale);
             return { id: `${z.id}_${lon}_${lat}`, pos: p, color: z.zone_type };
           },
         );

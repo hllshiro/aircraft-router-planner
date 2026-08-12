@@ -2119,8 +2119,8 @@ fn make_segment_check<'a>(
 /// pub(crate)：patch.rs 限飞区弦判据边检查复用（docs/12 §3.3）。
 pub(crate) fn restricted_blocks_alt(z: &Zone, alt_m: f64) -> bool {
     matches!(z.zone_type, crate::config::ZoneType::Restricted)
-        && alt_m >= z.alt_min_m
-        && alt_m <= z.alt_max_m
+        && z.alt_min_m.is_some_and(|lo| alt_m >= lo)
+        && z.alt_max_m.is_some_and(|hi| alt_m <= hi)
 }
 
 /// 度制近似平面距离（km）。短距离（<100km）内精度足够（剖面可行性采样/锚点用）。
@@ -2199,8 +2199,12 @@ fn restricted_pass_alt(
     let ZoneShape::Circle { center, radius_km } = z.shape else {
         return None;
     };
-    let bottom = z.alt_min_m - 500.0;
-    let top = z.alt_max_m + 500.0;
+    // 限飞区高度区间必须存在（validate 已强制 Restricted 提供 [alt_min, alt_max]）；
+    // 缺失时按全高度处理（退化输入兜底，不 panic）。
+    let Some(min_alt) = z.alt_min_m else { return None };
+    let Some(max_alt) = z.alt_max_m else { return None };
+    let bottom = min_alt - 500.0;
+    let top = max_alt + 500.0;
     let climb_dist = |pass: f64| -> f64 {
         if max_climb_deg > 0.1 {
             (alt_m - pass).abs() / max_climb_deg.to_radians().tan() * 1.25
@@ -2218,7 +2222,7 @@ fn restricted_pass_alt(
     // 高度区间外；alt_min=0 时 bottom=-500 负高不可行——0m 仍在 [0,alt_max] 区间内且
     // 撞地形）+ 穿行带（直线穿圆段）地形 ≤ 底部 − 净空
     let bottom_ok = bottom >= 0.0
-        && bottom < z.alt_min_m
+        && bottom < min_alt
         && fit(bottom)
         && bottom_terrain_ok(z, terrain, bottom, start, target, raw_band);
     match (bottom_ok, top_ok) {
@@ -2398,7 +2402,9 @@ fn line_hits_restricted_band_km(
         // 端点本身在圆内带内（退化/零长度段覆盖）
         let in_band_at = |lon: f64, lat: f64, alt: f64| -> bool {
             match Geo::new(lon, lat) {
-                Ok(g) => crate::config::zone_contains(z, &g) && alt >= z.alt_min_m && alt <= z.alt_max_m,
+                Ok(g) => crate::config::zone_contains(z, &g)
+                    && z.alt_min_m.is_some_and(|lo| alt >= lo)
+                    && z.alt_max_m.is_some_and(|hi| alt <= hi),
                 Err(_) => false,
             }
         };
@@ -2413,7 +2419,8 @@ fn line_hits_restricted_band_km(
         for kk in 0..=8 {
             let tt = t1 + (t2 - t1) * kk as f64 / 8.0;
             let alt = alt1 + (alt2 - alt1) * tt;
-            if alt >= z.alt_min_m && alt <= z.alt_max_m {
+            if z.alt_min_m.is_some_and(|lo| alt >= lo) && z.alt_max_m.is_some_and(|hi| alt <= hi)
+            {
                 return true;
             }
         }
@@ -3085,8 +3092,8 @@ mod tests {
                 center: [116.14959340327005, 39.597263409766285],
                 radius_km: 20.0,
             },
-            alt_min_m: 2000.0,
-            alt_max_m: 5000.0,
+            alt_min_m: Some(2000.0),
+            alt_max_m: Some(5000.0),
             height_semantics: crate::config::HeightSemantics::Msl,
         };
         let start = Geo::new(116.82168446499925, 40.23810827713887).unwrap();
@@ -3129,8 +3136,8 @@ mod tests {
                 center: [116.14959340327005, 39.597263409766285],
                 radius_km: 20.0,
             },
-            alt_min_m: 2000.0,
-            alt_max_m: 5000.0,
+            alt_min_m: Some(2000.0),
+            alt_max_m: Some(5000.0),
             height_semantics: crate::config::HeightSemantics::Msl,
         };
         let start = Geo::new(116.82168446499925, 40.23810827713887).unwrap();
@@ -3175,8 +3182,8 @@ mod tests {
                 center: [115.1103270025858, 39.570299948815645],
                 radius_km: 20.0,
             },
-            alt_min_m: 0.0,
-            alt_max_m: 5000.0,
+            alt_min_m: Some(0.0),
+            alt_max_m: Some(5000.0),
             height_semantics: crate::config::HeightSemantics::Msl,
         };
         let start = Geo::new(116.82168446499925, 40.23810827713887).unwrap();
@@ -3198,8 +3205,8 @@ mod tests {
                 center: [116.14959340327005, 39.597263409766285],
                 radius_km: 20.0,
             },
-            alt_min_m: 2000.0,
-            alt_max_m: 5000.0,
+            alt_min_m: Some(2000.0),
+            alt_max_m: Some(5000.0),
             height_semantics: crate::config::HeightSemantics::Msl,
         };
         let start_geo = Geo::new(116.82168446499925, 40.23810827713887).unwrap();
@@ -3340,8 +3347,8 @@ mod tests {
                     [116.35, 40.2],
                 ],
             },
-            alt_min_m: 0.0,
-            alt_max_m: 12000.0,
+            alt_min_m: Some(0.0),
+            alt_max_m: Some(12000.0),
             height_semantics: HeightSemantics::Msl,
         };
         let zones = vec![z];
@@ -3378,8 +3385,8 @@ mod tests {
                 center: [116.27050736818683, 41.08978345198258],
                 radius_km: 50.0,
             },
-            alt_min_m: 0.0,
-            alt_max_m: 5000.0,
+            alt_min_m: Some(0.0),
+            alt_max_m: Some(5000.0),
             height_semantics: HeightSemantics::Msl,
         };
         let zones = vec![z];
@@ -3909,7 +3916,10 @@ mod tests {
                         w[0].y + (w[1].y - w[0].y) * u,
                     );
                     let d = dist_km(lon, lat, center[0], center[1]);
-                    if d <= radius_km && w[0].alt_m >= z.alt_min_m && w[0].alt_m <= z.alt_max_m {
+                    if d <= radius_km
+                        && z.alt_min_m.is_some_and(|lo| w[0].alt_m >= lo)
+                        && z.alt_max_m.is_some_and(|hi| w[0].alt_m <= hi)
+                    {
                         panic!(
                             "路径穿 restricted {} 带内 ({:.3},{:.3}) d={:.1}km alt={:.0}",
                             z.id, lon, lat, d, w[0].alt_m
@@ -3995,7 +4005,10 @@ mod tests {
                         w[0].y + (w[1].y - w[0].y) * u,
                     );
                     let d = dist_km(lon, lat, center[0], center[1]);
-                    if d <= radius_km && w[0].alt_m >= z.alt_min_m && w[0].alt_m <= z.alt_max_m {
+                    if d <= radius_km
+                        && z.alt_min_m.is_some_and(|lo| w[0].alt_m >= lo)
+                        && z.alt_max_m.is_some_and(|hi| w[0].alt_m <= hi)
+                    {
                         panic!(
                             "路径穿 restricted {} 带内 ({:.3},{:.3}) d={:.1}km alt={:.0}",
                             z.id, lon, lat, d, w[0].alt_m

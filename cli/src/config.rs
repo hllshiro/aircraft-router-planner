@@ -279,9 +279,14 @@ pub struct Zone {
     pub zone_type: ZoneType,
     #[serde(flatten)]
     pub shape: ZoneShape,
-    /// 高度区间（MSL；AGL 语义由 height_semantics 声明，解析层换算）
-    pub alt_min_m: f64,
-    pub alt_max_m: f64,
+    /// 高度区间下界（MSL；AGL 语义由 height_semantics 声明，解析层换算）。
+    /// 仅 Restricted（限飞区）使用——NoFly/Obstacle 全高度禁入，**不需要高度范围**，
+    /// 可省略（省略 = 全高度；2026-08-12 主管：禁飞区无高度范围）。
+    #[serde(default)]
+    pub alt_min_m: Option<f64>,
+    /// 高度区间上界（同 alt_min_m：仅 Restricted 使用，NoFly/Obstacle 可省略）。
+    #[serde(default)]
+    pub alt_max_m: Option<f64>,
     #[serde(default)]
     pub height_semantics: HeightSemantics,
 }
@@ -762,6 +767,34 @@ pub fn validate(input: &Input) -> Result<(), AppError> {
     }
     // 参数覆盖数值域：主管决策 2026-08-05（无外部参数或参数无效使用默认值）——
     // 不再 fail-fast，无效值由 DefaultParams::merge 回落默认，事实记入 stats.degradations。
+    // Zone 高度区间（2026-08-12 主管：禁飞区无高度范围）：限飞区必须有
+    // [alt_min, alt_max]（alt_min < alt_max，有限值）；禁飞/障碍全高度禁入，
+    // 不要求 alt（可省略）。
+    for z in input
+        .mission
+        .no_fly_zones
+        .iter()
+        .chain(&input.mission.restricted_zones)
+        .chain(&input.mission.obstacles)
+    {
+        validate_zone(z)?;
+    }
+    Ok(())
+}
+
+/// Zone 高度区间校验：Restricted 必须有 [alt_min, alt_max]（lo < hi，有限值）；
+/// NoFly/Obstacle 全高度禁入，不要求 alt（None = 全高度，2026-08-12）。
+fn validate_zone(z: &Zone) -> Result<(), AppError> {
+    if z.zone_type == ZoneType::Restricted {
+        match (z.alt_min_m, z.alt_max_m) {
+            (Some(lo), Some(hi)) => {
+                if !(lo.is_finite() && hi.is_finite() && lo < hi) {
+                    return Err(AppError::InputInvalid(InputInvalidReason::OutOfBounds));
+                }
+            }
+            _ => return Err(AppError::InputInvalid(InputInvalidReason::OutOfBounds)),
+        }
+    }
     Ok(())
 }
 
@@ -1048,17 +1081,20 @@ fn on_seg2(px: f64, py: f64, ax: f64, ay: f64, bx: f64, by: f64) -> bool {
 }
 
 /// 点是否在 Zone 内且高度落入禁入区间 [alt_min, alt_max]（Phase 4 M2 高度层）。
-/// - MSL：alt_m 直接比较区间；
-/// - AGL：地面高度 ground_m 提供时换算 MSL（alt_min+ground .. alt_max+ground）；
-///   ground 未知 → 保守视为在区间内（净空不确定，安全优先）。
+/// - NoFly/Obstacle（全高度禁入）或未提供高度区间 → 几何命中即禁入；
+/// - Restricted：MSL 直接比较区间；AGL 地面高度 ground_m 提供时换算 MSL
+///   （alt_min+ground .. alt_max+ground），ground 未知 → 保守视为在区间内
+///   （净空不确定，安全优先）。
 pub(crate) fn zone_contains_at(z: &Zone, p: &Geo, alt_m: f64, ground_m: Option<f64>) -> bool {
     if !zone_contains(z, p) {
         return false;
     }
+    let Some(min) = z.alt_min_m else { return true };
+    let Some(max) = z.alt_max_m else { return true };
     let (lo, hi) = match z.height_semantics {
-        HeightSemantics::Msl => (z.alt_min_m, z.alt_max_m),
+        HeightSemantics::Msl => (min, max),
         HeightSemantics::Agl => match ground_m {
-            Some(g) => (z.alt_min_m + g, z.alt_max_m + g),
+            Some(g) => (min + g, max + g),
             None => return true,
         },
     };
@@ -1103,8 +1139,8 @@ mod tests {
             shape: ZoneShape::Polygon {
                 vertices: vec![[116.0, 39.5], [116.5, 39.5], [116.5, 40.0], [116.0, 40.0]],
             },
-            alt_min_m: 0.0,
-            alt_max_m: 10000.0,
+            alt_min_m: Some(0.0),
+            alt_max_m: Some(10000.0),
             height_semantics: HeightSemantics::Msl,
         };
         let c = zone_segment_clearance_km(116.2, 39.6, 116.3, 39.9, &poly);
@@ -1118,8 +1154,8 @@ mod tests {
                 center: [116.25, 39.75],
                 radius_km: 10.0,
             },
-            alt_min_m: 0.0,
-            alt_max_m: 10000.0,
+            alt_min_m: Some(0.0),
+            alt_max_m: Some(10000.0),
             height_semantics: HeightSemantics::Msl,
         };
         let c = zone_segment_clearance_km(116.25, 39.70, 116.25, 39.80, &circ);
@@ -1249,6 +1285,46 @@ mod tests {
     }
 
     #[test]
+    fn no_fly_zone_without_alt_range_ok() {
+        // 2026-08-12 主管：禁飞区本身不允许进入、没有高度范围——NoFly 可省略
+        // alt_min/alt_max（全高度禁入），解析与校验都必须通过。
+        let s = r#"{
+            "schema_version":"0.20",
+            "mission":{
+                "start":{"lon":115.0,"lat":39.0,"alt_m":0},
+                "target":{"lon":117.0,"lat":40.0,"alt_m":0},
+                "no_fly_zones":[{"id":"nf1","zone_type":"no_fly",
+                    "shape":"circle","geometry":{"center":[116.5,39.9],"radius_km":10}}]
+            }
+        }"#;
+        let input = Input::from_json_str(s).unwrap();
+        assert!(input.mission.no_fly_zones[0].alt_min_m.is_none());
+        assert!(input.mission.no_fly_zones[0].alt_max_m.is_none());
+        if let Err(e) = validate(&input) {
+            panic!("expected ok (no_fly without alt), got {e:?}");
+        }
+    }
+
+    #[test]
+    fn restricted_zone_requires_alt_range() {
+        // 限飞区必须有 [alt_min, alt_max]；缺失 → out_of_bounds 拒绝。
+        let s = r#"{
+            "schema_version":"0.20",
+            "mission":{
+                "start":{"lon":115.0,"lat":39.0,"alt_m":0},
+                "target":{"lon":117.0,"lat":40.0,"alt_m":0},
+                "restricted_zones":[{"id":"rz1","zone_type":"restricted",
+                    "shape":"circle","geometry":{"center":[116.5,39.9],"radius_km":10}}]
+            }
+        }"#;
+        let input = Input::from_json_str(s).unwrap();
+        match validate(&input) {
+            Err(AppError::InputInvalid(InputInvalidReason::OutOfBounds)) => {}
+            other => panic!("expected out_of_bounds, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn vehicles_multi_input() {
         let s = r#"{
             "schema_version":"0.20",
@@ -1355,8 +1431,8 @@ mod tests {
                 center: [115.0, 39.0],
                 radius_km: 10.0,
             },
-            alt_min_m: 0.0,
-            alt_max_m: 2000.0,
+            alt_min_m: Some(0.0),
+            alt_max_m: Some(2000.0),
             height_semantics: HeightSemantics::Msl,
         };
         let p = Geo::new(115.0, 39.0).unwrap();
@@ -1377,8 +1453,8 @@ mod tests {
                 center: [115.0, 39.0],
                 radius_km: 10.0,
             },
-            alt_min_m: 0.0,
-            alt_max_m: 100.0,
+            alt_min_m: Some(0.0),
+            alt_max_m: Some(100.0),
             height_semantics: HeightSemantics::Agl,
         };
         let p = Geo::new(115.0, 39.0).unwrap();
