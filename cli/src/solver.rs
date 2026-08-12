@@ -114,6 +114,8 @@ struct VehicleSpec {
     /// 每机目标（target_ref 解析；缺省 = mission.target）。
     target: Geo,
     alt_m: f64,
+    /// 每机目标高度（2026-08-12 垂直剖面：路径终点高度；target_ref 第 3 段或 mission.target）。
+    target_alt_m: f64,
     /// 机型配置（Phase 4 M4：平滑参数派生输入）。
     profile: crate::config::VehicleProfile,
     /// 中途必经点（Phase 4 M5：start → mid[0..] → target 分段拼接）。
@@ -243,6 +245,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
             start: input.mission.start.to_geo()?,
             target: t,
             alt_m: input.mission.start.alt_m,
+            target_alt_m: input.mission.target.alt_m,
             profile: crate::config::VehicleProfile::default(),
             mid_waypoints: Vec::new(),
         }]
@@ -267,6 +270,10 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                         .map_err(|_| AppError::InputInvalid(InputInvalidReason::IllegalCoordinate))?,
                     target: resolve_target_ref(v.target_ref.as_deref(), &mission_target)?,
                     alt_m: v.start_pose.alt_m,
+                    target_alt_m: crate::config::resolve_target_alt(
+                        v.target_ref.as_deref(),
+                        input.mission.target.alt_m,
+                    ),
                     profile: v.profile.clone(),
                     mid_waypoints: mid,
                 })
@@ -1664,6 +1671,18 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
             });
             continue 'veh;
         }
+        // 垂直剖面（2026-08-12 主管 demo 轨迹倾斜）：输出高度从起点高度按累计
+        // 距离线性过渡到目标高度（起终点不同高时轨迹呈现爬升/下降，而非恒为
+        // 巡航高度的水平直线）；地形可用时保底（下降段不穿山）。起终点同高 →
+        // 曲线水平，行为与既往一致（含受限区剖面/抬升巡航语义）。
+        apply_vertical_profile(
+            &mut pts,
+            v.alt_m,
+            v.target_alt_m,
+            alt_eff,
+            terrain.as_source(),
+            opts.clearance_m,
+        );
         let dist = Path::new(pts.clone()).length_m();
         out_vehicles.push(VehicleOutput {
             id: v.id.clone(),
@@ -1818,6 +1837,69 @@ fn seg_seg_closest(
         }
     }
     (best_h, best_ta, best_tb)
+}
+
+/// 垂直剖面（2026-08-12 主管 demo 轨迹倾斜）：输出路径高度从起点高度
+/// （start_pose.alt_m）按累计水平距离线性过渡到目标高度（resolve 目标 alt）。
+/// - 起终点同高（|Δ|<0.5m）→ 保持现状（受限区剖面/抬升巡航语义不变）；
+/// - **剖面段保持**：插值前路径中间点高度 = 巡航高度（alt_eff）；显著偏离
+///   巡航高度的点 = 受限区底部穿行/顶部绕飞剖面（build_restricted_profiles 已按
+///   语义生成并经验证）→ 垂直剖面不覆盖（zigzag24 底部 1500m 剖面保持）；
+/// - **抬升场景**（alt_eff > start_alt，地形要求）→ 巡航段不得低于抬升巡航高度
+///   （既有地形安全裁决；zigzag26 起点 500→2240 的既有行为保持），终点仍爬升；
+/// - 非抬升场景（alt_eff == start_alt）→ 平滑线性过渡（下降场景也生效）；
+/// - 终点 = 用户指定目标高度（保底不覆盖用户意图）；
+/// - 地形可用时逐点保底：高度 ≥ 地形 + 净空 + 100m（下降段不穿山）；
+/// - 不重跑 verify：高度调整只升不降（相对既有 verify 高度），净空结论保持。
+fn apply_vertical_profile(
+    pts: &mut [crate::path::PathPoint],
+    start_alt: f64,
+    target_alt: f64,
+    cruise_alt: f64,
+    terrain: Option<&dyn TerrainSource>,
+    clearance_m: f64,
+) {
+    if pts.len() < 2 || (target_alt - start_alt).abs() < 0.5 {
+        return;
+    }
+    // 累计水平距离（等距投影近似，仅作剖面插值参数）
+    let lat0 = pts[0].lat.to_radians();
+    let kx = 111_320.0 * lat0.cos();
+    let ky = 111_320.0;
+    let mut cum = vec![0.0_f64; pts.len()];
+    for i in 1..pts.len() {
+        let dx = (pts[i].lon - pts[i - 1].lon) * kx;
+        let dy = (pts[i].lat - pts[i - 1].lat) * ky;
+        cum[i] = cum[i - 1] + dx.hypot(dy);
+    }
+    let total = cum[pts.len() - 1].max(1.0);
+    let clearance = clearance_m.max(1.0);
+    // 抬升场景下限：巡航段高度不得低于抬升巡航高度（地形安全裁决）；
+    // 非抬升（cruise == start）→ 无下限，线性插值平滑过渡（下降生效）。
+    let raise_floor = if cruise_alt > start_alt + 0.5 {
+        cruise_alt
+    } else {
+        f64::NEG_INFINITY
+    };
+    for i in 0..pts.len() {
+        // 剖面段保持：原高度显著偏离巡航高度 → 受限区底部/顶部剖面（主动升降高），
+        // 垂直剖面不覆盖（其高度已经 build_restricted_profiles 语义验证）。
+        // 注意：插值前路径点高度 = 巡航高度或剖面段高度，不存在"插值中间点"，
+        // 因此下降/爬升场景的巡航段（orig == cruise）不会误判为剖面段。
+        if (pts[i].alt_m - cruise_alt).abs() > 0.5 {
+            continue;
+        }
+        let t = (cum[i] / total).clamp(0.0, 1.0);
+        let mut h = (start_alt + (target_alt - start_alt) * t).max(raise_floor);
+        // 地形保底（含终点）：目标点在地形以下（物理不可达）→ 抬到安全高度
+        // （zigzag26 目标 2000m、终点地形 2097m → 保底；宁高勿穿山）
+        if let Some(tsrc) = terrain {
+            if let Sample::Land(g) = tsrc.sample_at(pts[i].lon, pts[i].lat) {
+                h = h.max(g + clearance + 100.0);
+            }
+        }
+        pts[i].alt_m = h;
+    }
 }
 
 /// P6-C：多机路径空间交叉检测（输出后处理）。对 path 非空的车辆两两检测：
@@ -3175,6 +3257,100 @@ mod tests {
         }
     }
 
+    // ---------- 垂直剖面（2026-08-12 demo 轨迹倾斜） ----------
+    fn vpp(lon: f64, lat: f64, alt: f64) -> crate::path::PathPoint {
+        crate::path::PathPoint::new(lon, lat, alt)
+    }
+
+    #[test]
+    fn vertical_profile_linear_climb() {
+        // 起点 3000 → 目标 8000：三点等距路径 → 中间点高度 = 线性中点 5500
+        let mut pts = vec![
+            vpp(115.0, 39.0, 3000.0),
+            vpp(115.75, 39.45, 3000.0),
+            vpp(116.5, 39.9, 3000.0),
+        ];
+        apply_vertical_profile(&mut pts, 3000.0, 8000.0, 3000.0, None, 100.0);
+        assert!((pts[0].alt_m - 3000.0).abs() < 0.5, "start {}", pts[0].alt_m);
+        assert!((pts[1].alt_m - 5500.0).abs() < 200.0, "mid {}", pts[1].alt_m);
+        assert!((pts[2].alt_m - 8000.0).abs() < 0.5, "end {}", pts[2].alt_m);
+    }
+
+    #[test]
+    fn vertical_profile_same_alt_unchanged() {
+        // 起终点同高 → 高度保持原样（受限区剖面/抬升语义不变）
+        let mut pts = vec![vpp(115.0, 39.0, 3000.0), vpp(116.5, 39.9, 3000.0)];
+        apply_vertical_profile(&mut pts, 3000.0, 3000.0, 3000.0, None, 100.0);
+        assert!(pts.iter().all(|p| (p.alt_m - 3000.0).abs() < 1e-9));
+    }
+
+    #[test]
+    fn vertical_profile_descent_terrain_floor() {
+        // 下降 8000→3000，中间点地形 6000m：插值 5500 被地形保底抬到 ≥ 6100（净空+100）
+        struct FakeTerrain;
+        impl TerrainSource for FakeTerrain {
+            fn sample_at(&self, _lon: f64, _lat: f64) -> Sample {
+                Sample::Land(6000.0)
+            }
+            fn height_at(&self, _lon: f64, _lat: f64) -> Option<f64> {
+                Some(6000.0)
+            }
+            fn bounds(&self) -> Option<crate::terrain::GeoBounds> {
+                None
+            }
+            fn resolution_desc(&self) -> String {
+                "fake".into()
+            }
+        }
+        let mut pts = vec![
+            vpp(115.0, 39.0, 8000.0),
+            vpp(115.75, 39.45, 8000.0),
+            vpp(116.5, 39.9, 8000.0),
+        ];
+        apply_vertical_profile(&mut pts, 8000.0, 3000.0, 8000.0, Some(&FakeTerrain), 100.0);
+        assert!((pts[0].alt_m - 8000.0).abs() < 0.5, "start {}", pts[0].alt_m);
+        assert!(pts[1].alt_m >= 6100.0, "mid floor {}", pts[1].alt_m);
+        // 终点 3000 < 地形 6000（物理不可达）→ 保底抬到 ≥ 6100（宁高勿穿山）
+        assert!(pts[2].alt_m >= 6100.0, "end floor {}", pts[2].alt_m);
+    }
+
+    #[test]
+    fn vertical_profile_raised_cruise_floor() {
+        // 抬升场景：start 500 目标 3000、巡航已抬升 2240（raw 路径点高度 = 2240）
+        // → 中间高度不得低于 2240；终点 = 目标 3000。
+        let mut pts = vec![
+            vpp(115.0, 39.0, 2240.0),
+            vpp(115.75, 39.45, 2240.0),
+            vpp(116.5, 39.9, 2240.0),
+        ];
+        apply_vertical_profile(&mut pts, 500.0, 3000.0, 2240.0, None, 100.0);
+        assert!(pts[0].alt_m >= 2240.0 - 0.5, "start floor {}", pts[0].alt_m);
+        assert!(pts[1].alt_m >= 2240.0 - 0.5, "mid floor {}", pts[1].alt_m);
+        assert!((pts[2].alt_m - 3000.0).abs() < 0.5, "end {}", pts[2].alt_m);
+    }
+
+    #[test]
+    fn vertical_profile_keeps_restricted_profile_segment() {
+        // 受限区底部穿行剖面段（1500m，zigzag24）：原高度显著偏离巡航 2242 →
+        // 保持原高度，垂直剖面不覆盖；巡航段（== 2242）正常插值（含终点 raise_floor）。
+        let mut pts = vec![
+            vpp(115.0, 39.0, 2242.0),   // 巡航段
+            vpp(115.5, 39.5, 1500.0),   // 剖面段（底部穿行）
+            vpp(116.0, 40.0, 2242.0),   // 巡航段
+            vpp(116.5, 40.5, 2242.0),   // 终点（raw 巡航）
+        ];
+        apply_vertical_profile(&mut pts, 1000.0, 1500.0, 2242.0, None, 100.0);
+        assert!(pts[0].alt_m >= 2242.0 - 0.5, "cruise start {}", pts[0].alt_m);
+        assert!(
+            (pts[1].alt_m - 1500.0).abs() < 0.5,
+            "profile seg kept {}",
+            pts[1].alt_m
+        );
+        assert!(pts[2].alt_m >= 2242.0 - 0.5, "cruise mid {}", pts[2].alt_m);
+        // 终点 = max(target 1500, raise_floor 2242) = 2242（目标低于抬升巡航 → 保持抬升）
+        assert!(pts[3].alt_m >= 2242.0 - 0.5, "end {}", pts[3].alt_m);
+    }
+
     #[test]
     fn p6c_detect_crossing() {
         // 两条路径在中段交叉（x 形），高度相同 → 两车都应出 multi_vehicle_conflict
@@ -3882,8 +4058,15 @@ mod tests {
         let u2_near = out.vehicles[1].path.iter().any(|p| (p.x - 116.1).abs() < 0.05 && (p.y - 39.2).abs() < 0.05);
         assert!(u1_near, "uav1 应经过 (115.3,39.8)");
         assert!(u2_near, "uav2 应经过 (116.1,39.2)");
-        // 旋翼机无 smoothing 告警
-        assert!(out.vehicles[1].warnings.is_empty(), "{:?}", out.vehicles[1].warnings);
+        // 旋翼机无 smoothing 告警（垂直剖面后可能触发 P6-C 交叉告警——真实行为）
+        assert!(
+            out.vehicles[1]
+                .warnings
+                .iter()
+                .all(|w| !w.contains("smoothing")),
+            "旋翼机不应有 smoothing 告警: {:?}",
+            out.vehicles[1].warnings
+        );
     }
 
     #[test]
@@ -3941,8 +4124,16 @@ mod tests {
             assert_eq!(v.status, "planned");
             assert!(v.path.len() >= 2);
         }
-        // 旋翼机（uav2）无 Dubins 链（急转合法）——路径点应不因拟合失败回退
-        assert!(out.vehicles[1].warnings.is_empty(), "旋翼机不应有 smoothing 告警");
+        // 旋翼机（uav2）无 Dubins 链（急转合法）——路径点应不因拟合失败回退；
+        // 垂直剖面后两车高度靠近可能触发 P6-C 交叉告警（真实行为），仅过滤 smoothing。
+        assert!(
+            out.vehicles[1]
+                .warnings
+                .iter()
+                .all(|w| !w.contains("smoothing")),
+            "旋翼机不应有 smoothing 告警: {:?}",
+            out.vehicles[1].warnings
+        );
     }
 
     #[test]

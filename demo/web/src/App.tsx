@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useMemo } from 'react';
 import { Scene3D } from './components/Scene3D';
 import { ControlPanel } from './components/ControlPanel';
 import type {
@@ -10,7 +10,7 @@ import type {
   CircleGeometry,
   PolygonGeometry,
 } from './types';
-import { defaultInputConfig } from './types';
+import { defaultInputConfig, parseVehicleTargetRef } from './types';
 import { planRoute, sceneBounds, fetchTerrain } from './api';
 
 type ClickMode = 'start' | 'target' | 'midpoint' | 'polygon' | null;
@@ -273,6 +273,23 @@ export default function App() {
 
   const bbox = sceneBounds(config);
 
+  // 场景高度范围（米）：mission 起终点 / 每机起点与自定义目标 / 结果路径高度
+  // —— 无地形数据时驱动 z 夸张（2026-08-12：起终点不同高度轨迹需呈现倾斜）
+  const sceneAltRange = useMemo(() => {
+    const alts: number[] = [
+      config.mission.start.alt_m,
+      config.mission.target.alt_m,
+      ...config.mission.vehicles.map((v) => v.start_pose.alt_m),
+    ];
+    config.mission.vehicles.forEach((v) => {
+      const t = parseVehicleTargetRef(v, config.mission.target);
+      if (t) alts.push(t.alt_m);
+    });
+    result?.vehicles.forEach((vo) => vo.path.forEach((p) => alts.push(p.alt_m)));
+    if (!alts.length) return 2000;
+    return Math.max(Math.max(...alts) - Math.min(...alts), 1);
+  }, [config, result]);
+
   return (
     <div className="app-layout">
       <div className="panel">
@@ -307,6 +324,7 @@ export default function App() {
           ]}
           results={result?.vehicles ?? null}
           terrainData={terrainData}
+          sceneAltRange={sceneAltRange}
           bounds={sceneBounds(config)}
           onGroundClick={handleGroundClick}
           onRadarMove={handleRadarMove}

@@ -21,6 +21,8 @@ interface Scene3DProps {
   zones: Zone[];
   results: VehicleOutput[] | null;
   terrainData: TerrainInfo | null;
+  /** 场景高度范围（米；起终点/结果路径高度差，无地形时驱动 z 夸张） */
+  sceneAltRange: number;
   /** 场景包围盒 [minLon, minLat, maxLon, maxLat]（sceneBounds；与地形网格/相机视野一致） */
   bounds: [number, number, number, number];
   onGroundClick: (wp: Waypoint) => void;
@@ -136,20 +138,37 @@ const ZONE_COLORS: Record<string, string> = {
 const WALL_VISUAL_TOP_M = 30000;
 
 /** 地形 z 夸张系数（与 TerrainMesh 共用，Scene3D 统一计算后传给所有含高度对象）：
- * 无地形数据 → 1（航路绝对高度显示）；有 → 场景跨度/高度范围 × 0.08，clamp [3, 20]。
- * 主管 2026-08-10：原 ×0.25 clamp [10,60] 过大不协调 → 降为 ×0.08 clamp [3,20]。 */
-function computeZScale(terrainData: TerrainInfo | null, geoRef: GeoRef): number {
-  if (!terrainData) return 1;
-  const hs = terrainData.heights.filter((h): h is number => h !== null);
-  if (!hs.length) return 1;
-  const minH = Math.min(...hs);
-  const maxH = Math.max(...hs);
+ * 有地形数据 → 场景跨度 / 高度范围 × 0.08，clamp [3, 20]（主管 2026-08-10：
+ * 原 ×0.25 clamp [10,60] 过大不协调 → 降为 ×0.08 clamp [3,20]）；
+ * 无地形数据（source=none / 加载失败）→ 同样按场景跨度 / 场景高度范围（起终点/
+ * 结果路径高度差）计算——2026-08-12 修复：原无地形直接返回 1，起终点不同高度时
+ * 高度差（如 5000m）相对水平跨度（100km）不可见，轨迹呈水平直线（与事实不符）。 */
+function computeZScale(
+  terrainData: TerrainInfo | null,
+  geoRef: GeoRef,
+  sceneAltRange: number,
+  bounds: [number, number, number, number],
+): number {
   const lat0 = (geoRef.lat * Math.PI) / 180;
-  const spanMeters = Math.hypot(
-    (terrainData.max_lon - terrainData.min_lon) * 111320 * Math.cos(lat0),
-    (terrainData.max_lat - terrainData.min_lat) * 110574,
-  );
-  const range = Math.max(maxH - minH, 1);
+  let spanMeters: number;
+  let range: number;
+  if (terrainData) {
+    const hs = terrainData.heights.filter((h): h is number => h !== null);
+    const minH = hs.length ? Math.min(...hs) : 0;
+    const maxH = hs.length ? Math.max(...hs) : 0;
+    spanMeters = Math.hypot(
+      (terrainData.max_lon - terrainData.min_lon) * 111320 * Math.cos(lat0),
+      (terrainData.max_lat - terrainData.min_lat) * 110574,
+    );
+    range = Math.max(maxH - minH, sceneAltRange, 1);
+  } else {
+    spanMeters = Math.hypot(
+      (bounds[2] - bounds[0]) * 111320 * Math.cos(lat0),
+      (bounds[3] - bounds[1]) * 110574,
+    );
+    range = Math.max(sceneAltRange, 1);
+  }
+  if (!(spanMeters > 0)) return 3;
   return Math.min(Math.max((spanMeters / range) * 0.08, 3), 20);
 }
 
@@ -163,6 +182,7 @@ export function Scene3D({
   zones,
   results,
   terrainData,
+  sceneAltRange,
   bounds,
   onGroundClick,
   onRadarMove,
@@ -219,8 +239,8 @@ export function Scene3D({
 
   // 统一 z 夸张系数（地形 + 航路 + 标记 + zone 高度共用，保证同一尺度）
   const zScale = useMemo(
-    () => computeZScale(terrainData, geoRef),
-    [terrainData, geoRef],
+    () => computeZScale(terrainData, geoRef, sceneAltRange, bounds),
+    [terrainData, geoRef, sceneAltRange, bounds],
   );
 
   const targetPos = useMemo(

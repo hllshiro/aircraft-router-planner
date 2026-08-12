@@ -6,7 +6,10 @@ import type {
   Zone,
   Waypoint,
   VehicleInput,
+  WeaponInput,
+  WeaponType,
 } from '../types';
+import { WEAPON_DEFAULT_RANGE_KM } from '../types';
 import { ResultPanel } from './ResultPanel';
 
 interface ControlPanelProps {
@@ -73,6 +76,25 @@ export function ControlPanel({
       profile: { ...vehicles[idx].profile, ...patch },
     };
     updateMission({ vehicles });
+  };
+
+  // 每机武器（P6-D 2026-08-12）：一机至多一条武器，映射到 mission.weapons
+  // （weapon_id = `${v.id}_w1`）。类型缺省 = 不启用（从 mission.weapons 移除）。
+  const vehicleWeapon = (v: VehicleInput): WeaponInput | undefined =>
+    mission.weapons.find((w) => w.weapon_id === `${v.id}_w1`);
+  const setVehicleWeapon = (v: VehicleInput, patch: Partial<WeaponInput>) => {
+    const wid = `${v.id}_w1`;
+    const cur = vehicleWeapon(v);
+    const next: WeaponInput = { weapon_id: wid, ...cur, ...patch };
+    updateMission({
+      weapons: [...mission.weapons.filter((w) => w.weapon_id !== wid), next],
+    });
+  };
+  const clearVehicleWeapon = (v: VehicleInput) => {
+    const wid = `${v.id}_w1`;
+    updateMission({
+      weapons: mission.weapons.filter((w) => w.weapon_id !== wid),
+    });
   };
 
   // 添加飞机：id 递增（v2/v3…），起点默认 = mission.start，机型默认固定翼
@@ -375,6 +397,81 @@ export function ControlPanel({
                     target_ref: `${vehicleTarget(v, mission.target).lon},${vehicleTarget(v, mission.target).lat},${+e.target.value}`,
                   })
                 }
+              />
+            </div>
+          </div>
+          {/* 武器（P6-D 2026-08-12：类型 + 射程；类型缺省 = 不启用；射程缺省 = 按类型默认） */}
+          <div className="field-row" style={{ marginTop: 4 }}>
+            <div>
+              <label>武器类型</label>
+              <select
+                value={vehicleWeapon(v)?.weapon_type ?? ''}
+                onChange={(e) => {
+                  const wt = e.target.value as WeaponType | '';
+                  if (!wt) {
+                    clearVehicleWeapon(v);
+                  } else {
+                    // 类型切换 → 射程回落类型默认（range_km 清空，占位显示默认值）
+                    setVehicleWeapon(v, { weapon_type: wt, range_km: undefined });
+                  }
+                }}
+              >
+                <option value="">不启用</option>
+                <option value="aam">空空导弹 (AAM)</option>
+                <option value="agm">空地导弹 (AGM)</option>
+                <option value="bomb">航空炸弹</option>
+              </select>
+            </div>
+            <div>
+              <label>射程 Rmin (km)</label>
+              <input
+                type="number"
+                min={0}
+                disabled={!vehicleWeapon(v)?.weapon_type}
+                placeholder={
+                  vehicleWeapon(v)?.weapon_type
+                    ? String(WEAPON_DEFAULT_RANGE_KM[vehicleWeapon(v)!.weapon_type!][0])
+                    : ''
+                }
+                value={vehicleWeapon(v)?.range_km?.[0] ?? ''}
+                onChange={(e) => {
+                  const cur = vehicleWeapon(v);
+                  if (!cur?.weapon_type) return;
+                  const lo = +e.target.value;
+                  const hi = cur.range_km?.[1] ?? WEAPON_DEFAULT_RANGE_KM[cur.weapon_type][1];
+                  setVehicleWeapon(v, {
+                    range_km: [
+                      Number.isFinite(lo) ? lo : WEAPON_DEFAULT_RANGE_KM[cur.weapon_type][0],
+                      hi,
+                    ],
+                  });
+                }}
+              />
+            </div>
+            <div>
+              <label>射程 Rmax (km)</label>
+              <input
+                type="number"
+                min={0}
+                disabled={!vehicleWeapon(v)?.weapon_type}
+                placeholder={
+                  vehicleWeapon(v)?.weapon_type
+                    ? String(WEAPON_DEFAULT_RANGE_KM[vehicleWeapon(v)!.weapon_type!][1])
+                    : ''
+                }
+                value={vehicleWeapon(v)?.range_km?.[1] ?? ''}
+                onChange={(e) => {
+                  const cur = vehicleWeapon(v);
+                  if (!cur?.weapon_type) return;
+                  const hi = +e.target.value;
+                  const lo = cur.range_km?.[0] ?? WEAPON_DEFAULT_RANGE_KM[cur.weapon_type][0];
+                  setVehicleWeapon(v, {
+                    range_km: [
+                      lo,
+                      Number.isFinite(hi) ? hi : WEAPON_DEFAULT_RANGE_KM[cur.weapon_type][1],
+                    ],
+                  });
+                }}
               />
             </div>
           </div>

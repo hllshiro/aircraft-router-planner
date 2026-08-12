@@ -92,6 +92,24 @@ export interface ParamsOverride {
   los_mask_coef?: number;
 }
 
+// === 武器（匹配 cli/src/config.rs WeaponEntry；P6-D 2026-08-12） ===
+export type WeaponType = 'aam' | 'agm' | 'bomb';
+
+export interface WeaponInput {
+  weapon_id: string;
+  /** 缺省 = 该武器默认不启用（不参与规划计算） */
+  weapon_type?: WeaponType;
+  /** 射程 [Rmin, Rmax] km；缺省 = 按类型默认（aam [5,40] / agm [3,120] / bomb [1,15]） */
+  range_km?: [number, number];
+}
+
+/** 武器类型默认射程 [Rmin, Rmax] km（与 cli/config.rs WeaponType::default_range_km 对齐） */
+export const WEAPON_DEFAULT_RANGE_KM: Record<WeaponType, [number, number]> = {
+  aam: [5, 40],
+  agm: [3, 120],
+  bomb: [1, 15],
+};
+
 export interface Mission {
   start: Waypoint;
   target: Waypoint;
@@ -101,6 +119,7 @@ export interface Mission {
   restricted_zones: Zone[];
   obstacles: Zone[];
   terrain: TerrainConfig;
+  weapons: WeaponInput[];
   parameters: ParamsOverride;
 }
 
@@ -232,6 +251,7 @@ export function defaultInputConfig(): InputConfig {
       no_fly_zones: [],
       restricted_zones: [],
       obstacles: [],
+      weapons: [],
       // 默认真实地形：east_asia_7p5as ARPK1（~537MB，GMTED2010 东亚 7.5as，70-135E, 15-55N）
       // 与发布版（install/）默认地形对齐；路径相对 workspace 根（demo-server 与 CLI 的 cwd）
       terrain: { source: 'path', path: 'data/east_asia_7p5as.arpack' },

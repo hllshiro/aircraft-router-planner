@@ -739,6 +739,26 @@ pub(crate) fn resolve_target_ref(r: Option<&str>, mission_target: &Geo) -> Resul
     Err(AppError::InputInvalid(InputInvalidReason::IllegalCoordinate))
 }
 
+/// 解析每机目标高度（与 resolve_target_ref 同一输入源；2026-08-12 垂直剖面用）：
+/// 缺省 / "mission.target" / 未提供第 3 段 → mission_target_alt；否则第 3 段解析。
+pub(crate) fn resolve_target_alt(r: Option<&str>, mission_target_alt: f64) -> f64 {
+    let Some(s) = r.map(str::trim).filter(|s| !s.is_empty()) else {
+        return mission_target_alt;
+    };
+    if s == "mission.target" {
+        return mission_target_alt;
+    }
+    let parts: Vec<&str> = s.split(',').map(str::trim).collect();
+    if parts.len() == 3 {
+        if let Ok(a) = parts[2].parse::<f64>() {
+            if a.is_finite() {
+                return a;
+            }
+        }
+    }
+    mission_target_alt
+}
+
 /// InputValidator 前置模块：解析后立即校验，退化输入不进入算法。
 pub fn validate(input: &Input) -> Result<(), AppError> {
     // schema 版本
