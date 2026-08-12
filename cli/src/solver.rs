@@ -12,8 +12,8 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use crate::config::{
-    zone_contains, zone_contains_at, Input, Output, PathPoint, Stats, TerrainSourceType,
-    VehicleOutput, Zone, ZoneShape,
+    resolve_target_ref, zone_contains, zone_contains_at, Input, Output, PathPoint, Stats,
+    TerrainSourceType, VehicleOutput, Zone, ZoneShape,
 };
 use crate::coord::Geo;
 use crate::costfield::{backtrack_path, build_semantic_cost_field, build_semantic_cost_field_par_local, fmm_propagate};
@@ -1204,7 +1204,6 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                             .cloned()
                             .collect::<Vec<_>>(),
                         ctx.terrain.is_some(),
-                        !v.mid_waypoints.is_empty(),
                     )
                 {
                     let skeleton: Vec<[f64; 2]> =
@@ -1245,6 +1244,19 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                         for c in &clusters {
                             let mut rect =
                                 crate::patch::PatchRect::from_center(*c, crate::patch::PATCH_R_DEG);
+                            // P5-M3：必经点安全子集（§13.2 R3）——patch 不得改必经点位置：
+                            // 簇矩形含必经点 → 跳过该簇（degradations 标注）；不含 →
+                            // patch 正常（必经点骨架段不受影响）。
+                            if v.mid_waypoints
+                                .iter()
+                                .any(|wp| rect.contains([wp.lon, wp.lat]))
+                            {
+                                degradations.push(format!(
+                                    "patch: cluster at ({:.4},{:.4}) contains mid_waypoint, skipped (R3)",
+                                    c[0], c[1]
+                                ));
+                                continue;
+                            }
                             let mut retry = 0;
                             loop {
                                 let (ein, eout) = crate::patch::boundary_anchors(&current, &rect);
@@ -1346,6 +1358,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                                                     all_inflated
                                                         .first()
                                                         .map_or(&[], |h| h.as_slice()),
+                                                    &circle_obs,
                                                     2.0 * inflation_m / 111_320.0,
                                                 ) {
                                                     crate::patch::PatchFailureClass::FittingDefect => {
@@ -1622,27 +1635,6 @@ fn default_mask_candidates() -> Option<PathBuf> {
         }
     }
     candidates.into_iter().find(|c| c.exists())
-}
-
-/// 解析每机目标引用（Demo 每机独立终点，主管 2026-08-10）：
-/// 缺省 / "mission.target" → mission.target；"lon,lat[,alt]" → 自定义坐标
-/// （alt 解析但当前仅水平语义，与 M5 mid_waypoints 高度一致）；其他 → 未识别
-/// 引用硬拒（InputInvalid）。
-fn resolve_target_ref(r: Option<&str>, mission_target: &Geo) -> Result<Geo, AppError> {
-    let Some(s) = r.map(str::trim).filter(|s| !s.is_empty()) else {
-        return Ok(*mission_target);
-    };
-    if s == "mission.target" {
-        return Ok(*mission_target);
-    }
-    let parts: Vec<&str> = s.split(',').map(str::trim).collect();
-    if parts.len() == 2 || parts.len() == 3 {
-        if let (Ok(lon), Ok(lat)) = (parts[0].parse::<f64>(), parts[1].parse::<f64>()) {
-            return Geo::new(lon, lat)
-                .map_err(|_| AppError::InputInvalid(InputInvalidReason::IllegalCoordinate));
-        }
-    }
-    Err(AppError::InputInvalid(InputInvalidReason::IllegalCoordinate))
 }
 
 /// 任务区域缓冲（度）：保证源/目标不贴边；同时是障碍感知外扩的机动余量

@@ -34,13 +34,11 @@ pub fn patch_enabled() -> bool {
 /// P4 可应用性判定（触发前的排除项检查）。
 ///
 /// - `has_terrain`：P4 已放开（地形净空边权 + NODATA 5x 进 patch，§3.3 P2 口径）；
-/// - `has_mid_waypoints`：仍排除 mid_waypoint 触发源（§13.2 R3；P4 不做必经点触发）；
+/// - mid_waypoint 触发源 P5 已安全放开（§13.2 R3）：patch_applicable 不再整体排除；
+///   绕行簇矩形若包含必经点则跳过该簇（patch 不得改必经点位置），见 solver 挂接；
 /// - 圆障碍 P4 已放开（切点锚点 2D 水平绕行；禁飞区绝对禁入语义不变，§8 排除理由
 ///   仅限垂直剖面绕行通道）；多边形硬墙沿用 P1/P2。
-pub fn patch_applicable(zones: &[crate::config::Zone], _has_terrain: bool, has_mid_waypoints: bool) -> bool {
-    if has_mid_waypoints {
-        return false;
-    }
+pub fn patch_applicable(zones: &[crate::config::Zone], _has_terrain: bool) -> bool {
     // 至少一个硬墙（多边形或圆）才值得 patch（触发源 = 硬墙绕行失败点）；
     // 纯限飞区场景不触发（限飞区只接线弦判据，不作为触发源，§3.3）。
     zones.iter().any(|z| {
@@ -408,12 +406,16 @@ pub fn locate_single_cluster(issues: &[String], patch_r_deg: f64) -> Option<[f64
 /// - 否则（折线自身穿障碍/净空不足）→ `GeometricImpossible`。
 ///
 /// `issues` 为 verify 报告中的硬性 issue（含 `lon=...,lat=...` 或 `(terrain ...)` 坐标）。
+/// P5-M4：圆墙归因——失败点距任一圆心 ≤ r_eff + 缺陷余量 → `GeometricImpossible`
+/// （圆场景 C3 归因扩展；此前 `all_inflated` 只含多边形墙，圆贴边失败落默认分支）。
 pub fn classify_verify_failure(
     path: &[[f64; 2]],
     issues: &[String],
     inflated: &[[f64; 2]],
+    circles: &[CircleObs],
     defect_deg: f64,
 ) -> PatchFailureClass {
+    let margin_m = 2.0 * defect_deg * 111_320.0;
     for s in issues {
         if let Some((lon, lat)) = extract_issue_coord(s) {
             // 失败点在转折顶点邻域（任一路径顶点到失败点距离 < defect_deg）
@@ -426,6 +428,13 @@ pub fn classify_verify_failure(
             // 失败点本身在障碍（膨胀后）内/贴边 → 折线硬违规
             if point_in_convex([lon, lat], inflated, GEOM_EPS_DEG) {
                 return PatchFailureClass::GeometricImpossible;
+            }
+            // P5-M4：圆墙硬违规（距圆心 ≤ r_eff + 缺陷余量）
+            for c in circles {
+                let dc = ((c.center[0] - lon).powi(2) + (c.center[1] - lat).powi(2)).sqrt();
+                if dc * 111_320.0 <= c.r_eff_m + margin_m {
+                    return PatchFailureClass::GeometricImpossible;
+                }
             }
         }
     }
@@ -610,12 +619,26 @@ mod tests {
         let path = [[116.0, 39.0], [116.6, 39.7], [117.0, 40.0]];
         let obs = [[116.4, 39.3], [116.6, 39.3], [116.6, 39.7], [116.4, 39.7]];
         let inf = inflate_convex(&convex_hull(&obs), 5_000.0 / 111_320.0);
+        let no_circles: &[CircleObs] = &[];
         // 失败点在转折顶点邻域 → FittingDefect
         let issues = vec!["sample (lon=116.599,lat=39.701) clearance fail".to_string()];
-        assert_eq!(classify_verify_failure(&path, &issues, &inf, 0.01), PatchFailureClass::FittingDefect);
+        assert_eq!(classify_verify_failure(&path, &issues, &inf, no_circles, 0.01), PatchFailureClass::FittingDefect);
         // 失败点远离转折 → GeometricImpossible
         let issues2 = vec!["sample (lon=116.2,lat=39.1) clearance fail".to_string()];
-        assert_eq!(classify_verify_failure(&path, &issues2, &inf, 0.01), PatchFailureClass::GeometricImpossible);
+        assert_eq!(classify_verify_failure(&path, &issues2, &inf, no_circles, 0.01), PatchFailureClass::GeometricImpossible);
+        // P5-M4：失败点贴圆墙（距圆心 ≤ r_eff + 余量）→ GeometricImpossible
+        let circle_wall = CircleObs { center: [116.6, 39.5], r_eff_m: 10_000.0 };
+        let issues3 = vec!["sample (lon=116.645,lat=39.540) clearance fail".to_string()];
+        assert_eq!(
+            classify_verify_failure(&path, &issues3, &inf, &[circle_wall], 0.01),
+            PatchFailureClass::GeometricImpossible
+        );
+        // 失败点距圆心远于 r_eff + 余量 → 不判贴圆（落默认分支 GeometricImpossible）
+        let issues4 = vec!["sample (lon=116.500,lat=39.500) clearance fail".to_string()];
+        assert_eq!(
+            classify_verify_failure(&path, &issues4, &inf, &[circle_wall], 0.01),
+            PatchFailureClass::GeometricImpossible
+        );
     }
 
     #[test]
@@ -633,17 +656,18 @@ mod tests {
         let circle_wall = mk(ZoneType::NoFly, ZoneShape::Circle { center: [116.5, 39.5], radius_km: 10.0 });
         let restricted = mk(ZoneType::Restricted, ZoneShape::Polygon { vertices: vec![[116.0, 39.0], [117.0, 39.0], [117.0, 40.0]] });
         // 纯多边形硬墙 → 适用
-        assert!(patch_applicable(&[poly_wall.clone()], false, false));
+        assert!(patch_applicable(&[poly_wall.clone()], false));
         // 圆障碍 → 适用（P4 放开：切点锚点 2D 水平绕行）
-        assert!(patch_applicable(&[circle_wall], false, false));
+        assert!(patch_applicable(&[circle_wall], false));
         // 限飞区（非墙）→ 不适用（限飞区只接线弦判据，不触发 patch）
-        assert!(!patch_applicable(&[restricted], false, false));
+        assert!(!patch_applicable(&[restricted], false));
         // 地形 → 适用（P4 放开：地形净空边权 + NODATA 5x）
-        assert!(patch_applicable(&[poly_wall.clone()], true, false));
-        // 必经点 → 排除（P4 不做 mid_waypoint 触发源）
-        assert!(!patch_applicable(&[poly_wall], false, true));
+        assert!(patch_applicable(&[poly_wall.clone()], true));
+        // 必经点 → 适用（P5 安全放开：patch_applicable 不再整体排除，簇矩形含必经点
+        // 在 solver 挂接处跳过该簇，§13.2 R3 不跳必经点）
+        assert!(patch_applicable(&[poly_wall], false));
         // 无硬墙（空）→ 不适用
-        assert!(!patch_applicable(&[], false, false));
+        assert!(!patch_applicable(&[], false));
     }
 
     // ---------- P2 ----------

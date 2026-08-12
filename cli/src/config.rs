@@ -669,6 +669,27 @@ impl Input {
     }
 }
 
+/// 解析每机目标引用（Demo 每机独立终点，主管 2026-08-10；P5 移到校验层单源）：
+/// 缺省 / "mission.target" → mission.target；"lon,lat[,alt]" → 自定义坐标
+/// （alt 解析但当前仅水平语义，与 mid_waypoints 高度一致）；其他 → 未识别
+/// 引用硬拒（InputInvalid）。
+pub(crate) fn resolve_target_ref(r: Option<&str>, mission_target: &Geo) -> Result<Geo, AppError> {
+    let Some(s) = r.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(*mission_target);
+    };
+    if s == "mission.target" {
+        return Ok(*mission_target);
+    }
+    let parts: Vec<&str> = s.split(',').map(str::trim).collect();
+    if parts.len() == 2 || parts.len() == 3 {
+        if let (Ok(lon), Ok(lat)) = (parts[0].parse::<f64>(), parts[1].parse::<f64>()) {
+            return Geo::new(lon, lat)
+                .map_err(|_| AppError::InputInvalid(InputInvalidReason::IllegalCoordinate));
+        }
+    }
+    Err(AppError::InputInvalid(InputInvalidReason::IllegalCoordinate))
+}
+
 /// InputValidator 前置模块：解析后立即校验，退化输入不进入算法。
 pub fn validate(input: &Input) -> Result<(), AppError> {
     // schema 版本
@@ -699,11 +720,31 @@ pub fn validate(input: &Input) -> Result<(), AppError> {
                 return Err(AppError::InputInvalid(InputInvalidReason::TargetInNoFly));
             }
         }
+        // 每机目标在禁飞区（P5：target_ref 覆盖 mission.target——校验 resolve 后的
+        // 实际规划目标，而非被覆盖的 mission.target；2026-08-12 主管案例误报修复）。
+        let resolved = resolve_target_ref(v.target_ref.as_deref(), &target)?;
+        for z in &input.mission.no_fly_zones {
+            if zone_contains(z, &resolved) {
+                return Err(AppError::InputInvalid(InputInvalidReason::TargetInNoFly));
+            }
+        }
+        // 必经点在禁飞区（P5：必经点不可绕行 → fail-fast，禁飞区绝对禁入语义）。
+        for wp in &v.mid_waypoints {
+            let g = Geo::new(wp.lon, wp.lat)
+                .map_err(|_| AppError::InputInvalid(InputInvalidReason::IllegalCoordinate))?;
+            for z in &input.mission.no_fly_zones {
+                if zone_contains(z, &g) {
+                    return Err(AppError::InputInvalid(InputInvalidReason::MidWaypointInNoFly));
+                }
+            }
+        }
     }
-    // B 在禁飞区
-    for z in &input.mission.no_fly_zones {
-        if zone_contains(z, &target) {
-            return Err(AppError::InputInvalid(InputInvalidReason::TargetInNoFly));
+    // 无多机声明时，任务目标 = mission.target（缺省单机语义，保持原校验）。
+    if input.mission.vehicles.is_empty() {
+        for z in &input.mission.no_fly_zones {
+            if zone_contains(z, &target) {
+                return Err(AppError::InputInvalid(InputInvalidReason::TargetInNoFly));
+            }
         }
     }
     // 雷达 ∩ 禁飞区重叠（雷达位置在禁飞多边形内）
@@ -1134,6 +1175,76 @@ mod tests {
         match validate(&input) {
             Err(AppError::InputInvalid(InputInvalidReason::RadarOverlapNoFly)) => {}
             other => panic!("expected radar_overlap, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn target_ref_overrides_mission_target_no_fly_check() {
+        // P5-M1（主管 2026-08-12 案例）：mission.target 在禁飞圆内（49.37km < 50km），
+        // 但 vehicle.target_ref 覆盖为圆外目标 → validate 必须通过（校验 resolve 后的
+        // 实际规划目标，而非被覆盖的 mission.target）。
+        let s = r#"{
+            "schema_version":"0.20",
+            "mission":{
+                "start":{"lon":115.9,"lat":39.8,"alt_m":3000},
+                "target":{"lon":116.8,"lat":40.3,"alt_m":3000},
+                "vehicles":[{"id":"v1","profile":{"aircraft_type":"FIXED_WING"},
+                    "start_pose":{"lon":117.5,"lat":39.0,"alt_m":3000,"heading_deg":45},
+                    "mid_waypoints":[],
+                    "target_ref":"114.26335909078654,41.99101176729852,3000"}],
+                "no_fly_zones":[{"id":"nf1","zone_type":"no_fly",
+                    "shape":"circle","geometry":{"center":[116.54581607527983,39.90085583451849],"radius_km":50},
+                    "alt_min_m":0,"alt_max_m":12000,"height_semantics":"msl"}]
+            }
+        }"#;
+        let input = Input::from_json_str(s).unwrap();
+        if let Err(e) = validate(&input) {
+            panic!("expected ok (target_ref overrides mission.target), got {e:?}");
+        }
+        // 对照：无 target_ref 覆盖时 mission.target（圆内）仍被拒
+        let s2 = r#"{
+            "schema_version":"0.20",
+            "mission":{
+                "start":{"lon":115.9,"lat":39.8,"alt_m":3000},
+                "target":{"lon":116.8,"lat":40.3,"alt_m":3000},
+                "no_fly_zones":[{"id":"nf1","zone_type":"no_fly",
+                    "shape":"circle","geometry":{"center":[116.54581607527983,39.90085583451849],"radius_km":50},
+                    "alt_min_m":0,"alt_max_m":12000,"height_semantics":"msl"}]
+            }
+        }"#;
+        let input2 = Input::from_json_str(s2).unwrap();
+        match validate(&input2) {
+            Err(AppError::InputInvalid(InputInvalidReason::TargetInNoFly)) => {}
+            other => panic!("expected target_in_no_fly, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mid_waypoint_in_no_fly_rejected() {
+        // P5-M2：必经点在禁飞区 → fail-fast（必经点不可绕行）
+        let s = r#"{
+            "schema_version":"0.20",
+            "mission":{
+                "start":{"lon":115.0,"lat":39.0,"alt_m":0},
+                "target":{"lon":117.0,"lat":40.0,"alt_m":0},
+                "vehicles":[{"id":"v1","profile":{"aircraft_type":"FIXED_WING"},
+                    "start_pose":{"lon":115.0,"lat":39.0,"alt_m":0,"heading_deg":45},
+                    "mid_waypoints":[{"lon":116.5,"lat":39.9,"alt_m":0}]}],
+                "no_fly_zones":[{"id":"nf1","zone_type":"no_fly",
+                    "shape":"circle","geometry":{"center":[116.5,39.9],"radius_km":10},
+                    "alt_min_m":0,"alt_max_m":10000}]
+            }
+        }"#;
+        let input = Input::from_json_str(s).unwrap();
+        match validate(&input) {
+            Err(AppError::InputInvalid(InputInvalidReason::MidWaypointInNoFly)) => {}
+            other => panic!("expected mid_waypoint_in_no_fly, got {other:?}"),
+        }
+        // 必经点在禁飞区外 → 通过
+        let s2 = s.replace("lon\":116.5,\"lat\":39.9", "lon\":116.0,\"lat\":39.0");
+        let input2 = Input::from_json_str(&s2).unwrap();
+        if let Err(e) = validate(&input2) {
+            panic!("expected ok, got {e:?}");
         }
     }
 
