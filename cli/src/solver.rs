@@ -1181,6 +1181,114 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                         eprintln!("[smooth-dbg]   seg{si}: {} pts", seg.points.len());
                     }
                 }
+                // P1 可见图 patch 绕过（docs/12 §8/§13；feature-flag 默认关，C6）
+                // 触发：终检硬闸失败 → 单簇失败点 → 单多边形硬墙（NoFly/Obstacle）→
+                // 可见图最短路径 → verify 复验。成功交付 + degradations 标注；失败
+                // 按 C3 归因分层标注（截断 ≠ 几何无解，C2），归原 raw 回退流程。
+                if crate::patch::patch_enabled()
+                    && crate::patch::patch_applicable(
+                        &input
+                            .mission
+                            .no_fly_zones
+                            .iter()
+                            .chain(input.mission.obstacles.iter())
+                            .cloned()
+                            .collect::<Vec<_>>(),
+                        ctx.terrain.is_some(),
+                        !v.mid_waypoints.is_empty(),
+                    )
+                {
+                    let wall_polys: Vec<&Zone> = input
+                        .mission
+                        .no_fly_zones
+                        .iter()
+                        .chain(input.mission.obstacles.iter())
+                        .filter(|z| z.is_wall() && matches!(z.shape, ZoneShape::Polygon { .. }))
+                        .collect();
+                    if let (Some(fail_pt), Some(a), Some(b)) = (
+                        crate::patch::locate_single_cluster(&final_rep.issues, crate::patch::PATCH_R_DEG),
+                        joined.points.first(),
+                        joined.points.last(),
+                    ) {
+                        if wall_polys.len() == 1 {
+                            let ZoneShape::Polygon { vertices } = &wall_polys[0].shape else {
+                                unreachable!()
+                            };
+                            let cx = vertices.iter().map(|v| v[0]).sum::<f64>() / vertices.len() as f64;
+                            let cy = vertices.iter().map(|v| v[1]).sum::<f64>() / vertices.len() as f64;
+                            let obs_span = vertices
+                                .iter()
+                                .map(|v| crate::path::haversine_m(cx, cy, v[0], v[1]) / 1000.0)
+                                .fold(0.0_f64, f64::max);
+                            let d_fail = crate::path::haversine_m(fail_pt[0], fail_pt[1], cx, cy) / 1000.0;
+                            let inflation_m = (opts.turn_radius_m * 0.5).clamp(2_000.0, 10_000.0);
+                            if d_fail <= crate::patch::PATCH_R_DEG * 111.32 + obs_span {
+                                match crate::patch::plan_patch(
+                                    [a.lon, a.lat],
+                                    [b.lon, b.lat],
+                                    vertices,
+                                    inflation_m,
+                                ) {
+                                    crate::patch::PatchOutcome::Path(patch_pts, _len_km) => {
+                                        let patch_path = crate::path::Path::new(
+                                            patch_pts
+                                                .iter()
+                                                .map(|[lon, lat]| crate::path::PathPoint::new(*lon, *lat, alt_eff))
+                                                .collect(),
+                                        );
+                                        let rep_p = crate::smooth::verify_path(
+                                            &patch_path,
+                                            None,
+                                            &opts,
+                                            &ctx,
+                                            Some(phys_min_radius_m),
+                                        );
+                                        if rep_p.ok {
+                                            pts = patch_path.points;
+                                            degradations.push(
+                                                "patch: visibility-graph bypass adopted (docs/12 §3.3)".into(),
+                                            );
+                                            warnings.extend(rep_p.warnings.iter().cloned());
+                                            warnings.extend(seg_warnings.iter().cloned());
+                                            break 'fmm_attempt;
+                                        }
+                                        // C3 归因：verify 硬闸失败 → 归因分层（拟合缺陷 vs 几何无解）
+                                        let hull = crate::patch::convex_hull(vertices);
+                                        let inflated =
+                                            crate::patch::inflate_convex(&hull, inflation_m / 111_320.0);
+                                        match crate::patch::classify_verify_failure(
+                                            &patch_pts,
+                                            &rep_p.issues,
+                                            &inflated,
+                                            2.0 * inflation_m / 111_320.0,
+                                        ) {
+                                            crate::patch::PatchFailureClass::FittingDefect => {
+                                                degradations.push(
+                                                    "patch: fitting_defect (turn margin, docs/12 §13.1 C3)"
+                                                        .into(),
+                                                )
+                                            }
+                                            crate::patch::PatchFailureClass::GeometricImpossible => {
+                                                degradations.push(
+                                                    "patch: geometrically_impossible (docs/12 §13.1 C3)"
+                                                        .into(),
+                                                )
+                                            }
+                                        }
+                                    }
+                                    crate::patch::PatchOutcome::SearchTruncated => {
+                                        // C2：截断 ≠ 几何无解；标注降级，归原 raw 回退
+                                        degradations.push(
+                                            "patch: search_truncated (visible-graph cap, docs/12 §13.1 C2)"
+                                                .into(),
+                                        );
+                                    }
+                                    crate::patch::PatchOutcome::GeometricImpossible => {}
+                                }
+                            }
+                        }
+                    }
+                }
                 // 终检失败 → 回退未平滑拼接（必经点保留，宁丑勿违）
                 pts = raw_joined.points;
                 let msg = "smoothing_failed: no smoothed stage passed full verification";

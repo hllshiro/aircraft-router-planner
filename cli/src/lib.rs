@@ -9,6 +9,7 @@ pub mod coord;
 pub mod costfield;
 pub mod dubins;
 pub mod error;
+pub mod patch;
 pub mod path;
 pub mod smooth;
 pub mod solver;
