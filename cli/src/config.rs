@@ -145,9 +145,6 @@ pub struct VehicleInput {
     /// 目标引用（缺省 = mission.target）
     #[serde(default)]
     pub target_ref: Option<String>,
-    /// 任务场景（缺省 = A1 通用语义）：launch_position / evade_detection
-    #[serde(default)]
-    pub scenario: Option<String>,
     /// 中途必经点（Phase 4 M5 每机独立序列）：start → mid[0..] → target。
     /// 分段 FMM（共享代价场）→ 拼接 → 整路径平滑复验。高度字段当前仅解析，
     /// 垂直剖面统一取 start_pose.alt_m（水平必经点拼接为本里程碑范围）。
