@@ -1219,6 +1219,13 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                             .chain(input.mission.obstacles.iter())
                             .filter(|z| z.is_wall() && matches!(z.shape, ZoneShape::Polygon { .. }))
                             .collect();
+                        let circle_walls: Vec<&Zone> = input
+                            .mission
+                            .no_fly_zones
+                            .iter()
+                            .chain(input.mission.obstacles.iter())
+                            .filter(|z| z.is_wall() && matches!(z.shape, ZoneShape::Circle { .. }))
+                            .collect();
                         let restricted: Vec<&Zone> = input.mission.restricted_zones.iter().collect();
                         let inflation_m = (opts.turn_radius_m * 0.5).clamp(2_000.0, 10_000.0);
                         let radar_opt = if input.mission.red_forces.radars.is_empty() {
@@ -1226,17 +1233,21 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                         } else {
                             Some((&threat, params_merged.radar_cost_coef))
                         };
-                        let mut adopted: Option<Vec<crate::path::PathPoint>> = None;
+                        // P4：地形净空 + NODATA 5x 进 patch（§3.3 P2 口径完整化）
+                        let terrain_opt = ctx.terrain.map(|t| (t, opts.clearance_m.max(1.0)));
+                        // P4-M4：真·多 patch 串接（§11.2 第 3 条）——失败点沿全程分布的
+                        // 100km+ 贴墙走廊：所有簇依次 patch，每簇成功后把 patch 拼入当前
+                        // 路径（stitch），下一簇锚点取"当前拼接路径"与簇 rect 的交点
+                        // （迭代拼接，边界锚点 tie-break 同单簇）；每步整链 verify
+                        // （阶段 1-D 硬闸）通过才拼入。全部簇处理完 → 交付拼接路径。
+                        let mut current: Vec<[f64; 2]> = skeleton;
+                        let mut used_any = false;
                         for c in &clusters {
-                            // 多 patch 串接默认模式（§11.2）：逐簇 patch，首个成功交付
-                            if adopted.is_some() {
-                                break;
-                            }
                             let mut rect =
                                 crate::patch::PatchRect::from_center(*c, crate::patch::PATCH_R_DEG);
                             let mut retry = 0;
                             loop {
-                                let (ein, eout) = crate::patch::boundary_anchors(&skeleton, &rect);
+                                let (ein, eout) = crate::patch::boundary_anchors(&current, &rect);
                                 if let (Some(a), Some(b)) = (ein, eout) {
                                     let obstacles: Vec<Vec<[f64; 2]>> = wall_polys
                                         .iter()
@@ -1251,19 +1262,38 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                                             _ => None,
                                         })
                                         .collect();
-                                    if !obstacles.is_empty() || !restricted.is_empty() {
+                                    // P4：圆硬墙（膨胀后）进入可见图切点锚点
+                                    let circle_obs: Vec<crate::patch::CircleObs> = circle_walls
+                                        .iter()
+                                        .filter_map(|z| match &z.shape {
+                                            ZoneShape::Circle { center, radius_km } => {
+                                                if rect.contains([center[0], center[1]]) {
+                                                    Some(crate::patch::CircleObs {
+                                                        center: *center,
+                                                        r_eff_m: radius_km * 1000.0 + inflation_m,
+                                                    })
+                                                } else {
+                                                    None
+                                                }
+                                            }
+                                            _ => None,
+                                        })
+                                        .collect();
+                                    if !obstacles.is_empty() || !circle_obs.is_empty() || !restricted.is_empty() {
                                         match crate::patch::plan_patch_multi(
                                             a,
                                             b,
                                             &obstacles,
+                                            &circle_obs,
                                             &restricted,
                                             inflation_m,
                                             alt_eff,
                                             radar_opt,
+                                            terrain_opt,
                                         ) {
                                             crate::patch::PatchOutcome::Path(patch_pts, _len_km) => {
                                                 let joined_pts = crate::patch::stitch(
-                                                    &skeleton, &patch_pts, a, b,
+                                                    &current, &patch_pts, a, b,
                                                 );
                                                 let joined_path = crate::path::Path::new(
                                                     joined_pts
@@ -1283,7 +1313,8 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                                                     Some(phys_min_radius_m),
                                                 );
                                                 if rep_j.ok {
-                                                    adopted = Some(joined_path.points);
+                                                    current = joined_pts;
+                                                    used_any = true;
                                                     degradations.push(
                                                         "patch: visibility-graph bypass adopted (docs/12 §3.3/§3.5)"
                                                             .into(),
@@ -1345,8 +1376,11 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                                 break;
                             }
                         }
-                        if let Some(p) = adopted {
-                            pts = p;
+                        if used_any {
+                            pts = current
+                                .iter()
+                                .map(|[lon, lat]| crate::path::PathPoint::new(*lon, *lat, alt_eff))
+                                .collect();
                             warnings.extend(seg_warnings.iter().cloned());
                             break 'fmm_attempt;
                         }

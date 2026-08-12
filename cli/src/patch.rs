@@ -31,22 +31,25 @@ pub fn patch_enabled() -> bool {
     std::env::var("ARP_PATCH").map(|v| v == "1").unwrap_or(false)
 }
 
-/// P1 可应用性判定（触发前的排除项检查）。
+/// P4 可应用性判定（触发前的排除项检查）。
 ///
-/// - `has_terrain`：P1 无地形（data 契约只吃 ARPK1，patch 先不做地形净空边权）；
-/// - `has_mid_waypoints`：P1 排除 mid_waypoint 触发源（§13.2 R3）；
-/// - `zones` 中圆障碍/限飞区（Restricted）触发均被 P1 排除（主管拍板，§8/§13.4）。
-pub fn patch_applicable(zones: &[crate::config::Zone], has_terrain: bool, has_mid_waypoints: bool) -> bool {
-    if has_terrain || has_mid_waypoints {
+/// - `has_terrain`：P4 已放开（地形净空边权 + NODATA 5x 进 patch，§3.3 P2 口径）；
+/// - `has_mid_waypoints`：仍排除 mid_waypoint 触发源（§13.2 R3；P4 不做必经点触发）；
+/// - 圆障碍 P4 已放开（切点锚点 2D 水平绕行；禁飞区绝对禁入语义不变，§8 排除理由
+///   仅限垂直剖面绕行通道）；多边形硬墙沿用 P1/P2。
+pub fn patch_applicable(zones: &[crate::config::Zone], _has_terrain: bool, has_mid_waypoints: bool) -> bool {
+    if has_mid_waypoints {
         return false;
     }
-    if !zones.iter().all(|z| {
-        // P1 只接受多边形硬墙（NoFly/Obstacle）；圆障碍与限飞区（含圆）排除。
-        z.is_wall() && matches!(z.shape, crate::config::ZoneShape::Polygon { .. })
-    }) {
-        return false;
-    }
-    true
+    // 至少一个硬墙（多边形或圆）才值得 patch（触发源 = 硬墙绕行失败点）；
+    // 纯限飞区场景不触发（限飞区只接线弦判据，不作为触发源，§3.3）。
+    zones.iter().any(|z| {
+        z.is_wall()
+            && matches!(
+                z.shape,
+                crate::config::ZoneShape::Polygon { .. } | crate::config::ZoneShape::Circle { .. }
+            )
+    })
 }
 
 // ==================== 几何原语 ====================
@@ -631,14 +634,16 @@ mod tests {
         let restricted = mk(ZoneType::Restricted, ZoneShape::Polygon { vertices: vec![[116.0, 39.0], [117.0, 39.0], [117.0, 40.0]] });
         // 纯多边形硬墙 → 适用
         assert!(patch_applicable(&[poly_wall.clone()], false, false));
-        // 圆障碍 → 排除（R1：禁飞区绝对禁入）
-        assert!(!patch_applicable(&[circle_wall], false, false));
-        // 限飞区 → 排除
+        // 圆障碍 → 适用（P4 放开：切点锚点 2D 水平绕行）
+        assert!(patch_applicable(&[circle_wall], false, false));
+        // 限飞区（非墙）→ 不适用（限飞区只接线弦判据，不触发 patch）
         assert!(!patch_applicable(&[restricted], false, false));
-        // 地形 → 排除
-        assert!(!patch_applicable(&[poly_wall.clone()], true, false));
-        // 必经点 → 排除
+        // 地形 → 适用（P4 放开：地形净空边权 + NODATA 5x）
+        assert!(patch_applicable(&[poly_wall.clone()], true, false));
+        // 必经点 → 排除（P4 不做 mid_waypoint 触发源）
         assert!(!patch_applicable(&[poly_wall], false, true));
+        // 无硬墙（空）→ 不适用
+        assert!(!patch_applicable(&[], false, false));
     }
 
     // ---------- P2 ----------
@@ -697,7 +702,7 @@ mod tests {
     fn plan_patch_multi_two_obstacles() {
         let obs1 = [[116.30, 39.30], [116.50, 39.30], [116.50, 39.70], [116.30, 39.70]];
         let obs2 = [[116.70, 39.30], [116.90, 39.30], [116.90, 39.70], [116.70, 39.70]];
-        let out = plan_patch_multi([116.0, 39.0], [117.0, 40.0], &[obs1.to_vec(), obs2.to_vec()], &[], 5_000.0, 3000.0, None);
+        let out = plan_patch_multi([116.0, 39.0], [117.0, 40.0], &[obs1.to_vec(), obs2.to_vec()], &[], &[], 5_000.0, 3000.0, None, None);
         match out {
             PatchOutcome::Path(p, d) => {
                 assert!(p.len() >= 3, "should detour two obstacles: {p:?}");
@@ -727,9 +732,11 @@ mod tests {
             [116.0, 39.0],
             [117.0, 40.0],
             &[],
+            &[],
             &[&restricted[0]],
             5_000.0,
             3000.0,
+            None,
             None,
         );
         match out_blocked {
@@ -741,9 +748,11 @@ mod tests {
             [116.0, 39.0],
             [117.0, 40.0],
             &[],
+            &[],
             &[&restricted[0]],
             5_000.0,
             1000.0,
+            None,
             None,
         );
         match out_pass {
@@ -784,7 +793,7 @@ mod tests {
     fn plan_patch_multi_anchor_in_obstacle_impossible() {
         // start/target 被障碍吞入（膨胀后）→ 无机动空间 → 几何无解
         let obs = [[116.30, 39.30], [116.70, 39.30], [116.70, 39.70], [116.30, 39.70]];
-        let out = plan_patch_multi([116.5, 39.5], [117.0, 40.0], &[obs.to_vec()], &[], 10_000.0, 3000.0, None);
+        let out = plan_patch_multi([116.5, 39.5], [117.0, 40.0], &[obs.to_vec()], &[], &[], 10_000.0, 3000.0, None, None);
         assert!(
             matches!(out, PatchOutcome::GeometricImpossible),
             "anchor swallowed by obstacle -> impossible: {out:?}"
@@ -840,6 +849,51 @@ mod tests {
     }
 
     #[test]
+    fn multi_patch_stitch_three_clusters_p4() {
+        // P4-M4 多 patch 串接（§11.2 第 3 条）：100km+ 走廊失败点沿全程分布 → 三簇
+        // 各自 patch 迭代拼入当前路径（solver 同款循环语义）；每簇 rect 内障碍过滤。
+        let skel: Vec<[f64; 2]> = (0..=12)
+            .map(|i| [116.0 + i as f64 * 0.1, 38.0 + i as f64 * 0.1])
+            .collect();
+        let centers = [[116.30, 38.30], [116.60, 38.60], [116.90, 38.90]];
+        let obs_all = [
+            [[116.28, 38.28], [116.38, 38.28], [116.38, 38.38], [116.28, 38.38]],
+            [[116.58, 38.58], [116.68, 38.58], [116.68, 38.68], [116.58, 38.68]],
+            [[116.88, 38.88], [116.98, 38.88], [116.98, 38.98], [116.88, 38.98]],
+        ];
+        let mut current = skel.clone();
+        let mut patches = 0;
+        for (ci, c) in centers.iter().enumerate() {
+            let rect = PatchRect::from_center(*c, PATCH_R_DEG);
+            let (ein, eout) = boundary_anchors(&current, &rect);
+            if let (Some(a), Some(b)) = (ein, eout) {
+                let obs_in_rect: Vec<Vec<[f64; 2]>> = obs_all
+                    .iter()
+                    .filter(|o| o.iter().any(|v| rect.contains(*v)))
+                    .map(|o| o.to_vec())
+                    .collect();
+                assert!(!obs_in_rect.is_empty(), "cluster {ci} rect should contain its obstacle");
+                match plan_patch_multi(
+                    a, b, &obs_in_rect, &[], &[], 5_000.0, 3000.0, None, None,
+                ) {
+                    PatchOutcome::Path(p, _) => {
+                        current = stitch(&current, &p, a, b);
+                        patches += 1;
+                    }
+                    other => panic!("cluster {ci} patch failed: {other:?}"),
+                }
+            }
+        }
+        assert_eq!(patches, 3, "all three clusters should patch");
+        // 起点/终点保留；无重复接缝（patch 绕行正确性由单簇测试覆盖）
+        assert_eq!(current.first().unwrap()[0], skel[0][0]);
+        assert_eq!(*current.last().unwrap(), skel[12]);
+        for w in current.windows(2) {
+            assert!(w[0] != w[1], "duplicate seam: {:?}", w);
+        }
+    }
+
+    #[test]
     fn radar_edge_weight_detours_high_cost() {
         use crate::config::{Radar, RadarType};
         use crate::threat::{SphericalRadarThreat, ThreatParams};
@@ -856,12 +910,153 @@ mod tests {
         let params = ThreatParams::default();
         let threat = SphericalRadarThreat::new(std::slice::from_ref(&radar), params);
         // 穿雷达中心线段（中点距雷达 0）→ 代价显著高于远离线
-        let w_center = edge_weight([116.0, 39.5], [117.0, 39.5], Some((&threat, 200.0)), 3000.0);
-        let w_far = edge_weight([116.0, 38.0], [117.0, 38.0], Some((&threat, 200.0)), 3000.0);
+        let w_center = edge_weight([116.0, 39.5], [117.0, 39.5], Some((&threat, 200.0)), 3000.0, None);
+        let w_far = edge_weight([116.0, 38.0], [117.0, 38.0], Some((&threat, 200.0)), 3000.0, None);
         assert!(w_center > w_far, "center pass should cost more: {w_center} vs {w_far}");
         // 无雷达 → 纯几何
-        let w_plain = edge_weight([116.0, 39.5], [117.0, 39.5], None, 3000.0);
+        let w_plain = edge_weight([116.0, 39.5], [117.0, 39.5], None, 3000.0, None);
         assert_eq!(w_plain.to_bits(), (crate::path::haversine_m(116.0, 39.5, 117.0, 39.5) / 1000.0).to_bits());
+    }
+
+    // ==================== P4：圆障碍切点锚点 + 地形边权（docs/12 §8 排除项解除） ====================
+
+    #[test]
+    fn circle_tangent_points_lie_on_circle() {
+        // 点到圆切点：几何正确性（切点在圆上）
+        let c = CircleObs { center: [116.5, 39.5], r_eff_m: 55_000.0 };
+        let ts = point_circle_tangents([116.0, 39.5], &c).expect("d > r -> 2 tangents");
+        let r_deg = 55_000.0 / 111_320.0;
+        for t in ts {
+            let d = ((t[0] - 116.5).powi(2) + (t[1] - 39.5).powi(2)).sqrt();
+            assert!((d - r_deg).abs() < 1e-9, "tangent must lie on circle: d={d}");
+        }
+        // 点在圆内 → 无切点
+        assert!(point_circle_tangents([116.5, 39.5], &c).is_none());
+    }
+
+    #[test]
+    fn circle_circle_tangents_geometry() {
+        let c1 = CircleObs { center: [116.0, 39.0], r_eff_m: 20_000.0 };
+        let c2 = CircleObs { center: [116.5, 39.0], r_eff_m: 20_000.0 };
+        let ts = circle_circle_tangents(&c1, &c2);
+        assert_eq!(ts.len(), 8, "外 2 组 + 内 2 组，每组 2 切点（每圆 4 个）");
+        for (pt, ci) in &ts {
+            let c = if *ci == 0 { &c1 } else { &c2 };
+            let r_deg = c.r_eff_m / 111_320.0;
+            let d = ((pt[0] - c.center[0]).powi(2) + (pt[1] - c.center[1]).powi(2)).sqrt();
+            assert!((d - r_deg).abs() < 1e-9, "tangent must lie on its circle: d={d}");
+        }
+        // 重叠圆（d < r1+r2）→ 内公切无解，只剩外公切（外 2 组 × 2 = 4 点）
+        let c3 = CircleObs { center: [116.2, 39.0], r_eff_m: 20_000.0 };
+        let ts2 = circle_circle_tangents(&c1, &c3);
+        assert_eq!(ts2.len(), 4, "overlap -> only external tangents");
+    }
+
+    #[test]
+    fn plan_patch_circle_tangent_arc_bypass() {
+        // 直线穿圆（NoFly 圆 r=40km，inflation 5km → r_eff=45km）→ 切点 + 圆弧绕行；
+        // 起点距圆心 55.7km > 45km ✓ 切点存在。路径全部在膨胀圆外（禁飞区绝对禁入：
+        // 水平绕行合法，不进入圆内）。
+        let c = CircleObs { center: [116.5, 39.5], r_eff_m: 45_000.0 };
+        let out = plan_patch_multi([116.0, 39.5], [117.0, 39.5], &[], &[c], &[], 5_000.0, 3000.0, None, None);
+        match out {
+            PatchOutcome::Path(p, _d) => {
+                assert!(p.len() > 2, "circle bypass should be an arc, got {p:?}");
+                let r_deg = 45_000.0 / 111_320.0;
+                for pt in &p {
+                    let d = ((pt[0] - 116.5).powi(2) + (pt[1] - 39.5).powi(2)).sqrt();
+                    assert!(d >= r_deg - 1e-6, "path point inside inflated circle: {pt:?} d={d}");
+                }
+                assert_eq!(p.first().unwrap()[1], 39.5);
+                assert_eq!(p.last().unwrap()[1], 39.5);
+            }
+            other => panic!("expected arc bypass, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn plan_patch_two_circles_detour() {
+        // 双圆错位挡路（各自穿直线）→ 路径绕行（长度 > 直线），且不进入任一圆
+        let c1 = CircleObs { center: [116.30, 39.70], r_eff_m: 23_000.0 };
+        let c2 = CircleObs { center: [116.70, 39.30], r_eff_m: 23_000.0 };
+        let out = plan_patch_multi([116.0, 39.5], [117.0, 39.5], &[], &[c1, c2], &[], 5_000.0, 3000.0, None, None);
+        match out {
+            PatchOutcome::Path(p, d) => {
+                assert!(p.len() > 2, "detour expected: {p:?}");
+                let r_deg = 23_000.0 / 111_320.0;
+                for pt in &p {
+                    let d1 = ((pt[0] - 116.30).powi(2) + (pt[1] - 39.70).powi(2)).sqrt();
+                    let d2 = ((pt[0] - 116.70).powi(2) + (pt[1] - 39.30).powi(2)).sqrt();
+                    assert!(d1 >= r_deg - 1e-6 && d2 >= r_deg - 1e-6, "point inside circle: {pt:?}");
+                }
+                // 绕行距离 > 直线（116E→117E @39.5N ≈ 85.9km）
+                assert!(d > 86.0, "detour length {d} should exceed straight 85.9km");
+            }
+            other => panic!("expected detour, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn plan_patch_circle_anchor_inside_impossible() {
+        // 起点在膨胀圆内 → 无机动空间 → 几何无解
+        let c = CircleObs { center: [116.5, 39.5], r_eff_m: 60_000.0 };
+        let out = plan_patch_multi([116.45, 39.5], [117.0, 39.5], &[], &[c], &[], 5_000.0, 3000.0, None, None);
+        assert!(
+            matches!(out, PatchOutcome::GeometricImpossible),
+            "anchor inside inflated circle -> impossible: {out:?}"
+        );
+    }
+
+    #[test]
+    fn edge_weight_nodata_five_x() {
+        // 全 NoData 地形 → 边权 ×5（FMM 同源 Sample::base_cost）
+        struct NoDataTerrain;
+        impl crate::terrain::TerrainSource for NoDataTerrain {
+            fn height_at(&self, _lon: f64, _lat: f64) -> Option<f64> {
+                None
+            }
+            fn bounds(&self) -> Option<crate::terrain::GeoBounds> {
+                None
+            }
+            fn resolution_desc(&self) -> String {
+                "mock".into()
+            }
+        }
+        let w = edge_weight([116.0, 39.0], [117.0, 39.0], None, 3000.0, Some((&NoDataTerrain, 100.0)));
+        let base = crate::path::haversine_m(116.0, 39.0, 117.0, 39.0) / 1000.0;
+        assert_eq!(w.to_bits(), (base * 5.0).to_bits(), "NoData edge cost must be 5x");
+    }
+
+    #[test]
+    fn plan_patch_terrain_peak_blocks_straight() {
+        // 地形山峰墙（>4000m）横跨直线，alt 3000 → 直线边被地形净空拒 → 无障碍可绕 → 几何无解
+        struct PeakTerrain;
+        impl crate::terrain::TerrainSource for PeakTerrain {
+            fn height_at(&self, lon: f64, _lat: f64) -> Option<f64> {
+                Some(if lon > 116.4 { 5000.0 } else { 100.0 })
+            }
+            fn bounds(&self) -> Option<crate::terrain::GeoBounds> {
+                None
+            }
+            fn resolution_desc(&self) -> String {
+                "mock".into()
+            }
+        }
+        let out = plan_patch_multi(
+            [116.0, 39.5],
+            [117.0, 39.5],
+            &[],
+            &[],
+            &[],
+            5_000.0,
+            3000.0,
+            None,
+            Some((&PeakTerrain, 100.0)),
+        );
+        assert!(
+            matches!(out, PatchOutcome::GeometricImpossible),
+            "terrain wall blocks straight, no obstacle to bypass -> impossible: {out:?}"
+        );
     }
 }
 
@@ -982,24 +1177,28 @@ pub fn boundary_anchors(skeleton: &[[f64; 2]], rect: &PatchRect) -> (Option<[f64
 }
 
 /// P2 多障碍可见图规划（docs/12 §3.3）：
-/// - 顶点 = start/target 锚点 + 各硬墙凸化（C1）后矢量膨胀（C4）顶点；
-/// - 边合法性：不穿任何凸化障碍（C5 epsilon 保守）+ 限飞区弦判据（高度判定 +
-///   净距，restricted 不凸化）+ 雷达同源代价不进合法性（只进边权）；
-/// - 边权（P2 口径，§3.3/§12.2）：几何长度 × (1 + radar_cost_coef × (p + geom))，
-///   与 FMM 同源（×/同款 static_penetration），避免接缝处两套口径冲突。
+/// - 顶点 = start/target 锚点 + 各硬墙凸化（C1）后矢量膨胀（C4）顶点 +
+///   圆硬墙切点（P4：点-圆切点 + 圆-圆公切线切点）；
+/// - 边合法性：不穿任何凸化障碍（C5 epsilon 保守）+ 不穿圆硬墙（净距 ≥ r_eff）
+///   + 限飞区弦判据（高度判定 + 净距，restricted 不凸化）+ 地形净空沿边采样
+///   （P4：terrain_point_clearance，NoData/OOB 不阻断，§11.1 细层免网格敏感性）；
+/// - 边权（P2 口径，§3.3/§12.2）：几何长度 × NODATA/OOB 5x（P4，FMM 同源
+///   Sample::base_cost）× (1 + radar_cost_coef × (p + geom))，与 FMM 同源。
 ///
 /// `radar` = Some((threat, radar_cost_coef)) 时启用雷达同源边权；None → 纯几何（P1）。
+/// `terrain` = Some((terrain, clearance_m)) 时启用地形净空检查 + NODATA 5x 边权。
 pub fn plan_patch_multi(
     start: [f64; 2],
     target: [f64; 2],
     obstacles: &[Vec<[f64; 2]>],
+    circles: &[CircleObs],
     restricted: &[&crate::config::Zone],
     inflation_m: f64,
     alt_m: f64,
     radar: Option<(&crate::threat::SphericalRadarThreat, f64)>,
+    terrain: Option<(&dyn crate::terrain::TerrainSource, f64)>,
 ) -> PatchOutcome {
     // 各障碍凸化 + 膨胀
-    let mut hulls: Vec<Vec<[f64; 2]>> = Vec::new();
     let mut inflated: Vec<Vec<[f64; 2]>> = Vec::new();
     for obs in obstacles {
         let hull = convex_hull(obs);
@@ -1010,28 +1209,51 @@ pub fn plan_patch_multi(
         if inf.len() < 3 {
             continue;
         }
-        hulls.push(hull);
         inflated.push(inf);
     }
 
-    // 无有效障碍 → 直线（仍过限飞区弦判据与雷达代价）
-    if inflated.is_empty() {
+    // 无有效障碍（多边形 + 圆均无）→ 直线（仍过限飞区弦判据、地形与雷达代价）
+    if inflated.is_empty() && circles.is_empty() {
         if restricted_edge_ok(restricted, alt_m, start, target).is_err() {
             return PatchOutcome::GeometricImpossible;
         }
-        let w = edge_weight(start, target, radar, alt_m);
+        if !edge_terrain_ok(terrain, alt_m, start, target) {
+            return PatchOutcome::GeometricImpossible;
+        }
+        let w = edge_weight(start, target, radar, alt_m, terrain);
         return PatchOutcome::Path(vec![start, target], w);
     }
 
-    // 节点：0=start，1=target，之后各障碍凸顶点（按障碍序 + 顶点序，确定性）
+    // 节点：0=start，1=target，之后多边形凸顶点，最后圆切点（确定性：障碍序 + 顶点序）
     let mut nodes: Vec<[f64; 2]> = Vec::new();
+    let mut node_circle: Vec<Option<usize>> = Vec::new(); // 节点所属圆（切点）
     nodes.push(start);
+    node_circle.push(None);
     nodes.push(target);
+    node_circle.push(None);
     for inf in &inflated {
         nodes.extend(inf.iter().copied());
+        node_circle.extend(std::iter::repeat(None).take(inf.len()));
+    }
+    let base_count = nodes.len();
+    for (ci, c) in circles.iter().enumerate() {
+        // 每个已有节点（锚点 + 多边形顶点）→ 该圆 2 切点
+        for ni in 0..base_count {
+            if let Some(ts) = point_circle_tangents(nodes[ni], c) {
+                nodes.extend(ts);
+                node_circle.extend([Some(ci); 2]);
+            }
+        }
+        // 圆-圆公切线切点（确定性：按圆索引序；切点所属圆由返回值携带）
+        for (_cj, c2) in circles.iter().enumerate().skip(ci + 1) {
+            for (cp, ci_) in circle_circle_tangents(c, c2) {
+                nodes.push(cp);
+                node_circle.push(Some(ci_));
+            }
+        }
     }
     let n_nodes = nodes.len();
-    if n_nodes > MAX_VIS_VERTICES {
+    if n_nodes > MAX_VIS_VERTICES * 4 {
         return PatchOutcome::SearchTruncated;
     }
 
@@ -1041,16 +1263,41 @@ pub fn plan_patch_multi(
             return PatchOutcome::GeometricImpossible;
         }
     }
+    for c in circles {
+        if point_circle_inside(start, c, GEOM_EPS_DEG) || point_circle_inside(target, c, GEOM_EPS_DEG) {
+            return PatchOutcome::GeometricImpossible;
+        }
+    }
 
-    // 邻接表：边不穿任何障碍 + 不违限飞区弦判据
+    // 邻接表：边不穿任何障碍 + 不违限飞区弦判据 + 地形净空 + 不穿圆
     let mut adj: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n_nodes];
     for i in 0..n_nodes {
         for j in (i + 1)..n_nodes {
             let pi = nodes[i];
             let pj = nodes[j];
+            // 同一圆上的切点对 → 圆弧边（绕膨胀圆边缘走，契约 9 机动空间）
+            if let (Some(ci), Some(cj)) = (node_circle[i], node_circle[j]) {
+                if ci == cj {
+                    let w = arc_edge_weight(pi, pj, &circles[ci], radar, alt_m, terrain);
+                    if w.is_finite() {
+                        adj[i].push((j, w));
+                        adj[j].push((i, w));
+                    }
+                    continue;
+                }
+            }
             let mut legal = true;
             for inf in &inflated {
                 if seg_intersects_convex(pi, pj, inf, GEOM_EPS_DEG) {
+                    legal = false;
+                    break;
+                }
+            }
+            if !legal {
+                continue;
+            }
+            for c in circles {
+                if !seg_circle_clearance_ok(pi, pj, c, GEOM_EPS_DEG) {
                     legal = false;
                     break;
                 }
@@ -1062,24 +1309,297 @@ pub fn plan_patch_multi(
             if restricted_edge_ok(restricted, alt_m, pi, pj).is_err() {
                 continue;
             }
-            let w = edge_weight(pi, pj, radar, alt_m);
+            // 地形净空沿边采样（P4）
+            if !edge_terrain_ok(terrain, alt_m, pi, pj) {
+                continue;
+            }
+            let w = edge_weight(pi, pj, radar, alt_m, terrain);
             adj[i].push((j, w));
             adj[j].push((i, w));
         }
     }
 
-    dijkstra_path(n_nodes, &adj, &nodes)
+    // Dijkstra + 路径重建（含圆弧采样）
+    dijkstra_path_p4(n_nodes, &adj, &nodes, &node_circle, circles)
 }
 
-/// P2 边权：几何长度 × 雷达同源代价——与 FMM 完全同款（solver.rs:454-465 口径）：
-/// 只在探测概率 p > 0 时应用 ×(1 + coef×(p + geom))；geom = 深穿惩罚（u<1 时 1-u）。
+/// P4 圆硬墙（膨胀后半径）。P1 排除圆障碍触发 patch 的 2D 水平绕行仍合法——
+/// 禁飞区绝对禁入指不可上下（垂直剖面）绕行，水平面内绕行不进入圆内（契约 8/9）。
+#[derive(Debug, Clone, Copy)]
+pub struct CircleObs {
+    pub center: [f64; 2],
+    pub r_eff_m: f64,
+}
+
+/// 点到圆切点（2 个；d ≤ r 无切点）。平面近似（patch 30km 尺度误差 <0.1%）。
+fn point_circle_tangents(p: [f64; 2], c: &CircleObs) -> Option<[[f64; 2]; 2]> {
+    let r = c.r_eff_m / 111_320.0;
+    let dx = c.center[0] - p[0];
+    let dy = c.center[1] - p[1];
+    let d = (dx * dx + dy * dy).sqrt();
+    if d <= r + 1e-12 {
+        return None;
+    }
+    let alpha = dy.atan2(dx);
+    let beta = (r / d).acos();
+    Some([
+        [
+            c.center[0] + r * (alpha + beta).cos(),
+            c.center[1] + r * (alpha + beta).sin(),
+        ],
+        [
+            c.center[0] + r * (alpha - beta).cos(),
+            c.center[1] + r * (alpha - beta).sin(),
+        ],
+    ])
+}
+
+/// 圆-圆公切线切点（外公切 2 组 + 内公切 2 组），返回 (切点, 所属圆索引)；
+/// 圆内含时对应组无解（不产生节点）。确定性：固定顺序（外 2 + 内 2）。
+fn circle_circle_tangents(c1: &CircleObs, c2: &CircleObs) -> Vec<([f64; 2], usize)> {
+    let r1 = c1.r_eff_m / 111_320.0;
+    let r2 = c2.r_eff_m / 111_320.0;
+    let dx = c2.center[0] - c1.center[0];
+    let dy = c2.center[1] - c1.center[1];
+    let d = (dx * dx + dy * dy).sqrt();
+    if d < 1e-12 {
+        return Vec::new();
+    }
+    let alpha = dy.atan2(dx);
+    let mut out = Vec::new();
+    // 外公切（同侧）：beta = acos((r1-r2)/d)
+    if (r1 - r2).abs() <= d {
+        let beta = ((r1 - r2) / d).acos();
+        for s in [1.0, -1.0] {
+            let dir = [(alpha + s * beta).cos(), (alpha + s * beta).sin()];
+            out.push(([c1.center[0] + r1 * dir[0], c1.center[1] + r1 * dir[1]], 0));
+            out.push(([c2.center[0] + r2 * dir[0], c2.center[1] + r2 * dir[1]], 1));
+        }
+    }
+    // 内公切（交叉侧）：beta = acos((r1+r2)/d)
+    if r1 + r2 <= d {
+        let beta = ((r1 + r2) / d).acos();
+        for s in [1.0, -1.0] {
+            let dir = [(alpha + s * beta).cos(), (alpha + s * beta).sin()];
+            out.push(([c1.center[0] + r1 * dir[0], c1.center[1] + r1 * dir[1]], 0));
+            out.push(([c2.center[0] - r2 * dir[0], c2.center[1] - r2 * dir[1]], 1));
+        }
+    }
+    out
+}
+
+/// 点-线段最近距离（平面近似，度）。
+fn pt_seg_dist_deg(a: [f64; 2], b: [f64; 2], p: [f64; 2]) -> f64 {
+    let vx = b[0] - a[0];
+    let vy = b[1] - a[1];
+    let wx = p[0] - a[0];
+    let wy = p[1] - a[1];
+    let len2 = vx * vx + vy * vy;
+    if len2 < 1e-18 {
+        return (wx * wx + wy * wy).sqrt();
+    }
+    let t = ((wx * vx + wy * vy) / len2).clamp(0.0, 1.0);
+    let px = a[0] + t * vx - p[0];
+    let py = a[1] + t * vy - p[1];
+    (px * px + py * py).sqrt()
+}
+
+/// 线段与膨胀圆净距 ≥ r - eps（不穿入圆内；切点/贴边放行，C5 epsilon 口径）。
+fn seg_circle_clearance_ok(a: [f64; 2], b: [f64; 2], c: &CircleObs, eps_deg: f64) -> bool {
+    let r = c.r_eff_m / 111_320.0;
+    pt_seg_dist_deg(a, b, c.center) >= r - eps_deg
+}
+
+/// 点在膨胀圆内（含 eps）。
+fn point_circle_inside(p: [f64; 2], c: &CircleObs, eps_deg: f64) -> bool {
+    let r = c.r_eff_m / 111_320.0;
+    let d = ((p[0] - c.center[0]).powi(2) + (p[1] - c.center[1]).powi(2)).sqrt();
+    d <= r + eps_deg
+}
+
+/// 圆弧边权：短弧长 × NODATA/OOB 5x（弧中点点采样）× 雷达同源（弧中点采样）。
+fn arc_edge_weight(
+    a: [f64; 2],
+    b: [f64; 2],
+    c: &CircleObs,
+    radar: Option<(&crate::threat::SphericalRadarThreat, f64)>,
+    alt_m: f64,
+    terrain: Option<(&dyn crate::terrain::TerrainSource, f64)>,
+) -> f64 {
+    let r = c.r_eff_m / 111_320.0;
+    let ang_a = (a[1] - c.center[1]).atan2(a[0] - c.center[0]);
+    let ang_b = (b[1] - c.center[1]).atan2(b[0] - c.center[0]);
+    let d_ang = (ang_b - ang_a + 3.0 * std::f64::consts::PI)
+        .rem_euclid(2.0 * std::f64::consts::PI)
+        - std::f64::consts::PI; // 归一化到 [-π, π]（短弧方向）
+    let arc_km = r * 111_320.0 * d_ang.abs() / 1000.0;
+    let mid_ang = ang_a + d_ang / 2.0;
+    let mid = [c.center[0] + r * mid_ang.cos(), c.center[1] + r * mid_ang.sin()];
+    let nodata_mult = if let Some((t, _)) = terrain {
+        if matches!(
+            t.sample_at(mid[0], mid[1]),
+            crate::terrain::Sample::NoData | crate::terrain::Sample::OutOfBounds
+        ) {
+            5.0
+        } else {
+            1.0
+        }
+    } else {
+        1.0
+    };
+    let base = arc_km * nodata_mult;
+    if let Some((threat, coef)) = radar {
+        let p = threat.static_union_probability(mid[0], mid[1]);
+        if p > 0.0 {
+            let u = threat.static_penetration(mid[0], mid[1], alt_m);
+            let geom = if u < 1.0 { 1.0 - u } else { 0.0 };
+            base * (1.0 + coef * (p + geom))
+        } else {
+            base
+        }
+    } else {
+        base
+    }
+}
+
+/// 圆弧采样（沿膨胀圆短弧，~5km 步长，确定性固定序）。
+fn arc_points(a: [f64; 2], b: [f64; 2], c: &CircleObs) -> Vec<[f64; 2]> {
+    let r = c.r_eff_m / 111_320.0;
+    let ang_a = (a[1] - c.center[1]).atan2(a[0] - c.center[0]);
+    let ang_b = (b[1] - c.center[1]).atan2(b[0] - c.center[0]);
+    let d_ang = (ang_b - ang_a + 3.0 * std::f64::consts::PI)
+        .rem_euclid(2.0 * std::f64::consts::PI)
+        - std::f64::consts::PI;
+    let n = ((r * d_ang.abs() / (5.0 / 111_320.0)).ceil() as usize).max(1);
+    (0..=n)
+        .map(|k| {
+            let t = k as f64 / n as f64;
+            let ang = ang_a + d_ang * t;
+            [c.center[0] + r * ang.cos(), c.center[1] + r * ang.sin()]
+        })
+        .collect()
+}
+
+/// 地形净空沿边采样（P4）：terrain_point_clearance 统一口径（复用阶段 1-A），
+/// NoData/OOB 不阻断（降级进边权 5x），Forbidden/Fail 拒边。细层免网格敏感性（§11.1）。
+fn edge_terrain_ok(
+    terrain: Option<(&dyn crate::terrain::TerrainSource, f64)>,
+    alt_m: f64,
+    a: [f64; 2],
+    b: [f64; 2],
+) -> bool {
+    if let Some((t, cl)) = terrain {
+        let len = crate::path::haversine_m(a[0], a[1], b[0], b[1]);
+        let n = crate::smooth::terrain_sample_count(len, 8, 1024);
+        for k in 0..n {
+            let tt = if n == 1 { 0.0 } else { k as f64 / (n - 1) as f64 };
+            let lon = a[0] + (b[0] - a[0]) * tt;
+            let lat = a[1] + (b[1] - a[1]) * tt;
+            if matches!(
+                crate::smooth::terrain_point_clearance(t, lon, lat, alt_m, cl),
+                crate::smooth::TerrainPointClearance::Fail(_)
+            ) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// P4 Dijkstra（同 P1/P2 确定性：BTreeMap 堆 + total_cmp + 整数 tie-break），
+/// 路径重建时相邻节点若属同一圆 → 圆弧采样；否则直线端点。
+fn dijkstra_path_p4(
+    n_nodes: usize,
+    adj: &[Vec<(usize, f64)>],
+    nodes: &[[f64; 2]],
+    node_circle: &[Option<usize>],
+    circles: &[CircleObs],
+) -> PatchOutcome {
+    let mut dist = vec![f64::INFINITY; n_nodes];
+    let mut prev = vec![usize::MAX; n_nodes];
+    let mut heap = BinaryHeap::new();
+    dist[0] = 0.0;
+    heap.push(State { cost: 0.0, id: 0 });
+    while let Some(State { cost, id }) = heap.pop() {
+        if cost > dist[id] {
+            continue;
+        }
+        if id == 1 {
+            break;
+        }
+        for &(nid, w) in &adj[id] {
+            let nc = cost + w;
+            if nc < dist[nid] {
+                dist[nid] = nc;
+                prev[nid] = id;
+                heap.push(State { cost: nc, id: nid });
+            }
+        }
+    }
+    if !dist[1].is_finite() {
+        return PatchOutcome::GeometricImpossible;
+    }
+    let mut chain = Vec::new();
+    let mut cur = 1;
+    while cur != usize::MAX {
+        chain.push(cur);
+        if cur == 0 {
+            break;
+        }
+        cur = prev[cur];
+    }
+    chain.reverse();
+    let mut path: Vec<[f64; 2]> = Vec::new();
+    for w in chain.windows(2) {
+        let (i, j) = (w[0], w[1]);
+        if let (Some(ci), Some(cj)) = (node_circle[i], node_circle[j]) {
+            if ci == cj {
+                path.extend(arc_points(nodes[i], nodes[j], &circles[ci]));
+                continue;
+            }
+        }
+        path.push(nodes[i]);
+    }
+    path.push(nodes[1]);
+    PatchOutcome::Path(path, dist[1])
+}
+
+/// P2 边权：几何长度 × NODATA/OOB 5x（FMM 同源 Sample::base_cost）× 雷达同源
+/// 代价——与 FMM 完全同款（solver.rs:454-465 口径）：只在探测概率 p > 0 时
+/// 应用 ×(1 + coef×(p + geom))；geom = 深穿惩罚（u<1 时 1-u）。
 fn edge_weight(
     a: [f64; 2],
     b: [f64; 2],
     radar: Option<(&crate::threat::SphericalRadarThreat, f64)>,
     alt_m: f64,
+    terrain: Option<(&dyn crate::terrain::TerrainSource, f64)>,
 ) -> f64 {
-    let base = crate::path::haversine_m(a[0], a[1], b[0], b[1]) / 1000.0;
+    let base_km = crate::path::haversine_m(a[0], a[1], b[0], b[1]) / 1000.0;
+    // 地形 NODATA/OOB 5x（FMM 同源）
+    let nodata_mult = if let Some((t, _)) = terrain {
+        let n = crate::smooth::terrain_sample_count(base_km * 1000.0, 8, 1024);
+        let mut nodata = false;
+        for k in 0..n {
+            let tt = if n == 1 { 0.0 } else { k as f64 / (n - 1) as f64 };
+            let lon = a[0] + (b[0] - a[0]) * tt;
+            let lat = a[1] + (b[1] - a[1]) * tt;
+            if matches!(
+                t.sample_at(lon, lat),
+                crate::terrain::Sample::NoData | crate::terrain::Sample::OutOfBounds
+            ) {
+                nodata = true;
+                break;
+            }
+        }
+        if nodata {
+            5.0
+        } else {
+            1.0
+        }
+    } else {
+        1.0
+    };
+    let base = base_km * nodata_mult;
     if let Some((threat, coef)) = radar {
         // 中点采样（与 FMM 格点采样同口径；P2 段长 ≤ 60km 采样密度足够）
         let mid = [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0];
@@ -1116,45 +1636,6 @@ fn restricted_edge_ok(
         }
     }
     Ok(())
-}
-
-/// Dijkstra 最短路径（确定性：total_cmp + 整数索引 tie-break）。
-fn dijkstra_path(n_nodes: usize, adj: &[Vec<(usize, f64)>], nodes: &[[f64; 2]]) -> PatchOutcome {
-    let mut dist = vec![f64::INFINITY; n_nodes];
-    let mut prev = vec![usize::MAX; n_nodes];
-    let mut heap = BinaryHeap::new();
-    dist[0] = 0.0;
-    heap.push(State { cost: 0.0, id: 0 });
-    while let Some(State { cost, id }) = heap.pop() {
-        if cost > dist[id] {
-            continue;
-        }
-        if id == 1 {
-            break;
-        }
-        for &(nid, w) in &adj[id] {
-            let nc = cost + w;
-            if nc < dist[nid] {
-                dist[nid] = nc;
-                prev[nid] = id;
-                heap.push(State { cost: nc, id: nid });
-            }
-        }
-    }
-    if !dist[1].is_finite() {
-        return PatchOutcome::GeometricImpossible;
-    }
-    let mut path = Vec::new();
-    let mut cur = 1;
-    while cur != usize::MAX {
-        path.push(nodes[cur]);
-        if cur == 0 {
-            break;
-        }
-        cur = prev[cur];
-    }
-    path.reverse();
-    PatchOutcome::Path(path, dist[1])
 }
 
 /// 拼接（§3.5）：patch 路径在边界锚点处并入走廊骨架。
