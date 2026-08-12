@@ -219,13 +219,26 @@ fn run(args: &Args) -> Result<(), AppError> {
         terrain_path: args.terrain.clone(),
         mask_path: args.mask.clone(),
         grid: args.grid,
+        // P6-B：3s 预算硬护栏（docs/07 §5）。测试/CI 用 ARP_BUDGET_MS=0 关闭
+        //（默认 CLI 3000ms；超预算 → degraded_timeout 返回 warm best-so-far）。
+        time_budget_ms: std::env::var("ARP_BUDGET_MS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(3000),
     };
     let out = match solver::solve(&input, &params, started.elapsed().as_millis() as u64) {
         Ok(out) => out,
-        // 解算层错误（如地形文件缺失）→ input_invalid（可预期输入问题，不 exit 2）
+        // 解算层错误 → 按类型映射 status（P6-B：DegradedTimeout → degraded_timeout；
+        // NoSolution → no_solution；InputInvalid（如地形文件缺失）→ input_invalid；
+        // 其余（Io/Data/Internal）走上层硬故障，不 exit 2 语义仅限可预期输入问题）。
         Err(e) => {
             let body: ErrorBody = (&e).into();
-            Output::failure("input_invalid", body, started.elapsed().as_millis() as u64)
+            let status = match &e {
+                AppError::NoSolution(_) => "no_solution",
+                AppError::DegradedTimeout(_) => "degraded_timeout",
+                _ => "input_invalid",
+            };
+            Output::failure(status, body, started.elapsed().as_millis() as u64)
         }
     };
     write_output(args, &out)?;

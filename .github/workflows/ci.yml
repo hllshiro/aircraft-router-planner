@@ -1,0 +1,57 @@
+name: ci
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.85"
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+      - name: Build (release)
+        run: cargo build --release --workspace
+      - name: Tests
+        run: |
+          cargo test --lib
+          cargo test --test crash
+          cargo test --test compare
+          cargo test --test determinism
+          cargo test --test regress
+      - name: Static dependency red-line (no blas/proj/C backend)
+        shell: bash
+        run: |
+          if cargo tree -e normal | grep -iE "openblas|zlib|curl|proj|gdal|pcre|ssl"; then
+            echo "FAIL: C dependency leak" >&2
+            exit 1
+          fi
+
+  musl-cross:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.85"
+          targets: x86_64-unknown-linux-musl
+      - name: Musl cross build (static binary red-line)
+        run: cargo build --release --target x86_64-unknown-linux-musl -p aircraft-router-planner-cli

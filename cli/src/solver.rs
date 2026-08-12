@@ -39,6 +39,11 @@ pub struct SolveParams {
     /// 海岸掩膜文件（GSHHG 3 态；None 时自动探测默认掩膜 mask_7p5as.mask 全球 7.5as）
     pub mask_path: Option<PathBuf>,
     pub grid: usize,
+    /// 端到端时间预算（ms，含 solve 前地形加载等 main 已计耗时）：0 = 无限
+    /// （测试/CI 双跑确定性用；docs/07 §5 3s 预算硬护栏）。超预算：
+    /// 已有过闸候选（前面车辆已完成）→ `degraded_timeout` + 部分结果；
+    /// 无候选 → `AppError::DegradedTimeout`。
+    pub time_budget_ms: u64,
 }
 
 impl Default for SolveParams {
@@ -47,6 +52,7 @@ impl Default for SolveParams {
             terrain_path: None,
             mask_path: None,
             grid: 256,
+            time_budget_ms: 0,
         }
     }
 }
@@ -116,6 +122,13 @@ struct VehicleSpec {
 
 /// 端到端解算。elapsed_ms 为端到端耗时（main 计时传入）。
 pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Output, AppError> {
+    // P6-B（docs/07 §5）：3s 预算硬护栏。预算含 solve 前耗时（地形加载等）——
+    // 总耗时 ≈ elapsed_ms + solve 内耗时；0 = 无限（测试/CI 确定性，永不触发）。
+    let budget_ms = params.time_budget_ms;
+    let solve_t0 = std::time::Instant::now();
+    let over_budget = |elapsed_ms: u64| -> bool {
+        budget_ms != 0 && elapsed_ms + solve_t0.elapsed().as_millis() as u64 >= budget_ms
+    };
     // 1. 地形源（none = 无地形平面；path/builtin = ARPK1 文件或外部格式）。
     //    主管 2026-08-11：外部格式（GeoTIFF/DTED/SRTM）不需要转换，直接调对应
     //    解析库取数（`open_source` 按扩展名分派）；ARPK1 走 BuiltinSource（预取）。
@@ -470,6 +483,41 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
     let mut out_vehicles = Vec::new();
     let mut fmm_ms = 0.0f64;
     'veh: for v in &specs {
+        // P6-B 检查点①（每机开始）：预算耗尽 → 有部分结果返回 degraded_timeout，
+        // 无候选返回 DegradedTimeout（docs/07 §5：warm best-so-far 超时降级）。
+        if over_budget(elapsed_ms) {
+            if out_vehicles.is_empty() {
+                return Err(AppError::DegradedTimeout(format!(
+                    "time budget {budget_ms}ms exceeded; no verified candidate yet"
+                )));
+            }
+            out_vehicles.push(VehicleOutput {
+                id: v.id.clone(),
+                status: "degraded".into(),
+                path: Vec::new(),
+                distance_m: 0.0,
+                warnings: vec![format!(
+                    "time budget {budget_ms}ms exceeded; no path for this vehicle"
+                )],
+            });
+            return Ok(Output {
+                schema_version: crate::config::SCHEMA_VERSION.into(),
+                status: "degraded_timeout".into(),
+                error: Some(crate::error::ErrorBody {
+                    code: "degraded_timeout".into(),
+                    message: format!(
+                        "time budget {budget_ms}ms exceeded; partial results for completed vehicles"
+                    ),
+                }),
+                elapsed_ms: Some(elapsed_ms),
+                vehicles: out_vehicles,
+                stats: Stats {
+                    fmm_ms,
+                    los_checks: 0,
+                    degradations,
+                },
+            });
+        }
         // 每机目标（shadow：闭包与剖面切分统一使用 v.target，mission.target 仅作缺省）
         let target = v.target;
         // 段序列：起点 + 必经点 + 目标
@@ -527,6 +575,40 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
         let mut last_failures: Vec<(usize, Vec<String>)> = Vec::new();
         'fmm_attempt: loop {
             attempts += 1;
+            // P6-B 检查点②（每 attempt 前）：预算耗尽 → 直接按超时处理（同①口径）。
+            if over_budget(elapsed_ms) {
+                if out_vehicles.is_empty() {
+                    return Err(AppError::DegradedTimeout(format!(
+                        "time budget {budget_ms}ms exceeded; no verified candidate yet"
+                    )));
+                }
+                out_vehicles.push(VehicleOutput {
+                    id: v.id.clone(),
+                    status: "degraded".into(),
+                    path: Vec::new(),
+                    distance_m: 0.0,
+                    warnings: vec![format!(
+                        "time budget {budget_ms}ms exceeded; no path for this vehicle"
+                    )],
+                });
+                return Ok(Output {
+                    schema_version: crate::config::SCHEMA_VERSION.into(),
+                    status: "degraded_timeout".into(),
+                    error: Some(crate::error::ErrorBody {
+                        code: "degraded_timeout".into(),
+                        message: format!(
+                            "time budget {budget_ms}ms exceeded; partial results for completed vehicles"
+                        ),
+                    }),
+                    elapsed_ms: Some(elapsed_ms),
+                    vehicles: out_vehicles,
+                    stats: Stats {
+                        fmm_ms,
+                        los_checks: 0,
+                        degradations,
+                    },
+                });
+            }
             if attempts > 6 {
                 // 诊断输出（阶段1-C）：最后一次 verify 失败原因 JSON 到 stderr。
                 if !last_failures.is_empty() {
@@ -3419,6 +3501,30 @@ mod tests {
             .any(|s| s.contains("radar: cumulative detection p") && s.contains("> threshold"));
         assert!(!over, "绕行后探测概率应 <0.1: warnings={:?} degradations={:?}",
             out.vehicles[0].warnings, out.stats.degradations);
+    }
+
+    #[test]
+    fn p6_time_budget_exhausted_returns_degraded_timeout() {
+        // P6-B（docs/07 §5 3s 预算硬护栏）：预算=1ms（solve 前场构建即超）→
+        // 无候选 → Err(DegradedTimeout) → 顶层 status=degraded_timeout。
+        let s = r#"{
+            "schema_version":"0.20",
+            "mission":{
+                "start":{"lon":115.0,"lat":39.0,"alt_m":3000},
+                "target":{"lon":116.5,"lat":39.9,"alt_m":3000},
+                "terrain":{"source":"none"}
+            }
+        }"#;
+        let input = parse(s);
+        let params = SolveParams { time_budget_ms: 1, ..SolveParams::default() };
+        match solve(&input, &params, 0) {
+            Err(AppError::DegradedTimeout(_)) => {}
+            other => panic!("expected DegradedTimeout, got {other:?}"),
+        }
+        // 对照：预算=0（无限）→ 正常 success（现有所有测试默认路径不受影响）
+        let out = solve(&input, &SolveParams::default(), 0).unwrap();
+        assert_eq!(out.status, "success");
+        assert_eq!(out.vehicles[0].status, "planned");
     }
 
     #[test]

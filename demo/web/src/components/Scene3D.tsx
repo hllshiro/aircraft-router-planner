@@ -177,6 +177,10 @@ export function Scene3D({
   // fov 50° 垂直半角 25°，target 处视宽 ≈ 2·d·tan(25°) ≈ 0.93·d，
   // 取 d = diag/0.75 → 视宽 ≈ 1.24·diag（留 ~24% 余量，完整看到扩展后的场景）。
   // 跨度变化 < 20% 不调整（拖拽微调起终点时视野不抖动）。
+  // 2026-08-12 修复：target（旋转中心）重置同样受 20% 阈值保护——此前每次
+  // bounds 引用变化（App 每次 render 都新算 sceneBounds）都会无条件执行
+  // ctrl.target.set(0,0,0)，导致任何点击/移动后视角跳回正对场景中心。
+  const lastFit = useRef<{ diag: number } | null>(null);
   const fitCameraToBounds = useCallback(() => {
     const cam = cameraRef.current;
     const ctrl = controlsRef.current;
@@ -186,17 +190,23 @@ export function Scene3D({
     const ky = 110574;
     const diag = Math.hypot((maxLon - minLon) * kx, (maxLat - minLat) * ky);
     if (!(diag > 0)) return;
+    const prev = lastFit.current;
+    // 跨度变化 < 20% → 不动相机（含旋转中心）：普通点击/微调不打扰用户视角。
+    if (prev && Math.abs(prev.diag - diag) / diag < 0.2) return;
+    lastFit.current = { diag };
     const desiredDist = diag / 0.75;
     ctrl.target.set(0, 0, 0);
     const dir = cam.position.clone().sub(ctrl.target);
     const len = dir.length();
     if (len < 1e-6) {
       cam.position.set(desiredDist, desiredDist * 0.75, desiredDist);
-    } else if (Math.abs(len - desiredDist) > desiredDist * 0.2) {
+    } else {
       dir.normalize().multiplyScalar(desiredDist);
       cam.position.copy(ctrl.target).add(dir);
     }
     ctrl.update();
+    // 注意：geoRef 变化不在此调整——地形网格按新中心整体平移，局部原点恒为
+    // 场景中心，相机相对原点姿态无需跟随（2026-08-12）。
   }, [bounds, geoRef]);
 
   // 挂载 + 每次 bounds 变化 → 视野对齐（地形已随 bbox 重新采样，相机需跟上）
