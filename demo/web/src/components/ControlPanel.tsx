@@ -1099,7 +1099,7 @@ export function ControlPanel({
               })
             }
           >
-            <option value="swerling1">Swerling I（默认，2026-08-13 标定）</option>
+            <option value="swerling1">Swerling I</option>
             <option value="exponential">指数</option>
             <option value="linear">线性</option>
           </select>
