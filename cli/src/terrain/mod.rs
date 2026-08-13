@@ -143,6 +143,15 @@ pub trait TerrainSource: Send + Sync {
         }
     }
 
+    /// 带分辨率提示的语义采样（2026-08-13 P9 T4 GeoTIFF Overview）：
+    /// `max_cell_deg` = 请求方接受的最高分辨率（如 FMM 粗层 cell 尺寸；0/None 语义 =
+    /// 最高精度要求）。实现可据此选择低分辨率层（如 GeoTIFF Overview 金字塔）避免
+    /// 高分辨率解压；**精度语义**：所选层分辨率不得粗于请求（宁细勿粗），空洞/OOB
+    /// 语义与 `sample_at` 一致。默认实现 = `sample_at`（无低分辨率层概念 → 零回归）。
+    fn sample_at_res(&self, lon: f64, lat: f64, _max_cell_deg: f64) -> Sample {
+        self.sample_at(lon, lat)
+    }
+
     /// 实际覆盖范围（无边界声明 → None，此时出界判定依赖实现内部）。
     fn bounds(&self) -> Option<GeoBounds>;
 
@@ -157,6 +166,9 @@ impl TerrainSource for Box<dyn TerrainSource> {
     }
     fn sample_at(&self, lon: f64, lat: f64) -> Sample {
         (**self).sample_at(lon, lat)
+    }
+    fn sample_at_res(&self, lon: f64, lat: f64, max_cell_deg: f64) -> Sample {
+        (**self).sample_at_res(lon, lat, max_cell_deg)
     }
     fn bounds(&self) -> Option<GeoBounds> {
         (**self).bounds()

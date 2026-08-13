@@ -39,7 +39,7 @@
 - **status 四态**：`success` / `degraded_timeout` / `no_solution` / `input_invalid`
 - **性能指标**：每百公里 ≤ 3s（端到端典型值），绝对不能崩溃（B9）
 - **核心链路**：语义代价场 → FMM → 回溯 → Theta\* → 样条/Dubins → 抽稀 → 全链复验
-- **主要占位项**：LOS mask 未进静态代价场、CCC Dubins（见 01 文档 §7.1；探测概率 base_p 已于 2026-08-13 标定——Swerling I 典型监视雷达模型，R_eff 处 0.9；3s 预算硬护栏已实现于 P6-B，docs/07 §5；多机交叉检测已实现于 P6-C，武器类型+射程语义已定案于 P6-D）
+- **主要占位项**：LOS mask 未进静态代价场（语义验证已于 P8 M5 确认有意设计；探测概率 base_p 已于 2026-08-13 标定——Swerling I 典型监视雷达模型，R_eff 处 0.9；3s 预算硬护栏已实现于 P6-B，docs/07 §5；多机交叉检测已实现于 P6-C，武器类型+射程语义已定案于 P6-D；CCC Dubins 已于 2026-08-13 P9 T2 实现——RLR/LRL 三圆弧 + 同点不同向单圆弧，d<2R 判无解移除；GeoTIFF Overview 已于 P9 T4 实现；S5 ARPK1 语义位图因两文件数据定案关闭）
 
 ## 维护约定
 

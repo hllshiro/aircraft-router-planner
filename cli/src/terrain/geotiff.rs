@@ -13,13 +13,15 @@ use std::sync::Mutex;
 use tiff::decoder::{ChunkType, Decoder, DecodingResult};
 use tiff::tags::Tag;
 
-use super::{GeoBounds, TerrainSource};
+use super::{GeoBounds, Sample, TerrainSource};
 use crate::error::AppError;
 
 /// 全量路径 chunk 数阈值（≤ 此值 open 全量；超过 → LRU 按需）。
 const FULL_LOAD_CHUNK_THRESHOLD: u32 = 64;
 /// LRU 缓存 chunk 上限（256² f32 ≈ 256KB → 512 chunk ≈ 128MB；strip 更小）。
 const LRU_MAX_CHUNKS: usize = 512;
+/// Overview 全量层内存上限（所有层合计；超过 → 停止收集，避免大文件 open 击穿内存）。
+const OVERVIEW_MAX_BYTES: usize = 128 * 1024 * 1024;
 /// GDAL_NODATA tag（42113）。
 const TAG_GDAL_NODATA: Tag = Tag::Unknown(42113);
 
@@ -47,6 +49,19 @@ pub struct GeoTiffSource {
     full: Option<Vec<f32>>,
     /// chunk 按需状态（大文件）。
     lazy: Option<LazyState>,
+    /// Overview 降采样层（兄弟 IFD，2026-08-13 P9 T4）：与主图同地理参考原点、
+    /// 尺寸更小 → open 时全量读入内存。采样按请求分辨率选层（`sample_at_res`）。
+    /// 空 = 文件无可用 overview（回退主层，行为与旧版一致）。
+    overviews: Vec<OverviewLevel>,
+}
+
+/// Overview 降采样层（兄弟 IFD 全量内存）。
+struct OverviewLevel {
+    geo: GeoRef,
+    width: u32,
+    height: u32,
+    /// 行优先（NaN = 空洞）。
+    data: Vec<f32>,
 }
 
 /// chunk 按需状态（大文件路径）。
@@ -303,8 +318,13 @@ impl GeoTiffSource {
                 height,
                 full: Some(data),
                 lazy: None,
+                overviews: Vec::new(),
             })
         } else {
+            // Overview 收集（P9 T4）：遍历兄弟 IFD，识别与主图同地理参考原点、
+            // 尺寸更小的降采样层 → 全量读入内存（tiff crate 支持兄弟 IFD 链，
+            // SubIFD 内嵌 overview 不支持——文档说明）。遍历后 seek 回主图。
+            let overviews = collect_overviews(&mut dec, &geo, width, height);
             let chunks_x = width.div_ceil(chunk_w);
             let chunks_y = height.div_ceil(chunk_h);
             Ok(Self {
@@ -322,6 +342,7 @@ impl GeoTiffSource {
                     samples,
                     no_data,
                 }),
+                overviews,
             })
         }
     }
@@ -372,8 +393,7 @@ impl GeoTiffSource {
     }
 
     /// 加载 chunk（缓存命中直取；未命中锁内解压 + 双检插入）。
-    fn lazy_chunk(&self, idx: u32) -> Option<Vec<f32>> {
-        let lazy = self.lazy.as_ref()?;
+    fn lazy_chunk(&self, idx: u32) -> Option<Vec<f32>> {        let lazy = self.lazy.as_ref()?;
         {
             let cache = lock_cache(&lazy.cache);
             if let Some(ch) = cache.map.get(&idx) {
@@ -407,6 +427,25 @@ impl GeoTiffSource {
         }
         Some(data)
     }
+
+    /// overview 层采样（与主层 bounds 语义一致：出界 → OutOfBounds；层内空洞 → NoData）。
+    fn overview_sample(&self, ov: &OverviewLevel, lon: f64, lat: f64) -> Sample {
+        if let Some(b) = self.bounds() {
+            if !b.contains(lon, lat) {
+                return Sample::OutOfBounds;
+            }
+        }
+        let w = ov.width as f64;
+        let h = ov.height as f64;
+        let (col, row) = match ov.geo.to_pixel(lon, lat, w, h) {
+            Some(p) => p,
+            None => return Sample::NoData, // 主层内但 overview 边缘外（浮点）→ 空洞语义
+        };
+        match bilinear_at(&ov.data, ov.width, ov.height, col, row) {
+            Some(hh) => Sample::Land(hh),
+            None => Sample::NoData,
+        }
+    }
 }
 
 impl GeoRef {
@@ -424,9 +463,88 @@ impl GeoRef {
     }
 }
 
+/// 遍历兄弟 IFD 收集 Overview 层（P9 T4）。
+/// 判定：后续 IFD 尺寸更小（≤ 主图对应维）且地理参考原点与主图对齐
+/// （原点差 ≤ 两方 cell 半宽，容 tile 边缘舍入）→ 全量读入。
+/// 内存护栏：合计超 OVERVIEW_MAX_BYTES → 停止收集。
+/// 失败防御：任一步 IO/格式错误 → 停止遍历（保留已收集层，不报错回退主层）。
+fn collect_overviews(
+    dec: &mut Decoder<std::fs::File>,
+    main_geo: &GeoRef,
+    main_w: u32,
+    main_h: u32,
+) -> Vec<OverviewLevel> {
+    let mut out = Vec::new();
+    let mut total_bytes = 0usize;
+    while dec.more_images() {
+        if dec.next_image().is_err() {
+            break;
+        }
+        let Ok((ow, oh)) = dec.dimensions() else { break };
+        if ow == 0 || oh == 0 || ow > main_w || oh > main_h {
+            continue; // 非降采样（更大/异常）→ 跳过，继续下一个 IFD
+        }
+        // 忽略重复 IFD（tiff 链上可能出现尺寸相同的页）
+        if ow == main_w && oh == main_h {
+            continue;
+        }
+        let Ok(ogeo) = parse_georef(dec, ow, oh) else { continue };
+        // 原点对齐判定（两方 cell 半宽容差）
+        let lon_ok = (ogeo.min_lon - main_geo.min_lon).abs()
+            <= main_geo.cell_lon_deg * 0.5 + ogeo.cell_lon_deg * 0.5;
+        let lat_ok = (ogeo.min_lat - main_geo.min_lat).abs()
+            <= main_geo.cell_lat_deg * 0.5 + ogeo.cell_lat_deg * 0.5;
+        if !lon_ok || !lat_ok {
+            continue;
+        }
+        let osamples = dec
+            .find_tag_unsigned::<u16>(Tag::SamplesPerPixel)
+            .ok()
+            .flatten()
+            .unwrap_or(1) as u32;
+        let onodata = read_gdal_nodata(dec);
+        let Ok(oresult) = dec.read_image() else { break };
+        let mut odata = chunk_to_f32(oresult, osamples);
+        apply_nodata(&mut odata, onodata);
+        total_bytes += odata.len() * 4;
+        if total_bytes > OVERVIEW_MAX_BYTES {
+            break; // 内存护栏：丢弃最后（已超限）层并停止
+        }
+        out.push(OverviewLevel {
+            geo: ogeo,
+            width: ow,
+            height: oh,
+            data: odata,
+        });
+    }
+    // 回主图（collect 遍历移动了 decoder 的当前 IFD）
+    let _ = dec.seek_to_image(0);
+    out
+}
+
 impl TerrainSource for GeoTiffSource {
     fn height_at(&self, lon: f64, lat: f64) -> Option<f64> {
         self.sample(lon, lat)
+    }
+
+    /// Overview 感知采样（P9 T4）：请求分辨率 `max_cell_deg` 下的低分辨率层选层。
+    /// 选层原则：cell ≤ 请求分辨率（宁细勿粗）的最粗层——精度不低于请求、解压/查询
+    /// 成本最低。无合适层（含文件无 overview）→ 回退主层（行为与旧版一致）。
+    /// 精度语义：overview 为降采样近似（GDAL/tifffile 写多页时的实际降采样方式），
+    /// 供 FMM 粗层等低分辨率采样使用；verify/逐段精查仍走全分辨率（主层），
+    /// 粗层误差由回退链兜底（与 docs/01 三层架构一致）。
+    fn sample_at_res(&self, lon: f64, lat: f64, max_cell_deg: f64) -> Sample {
+        if max_cell_deg > 0.0 {
+            let best = self
+                .overviews
+                .iter()
+                .filter(|o| o.geo.cell_lon_deg <= max_cell_deg + 1e-12)
+                .max_by(|a, b| a.geo.cell_lon_deg.total_cmp(&b.geo.cell_lon_deg));
+            if let Some(ov) = best {
+                return self.overview_sample(ov, lon, lat);
+            }
+        }
+        self.sample_at(lon, lat)
     }
 
     fn bounds(&self) -> Option<GeoBounds> {
@@ -439,11 +557,36 @@ impl TerrainSource for GeoTiffSource {
     }
 
     fn resolution_desc(&self) -> String {
-        format!(
+        let mut s = format!(
             "geotiff {}x{} cell {:.6}deg x {:.6}deg",
             self.width, self.height, self.geo.cell_lon_deg, self.geo.cell_lat_deg
-        )
+        );
+        if !self.overviews.is_empty() {
+            s.push_str(&format!(" + {} overview", self.overviews.len()));
+        }
+        s
     }
+}
+
+/// 双线性插值（数据行优先，NaN = 空洞；越界 → None）。
+fn bilinear_at(data: &[f32], width: u32, height: u32, col: f64, row: f64) -> Option<f64> {
+    let c0 = col.floor() as isize;
+    let r0 = row.floor() as isize;
+    if c0 < 0 || r0 < 0 || c0 + 1 >= width as isize || r0 + 1 >= height as isize {
+        return None;
+    }
+    let w_c = col - c0 as f64;
+    let w_r = row - r0 as f64;
+    let (r0, c0) = (r0 as usize, c0 as usize);
+    let idx = |r: usize, c: usize| r * width as usize + c;
+    let v00 = data[idx(r0, c0)];
+    let v01 = data[idx(r0, c0 + 1)];
+    let v10 = data[idx(r0 + 1, c0)];
+    let v11 = data[idx(r0 + 1, c0 + 1)];
+    if v00.is_nan() || v01.is_nan() || v10.is_nan() || v11.is_nan() {
+        return None;
+    }
+    Some(interp2(v00, v01, v10, v11, w_c, w_r))
 }
 
 /// 双线性插值（与 BuiltinSource 同式，保证数值一致）。
@@ -585,5 +728,85 @@ mod tests {
         // 北极 north-up：south-up 假设北界 85+10=95 越界 → north-up
         let sy = resolve_sy(0.01, 0.0, 1000, 85.0);
         assert!(sy < 0.0, "arctic north-up should flip, sy={sy}");
+    }
+
+    // ---------- P9 T4：GeoTIFF Overview（兄弟 IFD 降采样层） ----------
+
+    /// 无 overview 文件（_test_small.tif）：sample_at_res 回退主层，行为与 sample_at 一致。
+    #[test]
+    fn sample_at_res_falls_back_without_overview() {
+        let Some(p) = test_tif() else {
+            eprintln!("skip: _test_small.tif not found");
+            return;
+        };
+        let s = GeoTiffSource::open(&p).unwrap();
+        assert!(s.overviews.is_empty());
+        let b = s.bounds().unwrap();
+        let lon = 116.1;
+        let lat = 38.85;
+        assert_eq!(s.sample_at_res(lon, lat, 0.0), s.sample_at(lon, lat));
+        assert_eq!(s.sample_at_res(lon, lat, 0.5), s.sample_at(lon, lat));
+        // 出界同语义
+        assert_eq!(
+            s.sample_at_res(b.max_lon + 0.1, b.min_lat, 0.5),
+            s.sample_at(b.max_lon + 0.1, b.min_lat)
+        );
+    }
+
+    /// 多 IFD overview 文件（data/overview_test_multi.tif，开发期 tifffile 生成）：
+    /// 主图 512×512 cell 0.001°（1024 chunks → lazy）+ 兄弟 IFD overview 128×128 cell 0.004°。
+    /// 验证：overview 收集、低分辨率请求选层（值 = 4×4 块均值双线性）、
+    /// 高分辨率请求回退主层（值 = 源公式原值）。
+    #[test]
+    fn overview_multi_ifd_used() {
+        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../data/overview_test_multi.tif");
+        if !p.exists() {
+            eprintln!("skip: overview_test_multi.tif not found (regenerate with scripts/gen_overview_test.py)");
+            return;
+        }
+        let s = GeoTiffSource::open(&p).unwrap();
+        assert!(s.lazy.is_some(), "512x512 tile16 → lazy path");
+        assert_eq!(s.overviews.len(), 1, "one sibling-IFD overview");
+        assert!(s.resolution_desc().contains("+ 1 overview"));
+        // 源公式：v(r,c) = (r*512 + c) % 5000（north-up，row 0 = 北）
+        let v = |r: usize, c: usize| ((r * 512 + c) % 5000) as f64;
+        // 采样点 (lon=116.256, lat=38.45)：主图 col=256, row=250（整数 → 无插值）
+        let lon = 116.256;
+        let lat = 38.45;
+        // 高分辨率请求（max_cell_deg=0.001：overview 0.004 不满足 → 回退主层）
+        let high = s.sample_at_res(lon, lat, 0.001);
+        assert_eq!(high, Sample::Land(v(250, 256)), "main layer exact value");
+        // 低分辨率请求（max_cell_deg=0.005：overview 0.004 ≤ 0.005 → 选 overview 层）
+        let low = s.sample_at_res(lon, lat, 0.005);
+        let Sample::Land(low_h) = low else {
+            panic!("overview should return Land, got {low:?}");
+        };
+        // overview 期望：col=64（整数），row=61.75 → 双线性（w_c=0, w_r=0.75）
+        let ov_at = |r: usize, c: usize| -> f64 {
+            // 4×4 块均值：base[(r*4)..(r*4+4), (c*4)..(c*4+4)]
+            let mut sum = 0.0;
+            for dr in 0..4 {
+                for dc in 0..4 {
+                    sum += v(r * 4 + dr, c * 4 + dc);
+                }
+            }
+            sum / 16.0
+        };
+        let top = ov_at(61, 64);
+        let bot = ov_at(62, 64);
+        let want = top + (bot - top) * 0.75;
+        assert!((low_h - want).abs() < 1e-6, "overview {low_h} vs {want}");
+        // overview 层出主图范围（lat 边缘）→ 空洞/OutOfBounds 语义
+        assert_eq!(
+            s.sample_at_res(b_lat_max(&s) + 0.05, lon, 0.005).class(),
+            crate::terrain::SurfaceClass::OutOfBounds
+        );
+        // 主层 height_at 不受影响（全分辨率精查路径）
+        assert!((s.height_at(lon, lat).unwrap() - v(250, 256)).abs() < 1e-6);
+    }
+
+    fn b_lat_max(s: &GeoTiffSource) -> f64 {
+        s.bounds().unwrap().max_lat
     }
 }

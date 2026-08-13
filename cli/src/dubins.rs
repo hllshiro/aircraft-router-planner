@@ -1,14 +1,17 @@
 //! Dubins 路径基元（Phase 0 S6 / B5 基准）。
 //!
-//! 实现 CSC 四类型（LSL / RSR / LSR / RSL）最短路径解析求解：
+//! 实现 CSC 四类型（LSL / RSR / LSR / RSL）最短路径解析求解 + CCC（RLR/LRL）
+//! 三圆弧兜底（2026-08-13 P9 T2）：
 //! - 坐标系 y 向上、航向角逆时针；L 圆心 = p + R·(−sinθ, cosθ)，R 圆心 = p + R·(sinθ, −cosθ)；
 //! - 同向圆（L-L / R-R）用外切线（切线方向 = 圆心连线方向），要求 d ≥ 2R；
 //! - 异向圆（L-R / R-L）用内切线（切线方向 = v − 2R·n₁），要求 d ≥ 2R；
 //! - 每种类型两个候选切线侧，取总长最小；
 //! - 弧角按转向类型计算（L 逆时针 / R 顺时针）。
 //!
-//! 简化：CCC 类型（RLR/LRL）未实现——d < 2R 的退化情况判无解（成功率测量点，
-//! 真实成功率 <100% 属预期，正式实现补 CCC）。
+//! CCC（d < 2R 退化情况，原判无解）：t1 → t2(反向) → t3(=t1) 三圆弧，
+//! 相邻圆反向 → 外切 → 圆心距 2R；c2 是圆 (c1, 2R) ∩ (c3, 2R) 的交点，
+//! 存在条件 d = |c1c3| ≤ 4R；两交点各算总长取最小（构造保证切点航向连续）。
+//! 同点不同向（c1 ≈ c3，d→0）：单圆弧最小转角兜底（L/R 取小者）。
 
 /// 归一化角到 [0, 2π)。
 fn norm_angle(a: f64) -> f64 {
@@ -50,20 +53,48 @@ pub struct DubinsPath {
     pub t2: Turn,
     pub a1: f64,     // 首弧角（rad）
     pub straight: f64,
-    pub a2: f64,     // 末弧角（rad）
+    pub a2: f64,     // 末弧角（rad；CCC 时 = 中弧角）
     pub c1: (f64, f64),
     pub c2: (f64, f64),
     pub n1: (f64, f64),
     pub r: f64,
+    /// CCC（RLR/LRL）三圆弧扩展：None = CSC 路径。
+    pub ccc: Option<Ccc>,
+}
+
+/// CCC 三圆弧段（2026-08-13 P9 T2）。首弧 t1/a1 绕 c1，中弧 t2/a2 绕 c2（self 字段），
+/// 末弧 t3/a3 绕 c3。phi 均为圆上角度（atan2 口径）。
+#[derive(Clone, Debug)]
+pub struct Ccc {
+    pub t3: Turn,
+    pub a3: f64,
+    pub c3: (f64, f64),
+    /// 起点 p0 在 c1 上的角度（首弧起点）。
+    pub phi0: f64,
+    /// 切点 A 在 c1 上的角度（首弧终点）。
+    pub phi_ab: f64,
+    /// 切点 A 在 c2 上的角度（中弧起点）。
+    pub phi_ba: f64,
+    /// 切点 B 在 c2 上的角度（中弧终点）。
+    pub phi_bc: f64,
+    /// 切点 B 在 c3 上的角度（末弧起点）。
+    pub phi_cb: f64,
+    /// 终点 p1 在 c3 上的角度（末弧终点）。
+    pub phi1: f64,
 }
 
 impl DubinsPath {
     pub fn len(&self) -> f64 {
-        self.r * (self.a1 + self.a2) + self.straight
+        let a3 = self.ccc.as_ref().map_or(0.0, |c| c.a3);
+        self.r * (self.a1 + self.a2 + a3) + self.straight
     }
 
     /// 采样路径点（含两端）。转向 L 为逆时针（角度增大）。
+    /// CSC：首弧 + 直线 + 末弧；CCC：三段圆弧（首弧 + 中弧 + 末弧）。
     pub fn sample(&self, n: usize) -> Vec<(f64, f64)> {
+        if let Some(ccc) = &self.ccc {
+            return self.sample_ccc(ccc, n);
+        }
         let mut pts = Vec::with_capacity(n);
         let r = self.r;
         let segs = n.max(2);
@@ -106,9 +137,57 @@ impl DubinsPath {
         }
         pts
     }
+
+    /// CCC 三段圆弧采样：段数按弧长比例分配（每弧至少 1 段）。
+    fn sample_ccc(&self, ccc: &Ccc, n: usize) -> Vec<(f64, f64)> {
+        let n = n.max(4);
+        let total = self.a1 + self.a2 + ccc.a3;
+        let (n1, n2, n3) = if total > 0.0 {
+            let f1 = self.a1 / total;
+            let f2 = self.a2 / total;
+            let n1 = ((n as f64 * f1).round() as usize).max(1);
+            let n2 = ((n as f64 * f2).round() as usize).max(1);
+            let n3 = ((n as f64 * (ccc.a3 / total)).round() as usize).max(1);
+            (n1, n2, n3)
+        } else {
+            (1, 1, 1)
+        };
+        let mut pts = Vec::with_capacity(n1 + n2 + n3 + 1);
+        let r = self.r;
+        // 首弧：c1 上 phi0 → phi_ab（沿 t1）
+        for k in 0..=n1 {
+            let t = k as f64 / n1 as f64;
+            let ang = match self.t1 {
+                Turn::L => ccc.phi0 + self.a1 * t,
+                Turn::R => ccc.phi0 - self.a1 * t,
+            };
+            pts.push((self.c1.0 + r * ang.cos(), self.c1.1 + r * ang.sin()));
+        }
+        // 中弧：c2 上 phi_ba → phi_bc（沿 t2；首点与首弧终点重合，从 k=1 起）
+        for k in 1..=n2 {
+            let t = k as f64 / n2 as f64;
+            let ang = match self.t2 {
+                Turn::L => ccc.phi_ba + self.a2 * t,
+                Turn::R => ccc.phi_ba - self.a2 * t,
+            };
+            pts.push((self.c2.0 + r * ang.cos(), self.c2.1 + r * ang.sin()));
+        }
+        // 末弧：c3 上 phi_cb → phi1（沿 t3；首点与中弧终点重合，从 k=1 起）
+        for k in 1..=n3 {
+            let t = k as f64 / n3 as f64;
+            let ang = match ccc.t3 {
+                Turn::L => ccc.phi_cb + ccc.a3 * t,
+                Turn::R => ccc.phi_cb - ccc.a3 * t,
+            };
+            pts.push((ccc.c3.0 + r * ang.cos(), ccc.c3.1 + r * ang.sin()));
+        }
+        pts
+    }
 }
 
-/// Dubins 最短路径（CSC 四类型）。无解（d < 2R 或退化）返回 None。
+/// Dubins 最短路径（CSC 四类型 + CCC 三圆弧兜底）。
+/// CSC 无解（d < 2R）时尝试 CCC（RLR/LRL，d ≤ 4R）；同点不同向走单圆弧最小转角。
+/// 真无解（d > 4R 且 CSC 无解 / 非有限 / r ≤ 0）返回 None。
 pub fn dubins_path(
     p0: (f64, f64),
     th0: f64,
@@ -143,6 +222,30 @@ pub fn dubins_path(
             c2: c,
             n1: (p0.0 - c.0, p0.1 - c.1),
             r,
+            ccc: None,
+        });
+    }
+    // 同点不同向：单圆弧最小转角（c1 ≈ c3 的 CCC 退化；CSC 在 d=0 全被跳过）
+    if (p0.0 - p1.0).abs() < 1e-12 && (p0.1 - p1.1).abs() < 1e-12 {
+        let delta = norm_angle(th1 - th0);
+        let (t, a1) = if delta <= std::f64::consts::PI {
+            (Turn::L, delta)
+        } else {
+            (Turn::R, std::f64::consts::TAU - delta)
+        };
+        let c = center(p0, th0, t, r);
+        let phi0 = (p0.1 - c.1).atan2(p0.0 - c.0);
+        return Some(DubinsPath {
+            t1: t,
+            t2: t,
+            a1,
+            straight: 0.0,
+            a2: 0.0,
+            c1: c,
+            c2: c,
+            n1: (phi0.cos(), phi0.sin()),
+            r,
+            ccc: None,
         });
     }
 
@@ -156,7 +259,7 @@ pub fn dubins_path(
             let vy = c2.1 - c1.1;
             let d = (vx * vx + vy * vy).sqrt();
             if d < 2.0 * r - 1e-9 {
-                continue; // 需 CCC，简化无解
+                continue; // 需 CCC，由下方兜底
             }
             if d < 1e-9 {
                 continue;
@@ -217,11 +320,98 @@ pub fn dubins_path(
                     c2,
                     n1,
                     r,
+                    ccc: None,
                 };
                 let len = path.len();
                 if best.as_ref().map_or(true, |b: &DubinsPath| len < b.len()) {
                     best = Some(path);
                 }
+            }
+        }
+    }
+    if best.is_some() {
+        return best;
+    }
+
+    // CSC 全失败 → CCC（RLR/LRL）兜底：t1 → t2(反向) → t3(=t1) 三圆弧。
+    // 相邻圆反向转向 → 外切，圆心距 2R；c2 ∈ 圆(c1,2R) ∩ 圆(c3,2R)，
+    // 存在条件 d = |c1c3| ≤ 4R。两交点各算总长取最小。
+    for t1 in [Turn::L, Turn::R] {
+        let t3 = t1;
+        let t2 = match t1 {
+            Turn::L => Turn::R,
+            Turn::R => Turn::L,
+        };
+        let c1 = center(p0, th0, t1, r);
+        let c3 = center(p1, th1, t3, r);
+        let vx = c3.0 - c1.0;
+        let vy = c3.1 - c1.1;
+        let d = (vx * vx + vy * vy).sqrt();
+        if d < 1e-9 || d > 4.0 * r - 1e-9 {
+            continue; // 无交点（d>4R）或退化（d≈0 已被单圆弧兜底）
+        }
+        let th = vy.atan2(vx);
+        let gamma = (d / (4.0 * r)).clamp(-1.0, 1.0).acos();
+        for sgn in [1.0f64, -1.0] {
+            let c2 = (
+                c1.0 + 2.0 * r * (th + sgn * gamma).cos(),
+                c1.1 + 2.0 * r * (th + sgn * gamma).sin(),
+            );
+            // 防御：c2 必须同时落在圆(c3, 2R) 上（浮点误差容差）
+            let d23 = ((c2.0 - c3.0).powi(2) + (c2.1 - c3.1).powi(2)).sqrt();
+            if (d23 - 2.0 * r).abs() > 1e-6 * (2.0 * r).max(1.0) {
+                continue;
+            }
+            let phi_ab = (c2.1 - c1.1).atan2(c2.0 - c1.0); // 切点 A 在 c1 上
+            let phi_ba = (c1.1 - c2.1).atan2(c1.0 - c2.0); // 切点 A 在 c2 上（= A + π）
+            let phi_bc = (c3.1 - c2.1).atan2(c3.0 - c2.0); // 切点 B 在 c2 上
+            let phi_cb = (c2.1 - c3.1).atan2(c2.0 - c3.0); // 切点 B 在 c3 上（= B + π）
+            let phi0 = (p0.1 - c1.1).atan2(p0.0 - c1.0); // 起点在 c1 上
+            let phi1 = (p1.1 - c3.1).atan2(p1.0 - c3.0); // 终点在 c3 上
+            let head1 = match t1 {
+                Turn::L => phi_ab + std::f64::consts::FRAC_PI_2,
+                Turn::R => phi_ab - std::f64::consts::FRAC_PI_2,
+            };
+            let head_ba = match t2 {
+                Turn::L => phi_ba + std::f64::consts::FRAC_PI_2,
+                Turn::R => phi_ba - std::f64::consts::FRAC_PI_2,
+            };
+            let head_bc = match t2 {
+                Turn::L => phi_bc + std::f64::consts::FRAC_PI_2,
+                Turn::R => phi_bc - std::f64::consts::FRAC_PI_2,
+            };
+            let head_cb = match t3 {
+                Turn::L => phi_cb + std::f64::consts::FRAC_PI_2,
+                Turn::R => phi_cb - std::f64::consts::FRAC_PI_2,
+            };
+            let a1 = arc_angle(th0, head1, t1);
+            let a2 = arc_angle(head_ba, head_bc, t2);
+            let a3 = arc_angle(head_cb, th1, t3);
+            let path = DubinsPath {
+                t1,
+                t2,
+                a1,
+                straight: 0.0,
+                a2,
+                c1,
+                c2,
+                n1: (phi0.cos(), phi0.sin()),
+                r,
+                ccc: Some(Ccc {
+                    t3,
+                    a3,
+                    c3,
+                    phi0,
+                    phi_ab,
+                    phi_ba,
+                    phi_bc,
+                    phi_cb,
+                    phi1,
+                }),
+            };
+            let len = path.len();
+            if best.as_ref().map_or(true, |b: &DubinsPath| len < b.len()) {
+                best = Some(path);
             }
         }
     }
@@ -295,9 +485,75 @@ mod tests {
     }
 
     #[test]
-    fn too_close_no_solution() {
-        // 距离 < 2R 同向：CSC 无解（简化模型判失败，CCC 未实现）
+    fn too_close_ccc_solves() {
+        // 距离 < 2R 同向：CSC 无解，CCC（RLR/LRL）兜底有解（2026-08-13 P9 T2）
         let len = dubins_shortest_len((0.0, 0.0), 0.0, (1.0, 0.0), 0.0, 1.0);
-        assert!(len.is_none() || len.unwrap() > 0.0);
+        let len = len.expect("CCC should solve d<2R");
+        assert!(len > 0.0 && len.is_finite(), "got {len}");
+    }
+
+    #[test]
+    fn ccc_close_path_valid() {
+        // 近距 0.1 < 2R=2 且转向 90°：4 个 CSC 类型圆心距全 < 2R 无解 → CCC 三圆弧；
+        // 采样路径端点/末航向验证
+        let path = dubins_path((0.0, 0.0), 0.0, (0.1, 0.0), std::f64::consts::FRAC_PI_2, 1.0)
+            .expect("CCC solution");
+        assert!(path.ccc.is_some(), "should be CCC path");
+        let pts = path.sample(600);
+        let (sx, sy) = pts[0];
+        let (ex, ey) = *pts.last().unwrap();
+        assert!((sx - 0.0).abs() < 1e-6 && (sy - 0.0).abs() < 1e-6, "start {sx},{sy}");
+        assert!((ex - 0.1).abs() < 1e-3 && (ey - 0.0).abs() < 1e-3, "end {ex},{ey}");
+        // 末航向 ≈ 90°（+y）：末两点方向
+        let n = pts.len();
+        let (x1, y1) = pts[n - 2];
+        let (x2, y2) = pts[n - 1];
+        let heading = (y2 - y1).atan2(x2 - x1);
+        assert!((heading - std::f64::consts::FRAC_PI_2).abs() < 0.05, "final heading {heading}");
+        // 路径长度：三圆弧 > 单圆周长下限（R=1 至少转 > π 弧度）
+        assert!(path.len() > std::f64::consts::PI, "got {}", path.len());
+    }
+
+    #[test]
+    fn ccc_close_vertical_heading() {
+        // 近距掉头（0.1，0→π/2）：4 CSC 全败 → CCC 有解且末点正确（含中弧 > π 的大转角）
+        let path = dubins_path((0.0, 0.0), 0.0, (0.1, 0.0), std::f64::consts::FRAC_PI_2, 1.0)
+            .expect("CCC solution");
+        assert!(path.ccc.is_some());
+        assert!(path.a2 > std::f64::consts::PI, "mid arc should exceed π, got {}", path.a2);
+        let pts = path.sample(600);
+        let (ex, ey) = *pts.last().unwrap();
+        assert!((ex - 0.1).abs() < 1e-3 && (ey - 0.0).abs() < 1e-3, "end {ex},{ey}");
+    }
+
+    #[test]
+    fn same_point_different_heading_single_arc() {
+        // 同点不同向：(0,0) 0 → (0,0) π/2：单圆弧最小转角 π/2·R
+        let len = dubins_shortest_len((0.0, 0.0), 0.0, (0.0, 0.0), std::f64::consts::FRAC_PI_2, 1.0)
+            .expect("single arc");
+        assert!((len - std::f64::consts::FRAC_PI_2).abs() < 1e-6, "got {len}");
+        // 反向：(0,0) 0 → (0,0) π：最小转角 π
+        let len = dubins_shortest_len((0.0, 0.0), 0.0, (0.0, 0.0), std::f64::consts::PI, 1.0)
+            .expect("half arc");
+        assert!((len - std::f64::consts::PI).abs() < 1e-6, "got {len}");
+        // 大转角：(0,0) 0 → (0,0) 3π/2：反向往回转 π/2
+        let len = dubins_shortest_len(
+            (0.0, 0.0),
+            0.0,
+            (0.0, 0.0),
+            1.5 * std::f64::consts::PI,
+            1.0,
+        )
+        .expect("reverse arc");
+        assert!((len - std::f64::consts::FRAC_PI_2).abs() < 1e-6, "got {len}");
+    }
+
+    #[test]
+    fn ccc_boundary_no_panic() {
+        // 边界防御：d 略超 4R / r=0 / 非有限 → 不 panic（None 或 CSC 有解）
+        let _ = dubins_shortest_len((0.0, 0.0), 0.0, (10.0, 0.0), 0.0, 3.0);
+        let _ = dubins_shortest_len((0.0, 0.0), 0.0, (1.0, 0.0), 0.0, 0.0);
+        let _ = dubins_shortest_len((f64::NAN, 0.0), 0.0, (1.0, 0.0), 0.0, 1.0);
+        let _ = dubins_shortest_len((0.0, 0.0), 0.0, (1.0, 0.0), 0.0, f64::INFINITY);
     }
 }

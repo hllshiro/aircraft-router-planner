@@ -825,13 +825,22 @@ mod base_tests {
     }
 
     #[test]
-    fn dubins_fit_too_close_none() {
-        // 垂直转向近距（11m）：所有圆心距 < 2R → 无解 → None（不 panic）
+    fn dubins_fit_too_close_ccc_solves() {
+        // 垂直转向近距（11m < 2R）：CSC 无解 → CCC 三圆弧兜底有解（2026-08-13 P9 T2），
+        // 输出首末点保持（物理上固定翼需绕圈掉头）
         let p = Path::new(vec![
             PathPoint::new(0.0, 0.0, 100.0).with_heading(90.0), // 朝东
             PathPoint::new(0.0001, 0.0, 100.0).with_heading(0.0), // 朝北
         ]);
-        assert!(dubins_fit(&p, 5_000.0, 32).is_none());
+        let out = dubins_fit(&p, 5_000.0, 32).expect("CCC should solve near-close turn");
+        let d0 = haversine_m(out.points[0].lon, out.points[0].lat, 0.0, 0.0);
+        let d1 = haversine_m(
+            out.last().unwrap().lon,
+            out.last().unwrap().lat,
+            0.0001,
+            0.0,
+        );
+        assert!(d0 < 100.0 && d1 < 100.0, "d0={d0} d1={d1}");
         // 非有限输入 → None
         let bad = Path::new(vec![
             PathPoint::new(f64::NAN, 0.0, 100.0).with_heading(90.0),

@@ -3648,41 +3648,142 @@ fn build_restricted_profiles(
 }
 
 /// 逐点把路径外扩到所有硬墙（NoFly/Obstacle）安全距离外：
-/// 距圆墙圆心 < radius+inflation+margin → 沿径向（远离圆心）外移到该距离。
+/// 距圆墙圆心 < radius+inflation+margin → 沿径向（远离圆心）外移到该距离；
+/// 距多边形墙边界 < inflation+margin → 沿"点↔最近边界点"方向外移到该距离
+/// （点在内部 → 向最近边界点外侧推；2026-08-13 P9 T3 补多边形，原仅 Circle）。
 /// 用于 in→out 平飞段（FMM 贴墙绕行 clearance≈inflation，平滑内切后不足 verify
-/// 阈值；margin 吸收平滑内切与 FMM 网格离散误差）。多边形墙当前不处理（沿用 raw）。
+/// 阈值；margin 吸收平滑内切与 FMM 网格离散误差）。外层迭代：多边形外扩可能
+/// 引入其他墙违反（凹多边形/墙重叠），至多 8 轮收敛；Circle 分支单遍幂等，
+/// 第二轮起无变化 → 与既有行为一致。
 fn push_out_of_walls(
     pts: &[RouterPoint],
     zones: &[Zone],
     inflation_km: f64,
     margin_km: f64,
 ) -> Vec<RouterPoint> {
-    pts.iter()
-        .map(|p| {
+    let mut out: Vec<RouterPoint> = pts.to_vec();
+    let target = inflation_km + margin_km;
+    for _round in 0..8 {
+        let mut changed = false;
+        for p in out.iter_mut() {
             let (mut lon, mut lat) = (p.lon, p.lat);
+            let mut moved = false;
             for z in zones {
                 if !z.is_wall() {
                     continue;
                 }
-                if let ZoneShape::Circle { center, radius_km } = &z.shape {
-                    let (cx, cy) = (center[0], center[1]);
-                    let d = dist_km(lon, lat, cx, cy);
-                    let target = radius_km + inflation_km + margin_km;
-                    if d < target {
-                        if d < 1e-6 {
-                            // 极端：点与圆心重合 → 沿经度方向外移
-                            lon = cx + target / 111.32;
+                match &z.shape {
+                    ZoneShape::Circle { center, radius_km } => {
+                        let (cx, cy) = (center[0], center[1]);
+                        let d = dist_km(lon, lat, cx, cy);
+                        let ctarget = radius_km + target;
+                        if d < ctarget {
+                            if d < 1e-6 {
+                                // 极端：点与圆心重合 → 沿经度方向外移
+                                lon = cx + ctarget / 111.32;
+                                changed = true;
+                                moved = true;
+                                continue;
+                            }
+                            let f = ctarget / d;
+                            lon = cx + (lon - cx) * f;
+                            lat = cy + (lat - cy) * f;
+                            changed = true;
+                            moved = true;
+                        }
+                    }
+                    ZoneShape::Polygon { vertices } => {
+                        if vertices.len() < 3 {
                             continue;
                         }
-                        let f = target / d;
-                        lon = cx + (lon - cx) * f;
-                        lat = cy + (lat - cy) * f;
+                        let (d, qx, qy, inside) = poly_nearest_edge_km(lon, lat, vertices);
+                        if d < target {
+                            let (dx, dy) = if inside {
+                                (qx - lon, qy - lat) // 内部：向最近边界点外侧推
+                            } else {
+                                (lon - qx, lat - qy) // 外部：远离最近边界点
+                            };
+                            let dl = (dx * dx + dy * dy).sqrt();
+                            let lat0 = lat.to_radians();
+                            let kx = 111.320 * lat0.cos();
+                            let ky = 111.0;
+                            if dl < 1e-9 {
+                                // 极端：点恰在边界上 → 沿"点→形心"反向（远离形心）外移
+                                let (cx, cy) = poly_centroid(vertices);
+                                let (dx2, dy2) = (lon - cx, lat - cy);
+                                let dl2 = (dx2 * dx2 + dy2 * dy2).sqrt();
+                                let (ux, uy) = if dl2 > 1e-9 {
+                                    (dx2 / dl2, dy2 / dl2)
+                                } else {
+                                    (1.0, 0.0)
+                                };
+                                lon += ux * target / kx;
+                                lat += uy * target / ky;
+                            } else {
+                                lon = qx + dx / dl * target / kx;
+                                lat = qy + dy / dl * target / ky;
+                            }
+                            changed = true;
+                            moved = true;
+                        }
                     }
                 }
             }
-            RouterPoint::new(lon, lat, p.alt_m)
-        })
-        .collect()
+            if moved {
+                *p = RouterPoint::new(lon, lat, p.alt_m);
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    out
+}
+
+/// 点到多边形边界最近距离（km，平面近似）与最近点（度）与内部判定。
+/// 遍历各边取最近；点与边界重合（d≈0）时最近点 ≈ 点本身。
+fn poly_nearest_edge_km(
+    lon: f64,
+    lat: f64,
+    vertices: &[[f64; 2]],
+) -> (f64, f64, f64, bool) {
+    let lat0 = lat.to_radians();
+    let kx = 111.320 * lat0.cos();
+    let ky = 111.0;
+    let (px, py) = (lon * kx, lat * ky);
+    let mut best = f64::MAX;
+    let (mut qx, mut qy) = (lon, lat);
+    for i in 0..vertices.len() {
+        let a = vertices[i];
+        let b = vertices[(i + 1) % vertices.len()];
+        let (ax, ay) = (a[0] * kx, a[1] * ky);
+        let (bx, by) = (b[0] * kx, b[1] * ky);
+        let (vx, vy) = (bx - ax, by - ay);
+        let (wx, wy) = (px - ax, py - ay);
+        let l2 = vx * vx + vy * vy;
+        let t = if l2 > 0.0 {
+            ((wx * vx + wy * vy) / l2).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let (qqx, qqy) = (ax + t * vx, ay + t * vy);
+        let d = ((px - qqx).powi(2) + (py - qqy).powi(2)).sqrt();
+        if d < best {
+            best = d;
+            qx = qqx / kx;
+            qy = qqy / ky;
+        }
+    }
+    let inside = crate::config::point_in_polygon_xy(lon, lat, vertices);
+    (best, qx, qy, inside)
+}
+
+/// 多边形顶点平均（形心近似；仅用于边界退化兜底方向）。
+fn poly_centroid(vertices: &[[f64; 2]]) -> (f64, f64) {
+    let n = vertices.len() as f64;
+    let sx = vertices.iter().map(|v| v[0]).sum::<f64>() / n;
+    let sy = vertices.iter().map(|v| v[1]).sum::<f64>() / n;
+    (sx, sy)
 }
 
 /// 语义代价场构建：5. 语义采样（Land=1/Water=1/Lake=1/NoData=5/OOB=5/Forbidden=INF）
@@ -3731,6 +3832,7 @@ fn build_cost_field(
             }
         })
     };
+    let cell_deg = region.span_deg / grid as f64;
     let mut field = match &terrain {
         // 候选③：并行 + 无锁批量预取（3.71× vs 串行，对比测试 9504381 之后验证）
         TerrainHandle::Plain(t) => build_semantic_cost_field_par_local(
@@ -3751,20 +3853,22 @@ fn build_cost_field(
             5.0,
             &walled,
         ),
-        // 外部格式（GeoTIFF/DTED/SRTM）无 BulkPrefetch → 带锁采样回退
+        // 外部格式（GeoTIFF/DTED/SRTM）无 BulkPrefetch → 带锁采样回退。
+        // P9 T4：传 cell 分辨率给 sample_at_res —— GeoTIFF 大文件带 Overview 时
+        // FMM 粗层采样走低分辨率层（省高分辨率解压），verify 精查仍走主层。
         TerrainHandle::External(t) => build_semantic_cost_field(grid, grid, |r, c| {
             let (lon, lat) = cell_lonlat(r, c, region, grid);
             if walled(lon, lat) {
                 return Sample::Forbidden;
             }
-            t.sample_at(lon, lat)
+            t.sample_at_res(lon, lat, cell_deg)
         }, 5.0),
         TerrainHandle::MaskedExternal(t) => build_semantic_cost_field(grid, grid, |r, c| {
             let (lon, lat) = cell_lonlat(r, c, region, grid);
             if walled(lon, lat) {
                 return Sample::Forbidden;
             }
-            t.sample_at(lon, lat)
+            t.sample_at_res(lon, lat, cell_deg)
         }, 5.0),
         TerrainHandle::None => build_semantic_cost_field(grid, grid, |r, c| {
             let (lon, lat) = cell_lonlat(r, c, region, grid);
@@ -3946,7 +4050,7 @@ fn apply_inflation_and_band(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Input;
+    use crate::config::{HeightSemantics, Input, ZoneType};
 
     fn parse(s: &str) -> Input {
         Input::from_json_str(s).unwrap()
@@ -3996,6 +4100,94 @@ mod tests {
         assert!((pts[0].alt_m - 3000.0).abs() < 0.5, "start {}", pts[0].alt_m);
         assert!((pts[1].alt_m - 5500.0).abs() < 200.0, "mid {}", pts[1].alt_m);
         assert!((pts[2].alt_m - 8000.0).abs() < 0.5, "end {}", pts[2].alt_m);
+    }
+
+    // ---------- P9 T3：push_out_of_walls 多边形外扩 ----------
+    fn poly_wall(vertices: Vec<[f64; 2]>) -> Zone {
+        Zone {
+            id: "poly".into(),
+            zone_type: ZoneType::NoFly,
+            shape: ZoneShape::Polygon { vertices },
+            alt_min_m: None,
+            alt_max_m: None,
+            height_semantics: HeightSemantics::Msl,
+        }
+    }
+
+    #[test]
+    fn push_out_polygon_point_inside() {
+        // 正方形 [115,39]..[115.2,39.2]（中心点距边界 ~8.6km）；点 (115.1,39.1) 在内部，
+        // target=10.5km > 8.6km → 外扩出边界 target 距离
+        let z = poly_wall(vec![[115.0, 39.0], [115.2, 39.0], [115.2, 39.2], [115.0, 39.2]]);
+        let p = RouterPoint::new(115.1, 39.1, 1000.0);
+        let out = push_out_of_walls(&[p], &[z], 10.0, 0.5);
+        let q = out[0];
+        // 外扩后：距边界最近距离 ≈ target=10.5km，且在多边形外
+        let (d, _, _, inside) = poly_nearest_edge_km(q.lon, q.lat, &[[115.0, 39.0], [115.2, 39.0], [115.2, 39.2], [115.0, 39.2]]);
+        assert!(!inside, "should be outside polygon");
+        assert!((d - 10.5).abs() < 0.5, "distance {d} vs target 10.5");
+        // 高度保持
+        assert!((q.alt_m - 1000.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn push_out_polygon_point_near_outside() {
+        // 点在多边形外但距边界 < target → 外扩到 target
+        let z = poly_wall(vec![[115.0, 39.0], [115.2, 39.0], [115.2, 39.2], [115.0, 39.2]]);
+        let p = RouterPoint::new(115.0, 39.02, 1000.0); // 距南边 ~2.2km < 5.5
+        let out = push_out_of_walls(&[p], &[z], 5.0, 0.5);
+        let q = out[0];
+        let (d, _, _, inside) = poly_nearest_edge_km(q.lon, q.lat, &[[115.0, 39.0], [115.2, 39.0], [115.2, 39.2], [115.0, 39.2]]);
+        assert!(!inside);
+        assert!((d - 5.5).abs() < 0.5, "distance {d} vs target 5.5");
+    }
+
+    #[test]
+    fn push_out_polygon_concave_iterates() {
+        // 凹多边形（L 形）：内部点外扩后其他边仍可能近 → 迭代收敛不 panic，最终出墙
+        let l_shape = vec![
+            [115.0, 39.0],
+            [115.3, 39.0],
+            [115.3, 39.3],
+            [115.2, 39.3],
+            [115.2, 39.1],
+            [115.0, 39.1],
+        ];
+        let z = poly_wall(l_shape.clone());
+        let p = RouterPoint::new(115.15, 39.05, 1000.0); // L 形内部左下
+        let out = push_out_of_walls(&[p], &[z], 10.0, 0.5);
+        let q = out[0];
+        let (d, _, _, inside) = poly_nearest_edge_km(q.lon, q.lat, &l_shape);
+        assert!(!inside, "should exit concave polygon");
+        assert!(d >= 9.0, "distance {d}");
+    }
+
+    #[test]
+    fn push_out_circle_still_works() {
+        // Circle 分支回归：点靠圆心 → 径向外扩 target
+        let z = Zone {
+            id: "c".into(),
+            zone_type: ZoneType::NoFly,
+            shape: ZoneShape::Circle { center: [115.0, 39.0], radius_km: 10.0 },
+            alt_min_m: None,
+            alt_max_m: None,
+            height_semantics: HeightSemantics::Msl,
+        };
+        let p = RouterPoint::new(115.02, 39.0, 500.0); // ~2.2km 距圆心 < 10+5.5
+        let out = push_out_of_walls(&[p], &[z], 5.0, 0.5);
+        let q = out[0];
+        let d = dist_km(q.lon, q.lat, 115.0, 39.0);
+        assert!((d - 15.5).abs() < 0.3, "distance {d} vs 15.5");
+        assert!((q.alt_m - 500.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn push_out_far_points_unchanged() {
+        // 距离足够远 → 原样返回（含迭代收敛路径）
+        let z = poly_wall(vec![[115.0, 39.0], [115.2, 39.0], [115.2, 39.2], [115.0, 39.2]]);
+        let p = RouterPoint::new(115.5, 39.5, 1000.0);
+        let out = push_out_of_walls(&[p], &[z], 5.0, 0.5);
+        assert!((out[0].lon - 115.5).abs() < 1e-9 && (out[0].lat - 39.5).abs() < 1e-9);
     }
 
     #[test]
