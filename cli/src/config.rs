@@ -437,7 +437,7 @@ pub struct LaunchEnvelope {
 pub struct ParamsOverride {
     #[serde(default)]
     pub radar_inflation: Option<f64>,
-    /// 探测曲线形态字符串（"exponential"/"linear" 不区分大小写；无效 → 默认 exponential，
+    /// 探测曲线形态字符串（"swerling1"/"exponential"/"linear" 不区分大小写；无效 → 默认 swerling1，
     /// 主管决策 2026-08-05：无外部参数或参数无效使用默认值）。
     #[serde(default)]
     pub detection_curve: Option<String>,
@@ -469,7 +469,12 @@ pub struct ParamsOverride {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum DetectionCurve {
+    /// Swerling I 模型（默认，2026-08-13 base_p 标定定案）：
+    /// Pd(d) = exp(−VT/(1 + SNR₀·(R_eff/d)⁴))，Pfa=1e-6 → VT=13.8155，
+    /// R_eff = 90% 探测距离（SNR₀ = VT/(−ln base_p) − 1 = 130.1 ≈ 21.1 dB）。
     #[default]
+    Swerling1,
+    /// 指数衰减（R⁻⁴ 简化近似，保留供显式选择）。
     Exponential,
     Linear,
 }
@@ -481,10 +486,14 @@ pub enum DetectionCurve {
 pub struct DefaultParams {
     /// 雷达膨胀系数（球体半径 = 实际 × 系数，>1）
     pub radar_inflation: f64,
-    /// 探测概率衰减形态（指数为默认推荐：R⁻⁴ 简化）
+    /// 探测概率衰减形态（Swerling I 为默认：典型监视雷达模型标定，2026-08-13）
     pub detection_curve: DetectionCurve,
     /// 穿越阈值 P_cross（占位保守低值，Phase 0 定值；未标定不得声称实现）
     pub p_cross: f64,
+    /// 探测概率基准 base_p（2026-08-13 标定：Swerling I 下有效半径 R_eff 处探测概率 =
+    /// 0.9，即 R_eff = 90% 探测距离；中心概率由模型推导 ≈1.0）。
+    /// 仅内部默认参数表字段，不进 ParamsOverride 外部覆盖（与 p_cross 解耦定案）。
+    pub base_p: f64,
     /// 压制修正因子 δ（探测距离 × (1−δ)，占位）
     pub suppression_delta: f64,
     /// 雷达探测概率代价系数（FMM 代价 ×(1+coef×(p+geom))；>0，默认 200：
@@ -527,8 +536,9 @@ impl Default for DefaultParams {
     fn default() -> Self {
         Self {
             radar_inflation: 1.2,
-            detection_curve: DetectionCurve::Exponential,
+            detection_curve: DetectionCurve::Swerling1,
             p_cross: 0.1,
+            base_p: 0.9, // Swerling I 标定：R_eff = 90% 探测距离（方案 A，2026-08-13）
             suppression_delta: 0.5,
             radar_cost_coef: 200.0,
             los_mask_coef: 0.08,
@@ -604,6 +614,7 @@ impl DefaultParams {
         }
         if let Some(s) = o.detection_curve.as_deref() {
             match s.to_ascii_lowercase().as_str() {
+                "swerling1" => d.detection_curve = DetectionCurve::Swerling1,
                 "exponential" => d.detection_curve = DetectionCurve::Exponential,
                 "linear" => d.detection_curve = DetectionCurve::Linear,
                 _ => {} // 无效 → 默认
@@ -1613,7 +1624,7 @@ mod tests {
         assert_eq!(m.radar_inflation, d.radar_inflation);
         assert_eq!(m.p_cross, d.p_cross);
         assert_eq!(m.suppression_delta, d.suppression_delta);
-        assert_eq!(m.detection_curve, DetectionCurve::Exponential);
+        assert_eq!(m.detection_curve, DetectionCurve::Swerling1);
         assert_eq!(m.los_mask_coef, d.los_mask_coef);
     }
 

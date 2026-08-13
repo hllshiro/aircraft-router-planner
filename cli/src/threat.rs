@@ -3,16 +3,21 @@
 //! 语义（技术方案 4.5 + 十轮共识）：
 //! - 每雷达球体探测：水平距离 ≤ 有效半径（radius_km × radar_inflation，被压制时再缩）；
 //!   有效半径外探测概率 = 0；
-//! - 探测概率随距离衰减：`DetectionCurve::Linear` p(d) = base·(1−u)；
+//! - 探测概率随距离衰减（2026-08-13 base_p 标定，方案 A）：
+//!   `DetectionCurve::Swerling1`（默认）Pd(d) = exp(−VT/(1 + SNR₀·(R_eff/d)⁴))，
+//!   Pfa = 1e-6 → VT = ln(1e6) = 13.8155；R_eff 处 Pd = base_p = 0.9（90% 探测距离）
+//!   → SNR₀ = VT/(−ln base_p) − 1 = 130.1（≈21.1 dB，与 Skolnik 体系文献一致）；
+//!   `DetectionCurve::Linear` p(d) = base·(1−u)；
 //!   `Exponential` p(d) = base·exp(−4u)，u = d/R ∈ [0,1]（R 处 ≈ 1.8%）；
+//!   u=0（中心）时 Swerling1 推导 Pd → 1（SNR→∞ 必探测）。
 //! - LOS：雷达天线到点的视线被地形遮挡（含 NoData 保守视为遮挡）→ 该雷达不探测；
 //! - 压制：`suppression_post_range_km` 直接给定压制后距离；否则
 //!   `suppression_factor` δ → R' = R·(1−δ)（默认参数表 suppression_delta 兜底）；
 //! - 多雷达探测概率主口径 = 概率并集 1−∏(1−pᵢ)（主管裁决）；
 //! - 全程/每段累计探测概率：段内等距采样逐点并集。
 //!
-//! base_p（探测概率基准）与 P_cross（穿越阈值）为占位值（0.1），
-//! 待真实雷达参数标定（docs/phase0_baseline.md Open Work）。
+//! base_p（探测概率基准）已标定（2026-08-13 方案 A：Swerling I 典型监视雷达模型，
+//! R_eff 处 = 0.9）；P_cross（穿越阈值）仍为验收阈值 0.1（与 base_p 解耦，主管 2026-08-05）。
 
 use crate::config::{DetectionCurve, Radar};
 use crate::path::{Path, haversine_m};
@@ -29,7 +34,7 @@ pub struct ThreatParams {
     pub p_cross: f64,
     /// 压制修正因子 δ（无显式压制字段时兜底）
     pub suppression_delta: f64,
-    /// 探测概率基准（占位 0.1，真实雷达参数标定前不得声称实现）
+    /// 探测概率基准（2026-08-13 标定：Swerling I 下有效半径 R_eff 处探测概率 = 0.9）
     pub base_p: f64,
 }
 
@@ -37,10 +42,10 @@ impl Default for ThreatParams {
     fn default() -> Self {
         Self {
             radar_inflation: 1.2,
-            detection_curve: DetectionCurve::Exponential,
+            detection_curve: DetectionCurve::Swerling1,
             p_cross: 0.1,
             suppression_delta: 0.5,
-            base_p: 0.1,
+            base_p: 0.9, // Swerling I 标定：R_eff = 90% 探测距离（方案 A）
         }
     }
 }
@@ -70,7 +75,10 @@ pub trait ThreatModel {
     }
     /// 静态几何并集探测概率（无 LOS）：点处 `1−∏(1−pᵢ)`。
     /// Theta* 去锯齿段检查用：直连概率 > P_cross（验收阈值）则拒绝拉直；
-    /// ≤ P_cross（容忍范围内）允许拉直 → 多雷达通道/S 形绕行可平滑直穿。
+    /// ≤ P_cross（容忍范围内）允许拉直。2026-08-13 base_p 标定（Swerling1）
+    /// 后圈内 p≥base_p=0.9 恒 > 默认 P_cross=0.1 → 拉直判据 = 几何深穿 **或**
+    /// 概率超阈值（solver::make_segment_check）；P_cross 调高 ≥0.9 的容忍
+    /// 场景仍可平滑直穿（语义不变）。
     fn static_union_probability(&self, lon: f64, lat: f64) -> f64 {
         let _ = (lon, lat);
         0.0
@@ -137,6 +145,23 @@ impl<'a> SphericalRadarThreat<'a> {
             let p = match self.params.detection_curve {
                 DetectionCurve::Linear => self.params.base_p * (1.0 - u),
                 DetectionCurve::Exponential => self.params.base_p * (-4.0 * u).exp(),
+                // Swerling I（典型监视雷达，2026-08-13 标定方案 A）：
+                // Pd(d) = exp(−VT/(1 + SNR₀·(R_eff/d)⁴))
+                //   VT = ln(1/Pfa), Pfa = 1e-6 → 13.8155
+                //   SNR₀ 由 R_eff 处 Pd = base_p 反解：1+SNR₀ = VT/(−ln base_p) → 130.1（21.1 dB）
+                // u=0（中心）：SNR→∞ → Pd→1（必探测）；u=1：Pd = base_p（数学恒等）
+                DetectionCurve::Swerling1 => {
+                    // 防御：base_p 出 (0,1) 时退化为指数近似，避免 ln(0)/除零
+                    let bp = self.params.base_p.clamp(1e-9, 1.0 - 1e-9);
+                    let vt = 1e6_f64.ln();
+                    let snr0 = vt / (-bp.ln()) - 1.0;
+                    let snr = if u <= 0.0 {
+                        f64::INFINITY
+                    } else {
+                        snr0 / (u * u * u * u)
+                    };
+                    (-vt / (1.0 + snr)).exp()
+                }
             };
             p_union = 1.0 - (1.0 - p_union) * (1.0 - p);
         }
@@ -260,16 +285,16 @@ mod tests {
             radar_inflation: 1.0,
             ..Default::default()
         });
-        // 距离 0 → p = base
+        // 距离 0 → p = base（0.9，2026-08-13 标定）
         let p0 = t.point_probability(0.0, 0.0, 3000.0, None);
-        assert!((p0 - 0.1).abs() < 1e-9);
+        assert!((p0 - 0.9).abs() < 1e-9);
         // 距离 = R → p = 0
         let pr = t.point_probability(0.9, 0.0, 3000.0, None);
         assert!(pr < 1e-9);
         // 中间距离 → 线性期望（用 haversine 实际距离）
         let lon = 0.45;
         let d = haversine_m(0.0, 0.0, lon, 0.0);
-        let expect = 0.1 * (1.0 - d / 100_000.0);
+        let expect = 0.9 * (1.0 - d / 100_000.0);
         let pm = t.point_probability(lon, 0.0, 3000.0, None);
         assert!((pm - expect).abs() < 1e-6, "p at half range = {pm} vs {expect}");
     }
@@ -283,10 +308,10 @@ mod tests {
             ..Default::default()
         });
         let p0 = t.point_probability(0.0, 0.0, 3000.0, None);
-        assert!((p0 - 0.1).abs() < 1e-9);
+        assert!((p0 - 0.9).abs() < 1e-9);
         let lon = 0.45;
         let d = haversine_m(0.0, 0.0, lon, 0.0);
-        let expect = 0.1 * (-4.0 * d / 100_000.0).exp();
+        let expect = 0.9 * (-4.0 * d / 100_000.0).exp();
         let pm = t.point_probability(lon, 0.0, 3000.0, None);
         assert!((pm - expect).abs() < 1e-6, "p at half range = {pm} vs {expect}");
     }
@@ -302,11 +327,11 @@ mod tests {
             radar_inflation: 1.0,
             ..Default::default()
         });
-        // 第二雷达在 (0, 0.1°≈11.1km)：p2 = 0.1×(1−11.1/100) ≈ 0.0889
-        // 并集 = 1−(1−0.1)(1−0.0889) ≈ 0.18
+        // 第二雷达在 (0, 0.1°≈11.1km)：p2 = 0.9×(1−11.1/100) ≈ 0.8
+        // 并集 = 1−(1−0.9)(1−0.8) ≈ 0.98
         let p = t.point_probability(0.0, 0.0, 3000.0, None);
         let d2 = haversine_m(0.0, 0.0, 0.0, 0.1);
-        let expect = 1.0 - (1.0 - 0.1) * (1.0 - 0.1 * (1.0 - d2 / 100_000.0));
+        let expect = 1.0 - (1.0 - 0.9) * (1.0 - 0.9 * (1.0 - d2 / 100_000.0));
         assert!((p - expect).abs() < 1e-6, "union p = {p} vs {expect}");
     }
 
@@ -353,6 +378,38 @@ mod tests {
         // 无地形（平地）→ 可见（1°≈111km < 200km → p ≈ 0.1×(1−0.56) ≈ 0.044）
         let p_open = t.point_probability(1.0, 0.0, 3000.0, None);
         assert!(p_open > 0.03, "open p = {p_open}");
+    }
+
+    #[test]
+    fn point_probability_swerling1() {
+        // 2026-08-13 标定方案 A：Swerling I，Pfa=1e-6，R_eff = 90% 探测距离（base_p=0.9）
+        let rs = [radar(0.0, 0.0, 100.0)];
+        let t = SphericalRadarThreat::new(&rs, ThreatParams {
+            detection_curve: DetectionCurve::Swerling1,
+            radar_inflation: 1.0,
+            ..Default::default()
+        });
+        let vt = 1e6_f64.ln();
+        let snr0 = vt / (-0.9_f64.ln()) - 1.0;
+        let model = |u: f64| (-vt / (1.0 + snr0 / (u * u * u * u))).exp();
+        // 中心（d=0）：SNR→∞ → Pd → 1（必探测）
+        let p0 = t.point_probability(0.0, 0.0, 3000.0, None);
+        assert!((p0 - 1.0).abs() < 1e-9, "center p = {p0}");
+        // 0.89°≈99.1km：u≈0.991 → p≈0.903（接近 base_p=0.9，半径内）
+        let pr = t.point_probability(0.89, 0.0, 3000.0, None);
+        let d_r = haversine_m(0.0, 0.0, 0.89, 0.0);
+        let expect_r = model(d_r / 100_000.0);
+        assert!((pr - expect_r).abs() < 1e-9, "p near R = {pr} vs {expect_r}");
+        assert!(pr > 0.9 && pr < 0.95, "p near R in typical band = {pr}");
+        // 0.5R：与公式一致（SNR₀×16 ≈ 2082，exp(−13.8155/2083) ≈ 0.9934）
+        let pm = t.point_probability(0.45, 0.0, 3000.0, None);
+        let d = haversine_m(0.0, 0.0, 0.45, 0.0);
+        let expect = model(d / 100_000.0);
+        assert!((pm - expect).abs() < 1e-9, "p at 0.5R = {pm} vs {expect}");
+        assert!(pm > 0.99 && pm < 0.995, "p at 0.5R in typical band = {pm}");
+        // 半径外 → 0（d > eff 直接返回 0，不进入 clamp）
+        let p_out = t.point_probability(2.0, 0.0, 3000.0, None);
+        assert!(p_out < 1e-12);
     }
 
     #[test]

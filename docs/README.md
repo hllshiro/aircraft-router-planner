@@ -26,7 +26,7 @@
 - [03-坐标与投影](./03-坐标与投影.md) — 椭球表（WGS84/CGCS2000/GRS80）、TM 正反算（Krüger 级数）、UTM/GK3/WebMercator、近场 ENU、垂直基准层、WKT2 核对
 - [04-地形数据源](./04-地形数据源.md) — TerrainSource trait、Sample 语义（Land/Water/Lake/NoData/OOB/Forbidden）、ARPK1 内置格式（布局/fail-fast/缓存/双线性）、GSHHG 掩膜、SRTM/GeoTIFF/DTED（外部格式 solver 直读）、LOS 语义
 - [05-代价场与FMM](./05-代价场与FMM.md) — CostField、语义代价场构建、Godunov 迎风差分 + BinaryHeap 窄带、确定性堆、回溯、rstar 空间索引
-- [06-威胁模型](./06-威胁模型.md) — ThreatModel trait、球形雷达、探测概率衰减（线性/指数）、LOS 遮挡、压制、多雷达概率并集、静态穿透（Theta\* 深穿判定）
+- [06-威胁模型](./06-威胁模型.md) — ThreatModel trait、球形雷达、探测概率衰减（Swerling1 默认 / 线性 / 指数）、LOS 遮挡、压制、多雷达概率并集、静态穿透（Theta\* 深穿判定）
 - [07-求解器与端到端流程](./07-求解器与端到端流程.md) — solve() 九步流程、多机共享代价场、禁飞墙膨胀 + 过渡带软罚、受限区剖面（底部/顶部决策、两轮 FMM）、直线直穿替代、降级记录
 - [08-路径平滑与复验](./08-路径平滑与复验.md) — SmoothOptions 派生（机型分流）、Theta\*/Chaikin/Catmull-Rom/贪心抽稀、Dubins CSC、策略链 trait + 回退语义、全链复验清单、旋翼机分支
 - [09-演示应用](./09-演示应用.md) — Axum 后端（/api/plan、/api/terrain）、React/Three.js 前端、启动方式、验证记录
@@ -39,7 +39,7 @@
 - **status 四态**：`success` / `degraded_timeout` / `no_solution` / `input_invalid`
 - **性能指标**：每百公里 ≤ 3s（端到端典型值），绝对不能崩溃（B9）
 - **核心链路**：语义代价场 → FMM → 回溯 → Theta\* → 样条/Dubins → 抽稀 → 全链复验
-- **主要占位项**：探测概率 base_p（0.1 待标定）、LOS mask 未进静态代价场、Rmin–Rmax 环带/发射包线、多边形受限区剖面、CCC Dubins（见 01 文档 §7.1；3s 预算硬护栏已实现于 P6-B，docs/07 §5；多机交叉检测已实现于 P6-C，武器类型+射程语义已定案于 P6-D）
+- **主要占位项**：LOS mask 未进静态代价场、CCC Dubins（见 01 文档 §7.1；探测概率 base_p 已于 2026-08-13 标定——Swerling I 典型监视雷达模型，R_eff 处 0.9；3s 预算硬护栏已实现于 P6-B，docs/07 §5；多机交叉检测已实现于 P6-C，武器类型+射程语义已定案于 P6-D）
 
 ## 维护约定
 
