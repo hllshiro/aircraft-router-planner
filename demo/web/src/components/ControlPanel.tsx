@@ -540,6 +540,18 @@ export function ControlPanel({
                   }}
                   placeholder="lat"
                 />
+                <input
+                  type="number"
+                  step="1"
+                  value={m.alt_m ?? v.start_pose.alt_m}
+                  onChange={(e) => {
+                    const ms = [...(v.mid_waypoints ?? [])];
+                    ms[i] = { ...ms[i], alt_m: +e.target.value };
+                    updateVehicleAt(idx, { mid_waypoints: ms });
+                  }}
+                  placeholder="alt(m)"
+                  title="必经点高度（MSL 米；2026-08-13 P8 M2 起生效——多锚点分段插值）"
+                />
                 <button
                   className="btn-small btn-danger"
                   onClick={() =>
@@ -1077,7 +1089,7 @@ export function ControlPanel({
         <div>
           <label>探测曲线</label>
           <select
-            value={mission.parameters.detection_curve ?? 'exponential'}
+            value={mission.parameters.detection_curve ?? 'swerling1'}
             onChange={(e) =>
               updateMission({
                 parameters: {
@@ -1087,8 +1099,9 @@ export function ControlPanel({
               })
             }
           >
-            <option value="linear">线性</option>
+            <option value="swerling1">Swerling I（默认，2026-08-13 标定）</option>
             <option value="exponential">指数</option>
+            <option value="linear">线性</option>
           </select>
         </div>
       </div>

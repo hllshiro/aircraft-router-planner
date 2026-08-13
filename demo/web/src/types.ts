@@ -24,6 +24,7 @@ export interface VehicleProfile {
   max_climb_angle_deg?: number;
   max_bank_deg?: number;
   ceiling_m?: number;
+  /** 探测概率参数（隐蔽突防折算项，0..=1）。契约保留字段；实际威胁模型由 parameters.detection_curve（默认 swerling1）+ 内部 base_p=0.9 标定表驱动（2026-08-13） */
   detection_probability?: number;
 }
 
@@ -86,6 +87,7 @@ export interface TerrainConfig {
 
 export interface ParamsOverride {
   radar_inflation?: number;
+  /** 探测曲线形态：swerling1（默认，2026-08-13 base_p 标定——Swerling I 典型监视雷达模型，R_eff 处探测概率 0.9）/ exponential / linear */
   detection_curve?: string;
   p_cross?: number;
   suppression_delta?: number;
