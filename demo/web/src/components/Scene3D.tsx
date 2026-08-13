@@ -203,6 +203,9 @@ export function Scene3D({
   // 2026-08-12 修复：target（旋转中心）重置同样受 20% 阈值保护——此前每次
   // bounds 引用变化（App 每次 render 都新算 sceneBounds）都会无条件执行
   // ctrl.target.set(0,0,0)，导致任何点击/移动后视角跳回正对场景中心。
+  // 2026-08-13 修复：点击设置终点在场景外时不再自动旋转干扰操作——
+  // ① 去掉 ctrl.target.set(0,0,0)（保留用户旋转中心/pan 位置，仅按对角线调整距离）；
+  // ② fit 期间临时禁用阻尼动画（相机位置突变被平滑成"场景自动旋转"观感的根因）。
   const lastFit = useRef<{ diag: number } | null>(null);
   const fitCameraToBounds = useCallback(() => {
     const cam = cameraRef.current;
@@ -218,7 +221,9 @@ export function Scene3D({
     if (prev && Math.abs(prev.diag - diag) / diag < 0.2) return;
     lastFit.current = { diag };
     const desiredDist = diag / 0.75;
-    ctrl.target.set(0, 0, 0);
+    // 不重置旋转中心（ctrl.target 保持用户当前 pan/rotate 姿态），
+    // 仅沿当前视线方向调整距离以包含扩展后的场景（2026-08-13：点击设终点在
+    // 场景外时不再把视角拉回正对场景中心）。
     const dir = cam.position.clone().sub(ctrl.target);
     const len = dir.length();
     if (len < 1e-6) {
@@ -227,7 +232,12 @@ export function Scene3D({
       dir.normalize().multiplyScalar(desiredDist);
       cam.position.copy(ctrl.target).add(dir);
     }
+    // 一次性应用：临时关闭阻尼动画（drei OrbitControls 默认 enableDamping=true，
+    // 相机位置突变会被平滑成"场景自动旋转"观感），fit 后恢复用户设置
+    const wasDamping = ctrl.enableDamping;
+    ctrl.enableDamping = false;
     ctrl.update();
+    ctrl.enableDamping = wasDamping;
     // 注意：geoRef 变化不在此调整——地形网格按新中心整体平移，局部原点恒为
     // 场景中心，相机相对原点姿态无需跟随（2026-08-12）。
   }, [bounds, geoRef]);
