@@ -34,9 +34,11 @@ jobs:
         run: |
           cargo test --lib
           cargo test --test crash
-          cargo test --test compare
           cargo test --test determinism
           cargo test --test regress
+          # 压缩解压性能/正确性 field_build_compare（~7min，真实地形 1024²
+          # 冷缓存 zstd 解压对比）不在全量门禁：仅在修改/验证压缩解压相关
+          # 代码时手动运行 cargo test --test compare（主管 2026-08-13 决策）
       - name: Static dependency red-line (no blas/proj/C backend)
         shell: bash
         run: |
