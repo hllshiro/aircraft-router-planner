@@ -120,6 +120,8 @@ struct VehicleSpec {
     profile: crate::config::VehicleProfile,
     /// 中途必经点（Phase 4 M5：start → mid[0..] → target 分段拼接）。
     mid_waypoints: Vec<Geo>,
+    /// 必经点高度（P8 M2：与 mid_waypoints 对齐；垂直剖面分段锚点，缺省同 start 无效果）。
+    mid_alts: Vec<f64>,
     /// 关联武器（P7：按 `<vehicle_id>_w1` 查 mission.weapons；仅启用的武器——
     /// `effective_range_km()` 非 None 才参与）。None = 无武器 → 点目标语义。
     weapon: Option<crate::config::WeaponEntry>,
@@ -251,6 +253,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
             target_alt_m: input.mission.target.alt_m,
             profile: crate::config::VehicleProfile::default(),
             mid_waypoints: Vec::new(),
+            mid_alts: Vec::new(),
             weapon: vehicle_weapon("v1", &input.mission.weapons),
         }]
     } else {
@@ -268,6 +271,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                             .map_err(|_| AppError::InputInvalid(InputInvalidReason::IllegalCoordinate))
                     })
                     .collect::<Result<Vec<_>, AppError>>()?;
+                let mid_alts = v.mid_waypoints.iter().map(|w| w.alt_m).collect::<Vec<_>>();
                 Ok(VehicleSpec {
                     id: v.id.clone(),
                     start: Geo::new(v.start_pose.lon, v.start_pose.lat)
@@ -280,6 +284,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                     ),
                     profile: v.profile.clone(),
                     mid_waypoints: mid,
+                    mid_alts,
                     weapon: vehicle_weapon(&v.id, &input.mission.weapons),
                 })
             })
@@ -415,117 +420,32 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
 
     // 5. 语义代价场（Land=1 / Water=1 / Lake=1 / NoData=5 / OOB=5（2026-08-11 放开）/
     //    Forbidden=INF；NoFly/Obstacle 墙用 Forbidden——OOB 不再表达墙）
-    //    硬墙判定闭包（每格：墙内 → Forbidden 禁行）——par_local 与串行回退共用。
-    //    多边形墙用"格子矩形与多边形相交"（2026-08-11 zz_nosolution_case：中心点
-    //    采样漏掉尖角/斜边 < 1 格窄带 → FMM 贴顶点穿入 → verify 精确几何拒 →
-    //    误报 no_solution；矩形相交保证任何分辨率不漏窄带）；圆形连续无窄带问题，
-    //    保持中心点语义（与 zone_contains 解析一致）。
-    let cell_deg = region.span_deg / grid as f64;
-    let walled = |lon: f64, lat: f64| -> bool {
-        let Ok(g) = Geo::new(lon, lat) else {
-            return false;
-        };
-        let half = cell_deg * 0.5;
-        let (rx0, ry0, rx1, ry1) = (lon - half, lat - half, lon + half, lat + half);
-        all_zones.iter().any(|z| {
-            if !z.is_wall() {
-                return false;
-            }
-            match &z.shape {
-                ZoneShape::Circle { .. } => zone_contains(z, &g),
-                ZoneShape::Polygon { vertices } => {
-                    crate::config::rect_intersects_polygon(rx0, ry0, rx1, ry1, vertices)
-                }
-            }
-        })
-    };
-    let mut field = match &terrain {
-        // 候选③：并行 + 无锁批量预取（3.71× vs 串行，对比测试 9504381 之后验证）
-        TerrainHandle::Plain(t) => build_semantic_cost_field_par_local(
-            t,
-            region.min_lon,
-            region.min_lat,
-            region.span_deg,
-            grid,
-            5.0,
-            &walled,
-        ),
-        TerrainHandle::Masked(t) => build_semantic_cost_field_par_local(
-            t,
-            region.min_lon,
-            region.min_lat,
-            region.span_deg,
-            grid,
-            5.0,
-            &walled,
-        ),
-        // 外部格式（GeoTIFF/DTED/SRTM）无 BulkPrefetch → 带锁采样回退
-        TerrainHandle::External(t) => build_semantic_cost_field(grid, grid, |r, c| {
-            let (lon, lat) = cell_lonlat(r, c, &region, grid);
-            if walled(lon, lat) {
-                return Sample::Forbidden;
-            }
-            t.sample_at(lon, lat)
-        }, 5.0),
-        TerrainHandle::MaskedExternal(t) => build_semantic_cost_field(grid, grid, |r, c| {
-            let (lon, lat) = cell_lonlat(r, c, &region, grid);
-            if walled(lon, lat) {
-                return Sample::Forbidden;
-            }
-            t.sample_at(lon, lat)
-        }, 5.0),
-        TerrainHandle::None => build_semantic_cost_field(grid, grid, |r, c| {
-            let (lon, lat) = cell_lonlat(r, c, &region, grid);
-            if walled(lon, lat) {
-                return Sample::Forbidden;
-            }
-            Sample::Land(0.0)
-        }, 5.0),
-    };
-
-    // 5c. 禁飞区墙向外膨胀 + 过渡带软罚（见 apply_inflation_and_band）
-    let cell_m = region.span_deg * 111_320.0 / grid as f64;
-    // 2026-08-07 主管 2000km 场景根因：FMM 8 邻域楼梯沿膨胀墙走时对角线切角
-    // ~0.71×cell，路径离原始墙 = inflation_cells×cell − 0.71×cell < verify 要求的
-    // inflation_m → 平滑链全失败回退锯齿。切角危害随 cell 增大：小区域（span≤2.5°，
-    // 默认 grid 256，cell≤0.9km）原膨胀 ceil 后余量刚好盖过切角（双禁飞区 7 格
-    // 实测切角 0.70×cell 边界通过，加补偿会变 8 格挤窄缝隙）；大跨度场景 cell 1.9km
-    // 时 ceil 余量不足（3 格 5.67km − 切角 1.34km = 4.33km < 5.52km）。因此仅
-    // span>2.5° 补理论切角 0.71×cell（2000km 场景 3→4 格触发修复）。
-    // 2026-08-07 zigzag17：多边形**尖角顶点**（poly3 西南角 (116.198,37.111)）处
-    // 格点墙角是钝的（墙格在顶点东北），FMM 路径从顶点西侧绕过时离**几何边**
-    // 1.33km < inflation 2km——0.71×cell 切角补偿不够（ceil((2000+0.71×1953)/1953)=2
-    // 格，路径离几何边 = 2×1953−偏差 ≈1.4km）。大区域再 +1 格兜底尖角偏差。
-    let inflation_cells = if region.span_deg > 2.5 {
+    //    + 5c 膨胀/软罚带 + 5b 雷达静态代价（+ P8 LOS mask）→ 见 build_cost_field。
+    //    提取为函数：无解出口链④（docs/01 §5）网格细分重试复用同一套墙/膨胀/雷达
+    //    语义（grid 翻倍重算，见 no_solution 分支）。
+    let threat_params = radar_threat_params(&params_merged);
+    let threat = SphericalRadarThreat::new(&input.mission.red_forces.radars, threat_params.clone());
+    let mut grid = grid;
+    let mut cell_m = region.span_deg * 111_320.0 / grid as f64;
+    // 膨胀格数（terrain 过滤场复用；细分重试时随 cell_m 同步——与 build_cost_field
+    // 内部口径一致）
+    let mut inflation_cells = if region.span_deg > 2.5 {
         ((inflation_m + 0.71 * cell_m) / cell_m.max(1.0)).ceil() as usize + 1
     } else {
         (inflation_m / cell_m.max(1.0)).ceil() as usize
     };
-    apply_inflation_and_band(&mut field, inflation_cells, cell_m);
-
-    // 5b. 雷达静态代价（Phase 4 M3）：膨胀半径内 cost ×(1+coef·(几何并集概率 + 深穿惩罚))
-    //     ——FMM 倾向绕行；LOS 动态遮挡由 verify 威胁评估判定（不进静态代价场）。
-    //     coef = radar_cost_coef（默认 200）。几何深穿惩罚（u<1 时 ×(1+coef·(1-u))，
-    //     探测区外 u≥1 无几何项）：确保穿探测区明确绕行——主管 2026-08-06：
-    //     并排双雷达不得直穿探测区（即使 P_cross 调高，几何绕行与验收阈值解耦）。
-    let threat_params = radar_threat_params(&params_merged);
-    let threat = SphericalRadarThreat::new(&input.mission.red_forces.radars, threat_params.clone());
-    if !input.mission.red_forces.radars.is_empty() {
-        for r in 0..grid {
-            for c in 0..grid {
-                let (lon, lat) = cell_lonlat(r, c, &region, grid);
-                let p = threat.static_union_probability(lon, lat);
-                if p > 0.0 {
-                    let idx = r * grid + c;
-                    if field.cost[idx].is_finite() {
-                        let u = threat.static_penetration(lon, lat, 0.0);
-                        let geom = if u < 1.0 { 1.0 - u } else { 0.0 };
-                        field.cost[idx] *= (1.0 + params_merged.radar_cost_coef * (p + geom)) as f32;
-                    }
-                }
-            }
-        }
-    }
+    let mut field = build_cost_field(
+        &region,
+        grid,
+        &terrain,
+        &all_zones,
+        inflation_m,
+        &threat,
+        params_merged.radar_cost_coef,
+        params_merged.los_mask_coef,
+        !input.mission.red_forces.radars.is_empty(),
+    );
+    let mut grid_refined = false; // ④ 已细分重试（每车最多一次）
 
     // 6. 每机：分段 FMM（start → mid[0..] → target，共享代价场）→ 拼接 → 平滑 → 输出
     let mut out_vehicles = Vec::new();
@@ -788,7 +708,23 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                             }
                         }
                     } else {
+                        // 无武器 → 点目标：目标 cell 回溯；失败 → 无解出口链③
+                        // （docs/01 §5：目标半径放宽——在目标附近容差内找 T 最小
+                        // 可达 cell，到达并显式降级标注，不静默无解）。
                         cells_opt = backtrack_path(field_ref, &res, dr, dc, sr, sc);
+                        if cells_opt.is_none() {
+                            if let Some((rr, rc, relax_km)) = relaxed_target_cell(
+                                &res, &region, grid, e.lon, e.lat, RELAX_TARGET_MAX_KM,
+                            ) {
+                                cells_opt = backtrack_path(field_ref, &res, rr, rc, sr, sc);
+                                if cells_opt.is_some() {
+                                    degradations.push(format!(
+                                        "target point unreachable; radius relaxed to {relax_km:.1} km (v={})",
+                                        v.id
+                                    ));
+                                }
+                            }
+                        }
                     }
                 } else {
                     cells_opt = backtrack_path(field_ref, &res, dr, dc, sr, sc);
@@ -824,6 +760,41 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                     terrain_fallback_done = true;
                     eprintln!(
                         "[debug] raised FMM no path -> fallback unmasked (v={})",
+                        v.id
+                    );
+                    continue 'fmm_attempt;
+                }
+                if !grid_refined && grid < 1024 {
+                    // 无解出口链④（docs/01 §5）：走廊细分/重路由——grid 翻倍重建
+                    // 代价场重试一次。粗层无解可能是网格离散导致的窄通道漏检
+                    // （FMM 格点采样漏窄缝/尖角 → 细分后找到）；细分后仍无解 →
+                    // 几何无解（no_solution，原因码 coarse FMM no path）。
+                    let old_grid = grid;
+                    grid_refined = true;
+                    grid = (grid * 2).min(1024);
+                    cell_m = region.span_deg * 111_320.0 / grid as f64;
+                    inflation_cells = if region.span_deg > 2.5 {
+                        ((inflation_m + 0.71 * cell_m) / cell_m.max(1.0)).ceil() as usize + 1
+                    } else {
+                        (inflation_m / cell_m.max(1.0)).ceil() as usize
+                    };
+                    field = build_cost_field(
+                        &region,
+                        grid,
+                        &terrain,
+                        &all_zones,
+                        inflation_m,
+                        &threat,
+                        params_merged.radar_cost_coef,
+                        params_merged.los_mask_coef,
+                        !input.mission.red_forces.radars.is_empty(),
+                    );
+                    degradations.push(format!(
+                        "coarse FMM no path at grid {old_grid}; corridor refined to grid {grid} (v={})",
+                        v.id
+                    ));
+                    eprintln!(
+                        "[debug] coarse FMM no path -> refined grid {old_grid}->{grid} (v={})",
                         v.id
                     );
                     continue 'fmm_attempt;
@@ -906,6 +877,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                     &v.start,
                     &target,
                     inflation_m / 1000.0,
+                    &mut degradations,
                 );
                 need_wall |= nw;
                 smooth_src.extend(sub);
@@ -1781,6 +1753,11 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
             v.alt_m,
             target_alt_eff,
             alt_eff,
+            &v.mid_waypoints
+                .iter()
+                .zip(v.mid_alts.iter())
+                .map(|(g, &a)| (g.lon, g.lat, a))
+                .collect::<Vec<_>>(),
             terrain.as_source(),
             opts.clearance_m,
         );
@@ -1923,6 +1900,17 @@ fn default_mask_candidates() -> Option<PathBuf> {
 /// （2026-08-11 zz_region_block2：墙占满 region 短边方向时绕行被迫出 region）。
 const REGION_PAD_DEG: f64 = 0.15;
 
+// ==================== P8 无解出口链③ 目标半径放宽 ====================
+// docs/01 §5 回退层③：点目标 cell 不可达（墙/地形挡）→ 在目标附近容差内
+// 找 T 最小可达 cell 到达并显式降级标注（不静默无解）。上限保守 10km
+// （≈9 个默认格距；越过则判几何无解 → no_solution）。
+const RELAX_TARGET_MAX_KM: f64 = 10.0;
+
+/// P8 M5 LOS mask 静态代价场参考高度（米，MSL）：代价场多机共享，LOS 判定用
+/// 固定参考高度近似（地形遮蔽随高度变化小；verify 威胁评估仍用实际路径高度精确
+/// 判定）。默认巡航量级，与各机 start_pose.alt_m 同量级。
+const LOS_REF_ALT_M: f64 = 3000.0;
+
 // ==================== P6-C 多机交叉检测 ====================
 // docs/01 §7.1 方案：输出后处理检测多机路径空间交叉，检出显式告警；
 // 时间维 out-of-scope（不判是否同时到达，仅空间接近告警）。
@@ -2033,6 +2021,7 @@ fn apply_vertical_profile(
     start_alt: f64,
     target_alt: f64,
     cruise_alt: f64,
+    mid_anchors: &[(f64, f64, f64)],
     terrain: Option<&dyn TerrainSource>,
     clearance_m: f64,
 ) {
@@ -2049,7 +2038,6 @@ fn apply_vertical_profile(
         let dy = (pts[i].lat - pts[i - 1].lat) * ky;
         cum[i] = cum[i - 1] + dx.hypot(dy);
     }
-    let total = cum[pts.len() - 1].max(1.0);
     let clearance = clearance_m.max(1.0);
     // 抬升场景下限：巡航段高度不得低于抬升巡航高度（地形安全裁决）；
     // 非抬升（cruise == start）→ 无下限，线性插值平滑过渡（下降生效）。
@@ -2058,6 +2046,33 @@ fn apply_vertical_profile(
     } else {
         f64::NEG_INFINITY
     };
+    // P8 M2：必经点高度锚点分段（mid_anchors = (lon, lat, alt) 序列）。
+    // 分段插值节点表 [(idx, alt)]：起点 (0, start_alt) → 必经点最近点 → 终点。
+    // 段端点（必经点/目标）是硬约束不被平滑移除 → 最近点顺序匹配可靠（index 递增）。
+    let mut anchors: Vec<(usize, f64)> = Vec::with_capacity(mid_anchors.len() + 2);
+    anchors.push((0, start_alt));
+    if !mid_anchors.is_empty() {
+        let mut search_from = 0usize;
+        for &(alon, alat, aalt) in mid_anchors {
+            let mut best = search_from;
+            let mut best_d = f64::MAX;
+            for i in search_from..pts.len() {
+                let dx = (pts[i].lon - alon) * kx;
+                let dy = (pts[i].lat - alat) * ky;
+                let d = dx * dx + dy * dy;
+                if d < best_d {
+                    best_d = d;
+                    best = i;
+                }
+            }
+            search_from = best + 1;
+            // 重复 idx（必经点与上一锚点/终点重合）→ 跳过（高度被覆盖，无独立效果）
+            if best > anchors.last().unwrap().0 {
+                anchors.push((best, aalt));
+            }
+        }
+    }
+    anchors.push((pts.len() - 1, target_alt));
     for i in 0..pts.len() {
         // 剖面段保持：原高度显著偏离巡航高度 → 受限区底部/顶部剖面（主动升降高），
         // 垂直剖面不覆盖（其高度已经 build_restricted_profiles 语义验证）。
@@ -2066,8 +2081,14 @@ fn apply_vertical_profile(
         if (pts[i].alt_m - cruise_alt).abs() > 0.5 {
             continue;
         }
-        let t = (cum[i] / total).clamp(0.0, 1.0);
-        let mut h = (start_alt + (target_alt - start_alt) * t).max(raise_floor);
+        // 找 i 所在锚点区间 [anchors[k], anchors[k+1]]（anchors 严格递增；
+        // i == 最后锚点（终点）时 k+1 越界 → clamp 到自身 = 精确锚点高度）
+        let k = anchors.partition_point(|&(idx, _)| idx <= i) - 1;
+        let (lo, h_lo) = anchors[k];
+        let (hi, h_hi) = anchors[(k + 1).min(anchors.len() - 1)];
+        let seg_len = (cum[hi] - cum[lo]).max(1.0);
+        let t = ((cum[i] - cum[lo]) / seg_len).clamp(0.0, 1.0);
+        let mut h = (h_lo + (h_hi - h_lo) * t).max(raise_floor);
         // 地形保底（含终点）：目标点在地形以下（物理不可达）→ 抬到安全高度
         // （zigzag26 目标 2000m、终点地形 2097m → 保底；宁高勿穿山）
         if let Some(tsrc) = terrain {
@@ -2345,6 +2366,51 @@ fn lonlat_cell(lon: f64, lat: f64, region: &Region, grid: usize) -> (usize, usiz
     let c = (((lon - region.min_lon) / region.span_deg) * grid as f64) as usize;
     let r = (((lat - region.min_lat) / region.span_deg) * grid as f64) as usize;
     (r.min(grid - 1), c.min(grid - 1))
+}
+
+/// 无解出口链③（docs/01 §5 回退层）：目标点 cell 不可达 → 在目标附近
+/// `max_relax_km` 容差内搜索 T 最小（times 有限 = 可达）且距目标最近的 cell。
+/// 返回 `(r, c, 距目标 km)`；容差内无可达 cell → None（几何无解 → no_solution）。
+/// 语义：目标半径放宽是显式降级（调用方记 degradation），不是静默改目标。
+fn relaxed_target_cell(
+    res: &crate::costfield::FmmResult,
+    region: &Region,
+    grid: usize,
+    tlon: f64,
+    tlat: f64,
+    max_relax_km: f64,
+) -> Option<(usize, usize, f64)> {
+    let (tr, tc) = lonlat_cell(tlon, tlat, region, grid);
+    let cell_km = (region.span_deg * 111_320.0 / grid as f64 / 1000.0).max(1e-9);
+    let radius = (max_relax_km / cell_km).ceil() as isize;
+    let mut best: Option<(usize, usize, f32, f64)> = None; // (r, c, t, dist_km)
+    for dr in -radius..=radius {
+        for dc in -radius..=radius {
+            let r = tr as isize + dr;
+            let c = tc as isize + dc;
+            if r < 0 || c < 0 || r >= grid as isize || c >= grid as isize {
+                continue;
+            }
+            let (ru, cu) = (r as usize, c as usize);
+            if ru == tr && cu == tc {
+                continue; // 目标 cell 本身不可达（否则不会进入放宽分支）
+            }
+            let t = res.times[ru * grid + cu];
+            if !t.is_finite() {
+                continue;
+            }
+            let (lon, lat) = cell_lonlat(ru, cu, region, grid);
+            let d_km = crate::path::haversine_m(tlon, tlat, lon, lat) / 1000.0;
+            if d_km > max_relax_km + cell_km {
+                continue;
+            }
+            // 确定性 tie-break：T 最小优先，同 T 距目标近优先
+            if best.map_or(true, |b| t < b.2 || (t == b.2 && d_km < b.3)) {
+                best = Some((ru, cu, t, d_km));
+            }
+        }
+    }
+    best.map(|(r, c, _, d)| (r, c, d))
 }
 
 /// 圆形 zone → CircleIndex（smooth 复验禁飞包含用；zones 提供时 verify 不再用它）。
@@ -3170,6 +3236,7 @@ fn build_restricted_profiles(
     start: &Geo,
     target: &Geo,
     inflation_km: f64,
+    degradations: &mut Vec<String>,
 ) -> (Vec<Path>, Vec<bool>, bool) {
     let n = seg.points.len();
     if n < 2 {
@@ -3279,7 +3346,16 @@ fn build_restricted_profiles(
                 continue;
             };
             if line_hits_wall_km(p0.lon, p0.lat, p1.lon, p1.lat, zones, inflation_km) {
-                continue; // 直线穿硬墙（如 no_fly）→ 直线剖面不可用
+                // P8 M6（已知限制 #12）：fallback 直线剖面不可用（直线穿硬墙）→
+                // **显式降级标注**（消除静默），保持 raw 浅穿交付（宁丑勿违）。
+                // 不触发画墙绕行：need_wall 会全局画 restricted 墙，主管真实输入
+                // zz33/zz34 中 rz 圆顶与 no_fly 三角顶点同高，膨胀后走廊闭合 → 无解
+                // （比锯齿交付更坏）。取舍：显式标注可观测，路径行为不变（零回归）。
+                degradations.push(format!(
+                    "restricted fallback straight profile blocked by wall (zone={}); raw shallow-cross delivered",
+                    z.id
+                ));
+                continue;
             }
             // 穿行带：圆 = 解析二次方程（同 bottom_terrain_ok 口径）；多边形 = 边交点成带
             let mlat = ((p0.lat + p1.lat) / 2.0).to_radians();
@@ -3595,6 +3671,148 @@ fn push_out_of_walls(
         .collect()
 }
 
+/// 语义代价场构建：5. 语义采样（Land=1/Water=1/Lake=1/NoData=5/OOB=5/Forbidden=INF）
+/// + 5c 墙膨胀 + 过渡带软罚 + 5b 雷达静态代价（+ P8 M5 LOS mask）。
+/// 提取为函数：无解出口链④（docs/01 §5）网格细分重试复用（同一套墙/膨胀/雷达
+/// 语义，grid 翻倍重算）。
+///
+/// P8 M5 LOS mask（docs/06 §6）：`p_det = f(r)·mask_LOS`——有地形源时探测概率用
+/// 带 LOS 的并集（`point_probability(lon, lat, LOS_REF_ALT_M, terrain)`），被地形
+/// 遮挡（含 NoData 保守）→ 该雷达不探测 → p_los→0 → 无代价惩罚 → FMM 倾向走
+/// 地形遮蔽区接近/绕过雷达。参考高度常量（多机共享静态近似，verify 威胁评估仍
+/// 精确）；无地形（TerrainHandle::None）→ 无遮蔽（docs/06 §6"无地形文件 → 无遮蔽"，
+/// 零回归）。
+fn build_cost_field(
+    region: &Region,
+    grid: usize,
+    terrain: &TerrainHandle,
+    all_zones: &[Zone],
+    inflation_m: f64,
+    threat: &SphericalRadarThreat,
+    radar_cost_coef: f64,
+    los_mask_coef: f64,
+    has_radars: bool,
+) -> crate::costfield::CostField {
+    // 硬墙判定闭包（每格：墙内 → Forbidden 禁行）——par_local 与串行回退共用。
+    // 多边形墙用"格子矩形与多边形相交"（2026-08-11 zz_nosolution_case：中心点
+    // 采样漏掉尖角/斜边 < 1 格窄带 → FMM 贴顶点穿入 → verify 精确几何拒 →
+    // 误报 no_solution；矩形相交保证任何分辨率不漏窄带）；圆形连续无窄带问题，
+    // 保持中心点语义（与 zone_contains 解析一致）。
+    let cell_deg = region.span_deg / grid as f64;
+    let walled = |lon: f64, lat: f64| -> bool {
+        let Ok(g) = Geo::new(lon, lat) else {
+            return false;
+        };
+        let half = cell_deg * 0.5;
+        let (rx0, ry0, rx1, ry1) = (lon - half, lat - half, lon + half, lat + half);
+        all_zones.iter().any(|z| {
+            if !z.is_wall() {
+                return false;
+            }
+            match &z.shape {
+                ZoneShape::Circle { .. } => zone_contains(z, &g),
+                ZoneShape::Polygon { vertices } => {
+                    crate::config::rect_intersects_polygon(rx0, ry0, rx1, ry1, vertices)
+                }
+            }
+        })
+    };
+    let mut field = match &terrain {
+        // 候选③：并行 + 无锁批量预取（3.71× vs 串行，对比测试 9504381 之后验证）
+        TerrainHandle::Plain(t) => build_semantic_cost_field_par_local(
+            t,
+            region.min_lon,
+            region.min_lat,
+            region.span_deg,
+            grid,
+            5.0,
+            &walled,
+        ),
+        TerrainHandle::Masked(t) => build_semantic_cost_field_par_local(
+            t,
+            region.min_lon,
+            region.min_lat,
+            region.span_deg,
+            grid,
+            5.0,
+            &walled,
+        ),
+        // 外部格式（GeoTIFF/DTED/SRTM）无 BulkPrefetch → 带锁采样回退
+        TerrainHandle::External(t) => build_semantic_cost_field(grid, grid, |r, c| {
+            let (lon, lat) = cell_lonlat(r, c, region, grid);
+            if walled(lon, lat) {
+                return Sample::Forbidden;
+            }
+            t.sample_at(lon, lat)
+        }, 5.0),
+        TerrainHandle::MaskedExternal(t) => build_semantic_cost_field(grid, grid, |r, c| {
+            let (lon, lat) = cell_lonlat(r, c, region, grid);
+            if walled(lon, lat) {
+                return Sample::Forbidden;
+            }
+            t.sample_at(lon, lat)
+        }, 5.0),
+        TerrainHandle::None => build_semantic_cost_field(grid, grid, |r, c| {
+            let (lon, lat) = cell_lonlat(r, c, region, grid);
+            if walled(lon, lat) {
+                return Sample::Forbidden;
+            }
+            Sample::Land(0.0)
+        }, 5.0),
+    };
+
+    // 5c. 禁飞区墙向外膨胀 + 过渡带软罚（见 apply_inflation_and_band）
+    let cell_m = region.span_deg * 111_320.0 / grid as f64;
+    // 2026-08-07 主管 2000km 场景根因：FMM 8 邻域楼梯沿膨胀墙走时对角线切角
+    // ~0.71×cell，路径离原始墙 = inflation_cells×cell − 0.71×cell < verify 要求的
+    // inflation_m → 平滑链全失败回退锯齿。切角危害随 cell 增大：小区域（span≤2.5°，
+    // 默认 grid 256，cell≤0.9km）原膨胀 ceil 后余量刚好盖过切角（双禁飞区 7 格
+    // 实测切角 0.70×cell 边界通过，加补偿会变 8 格挤窄缝隙）；大跨度场景 cell 1.9km
+    // 时 ceil 余量不足（3 格 5.67km − 切角 1.34km = 4.33km < 5.52km）。因此仅
+    // span>2.5° 补理论切角 0.71×cell（2000km 场景 3→4 格触发修复）。
+    // 2026-08-07 zigzag17：多边形**尖角顶点**（poly3 西南角 (116.198,37.111)）处
+    // 格点墙角是钝的（墙格在顶点东北），FMM 路径从顶点西侧绕过时离**几何边**
+    // 1.33km < inflation 2km——0.71×cell 切角补偿不够（ceil((2000+0.71×1953)/1953)=2
+    // 格，路径离几何边 = 2×1953−偏差 ≈1.4km）。大区域再 +1 格兜底尖角偏差。
+    let inflation_cells = if region.span_deg > 2.5 {
+        ((inflation_m + 0.71 * cell_m) / cell_m.max(1.0)).ceil() as usize + 1
+    } else {
+        (inflation_m / cell_m.max(1.0)).ceil() as usize
+    };
+    apply_inflation_and_band(&mut field, inflation_cells, cell_m);
+
+    // 5b. 雷达静态代价（Phase 4 M3）：膨胀半径内 cost ×(1+coef·(几何并集概率 + 深穿惩罚))
+    //     ——FMM 倾向绕行；coef = radar_cost_coef（默认 200）。几何深穿惩罚（u<1 时
+    //     ×(1+coef·(1-u))，探测区外 u≥1 无几何项）：确保穿探测区明确绕行——主管
+    //     2026-08-06：并排双雷达不得直穿探测区（即使 P_cross 调高，几何绕行与验收
+    //     阈值解耦）。
+    //     P8 M5 LOS mask（docs/06 §6）：有地形源时 p 用带 LOS 的并集概率
+    //     （point_probability(lon, lat, LOS_REF_ALT_M, terrain)）；被地形遮挡的 cell
+    //     p_los→0 → 无代价惩罚 → FMM 倾向走遮蔽区；无地形 → 无 LOS（零回归）。
+    //     参考高度常量 LOS_REF_ALT_M：代价场多机共享静态近似（verify 仍精确）。
+    let terrain_src = terrain.as_source();
+    if has_radars {
+        for r in 0..grid {
+            for c in 0..grid {
+                let (lon, lat) = cell_lonlat(r, c, region, grid);
+                let p = if los_mask_coef > 0.0 && terrain_src.is_some() {
+                    threat.point_probability(lon, lat, LOS_REF_ALT_M, terrain_src)
+                } else {
+                    threat.static_union_probability(lon, lat)
+                };
+                if p > 0.0 {
+                    let idx = r * grid + c;
+                    if field.cost[idx].is_finite() {
+                        let u = threat.static_penetration(lon, lat, 0.0);
+                        let geom = if u < 1.0 { 1.0 - u } else { 0.0 };
+                        field.cost[idx] *= (1.0 + radar_cost_coef * (p + geom)) as f32;
+                    }
+                }
+            }
+        }
+    }
+    field
+}
 
 /// 禁飞区墙膨胀 + 过渡带软罚（5c + 5c2）：
 /// - 5c：NoFly/Obstacle 硬墙向外膨胀 inflation_cells 格（考虑飞机机动留转弯空间，
@@ -3760,7 +3978,7 @@ mod tests {
             vpp(115.75, 39.45, 3000.0),
             vpp(116.5, 39.9, 3000.0),
         ];
-        apply_vertical_profile(&mut pts, 3000.0, 8000.0, 3000.0, None, 100.0);
+        apply_vertical_profile(&mut pts, 3000.0, 8000.0, 3000.0, &[], None, 100.0);
         assert!((pts[0].alt_m - 3000.0).abs() < 0.5, "start {}", pts[0].alt_m);
         assert!((pts[1].alt_m - 5500.0).abs() < 200.0, "mid {}", pts[1].alt_m);
         assert!((pts[2].alt_m - 8000.0).abs() < 0.5, "end {}", pts[2].alt_m);
@@ -3770,7 +3988,7 @@ mod tests {
     fn vertical_profile_same_alt_unchanged() {
         // 起终点同高 → 高度保持原样（受限区剖面/抬升语义不变）
         let mut pts = vec![vpp(115.0, 39.0, 3000.0), vpp(116.5, 39.9, 3000.0)];
-        apply_vertical_profile(&mut pts, 3000.0, 3000.0, 3000.0, None, 100.0);
+        apply_vertical_profile(&mut pts, 3000.0, 3000.0, 3000.0, &[], None, 100.0);
         assert!(pts.iter().all(|p| (p.alt_m - 3000.0).abs() < 1e-9));
     }
 
@@ -3797,7 +4015,7 @@ mod tests {
             vpp(115.75, 39.45, 8000.0),
             vpp(116.5, 39.9, 8000.0),
         ];
-        apply_vertical_profile(&mut pts, 8000.0, 3000.0, 8000.0, Some(&FakeTerrain), 100.0);
+        apply_vertical_profile(&mut pts, 8000.0, 3000.0, 8000.0, &[], Some(&FakeTerrain), 100.0);
         assert!((pts[0].alt_m - 8000.0).abs() < 0.5, "start {}", pts[0].alt_m);
         assert!(pts[1].alt_m >= 6100.0, "mid floor {}", pts[1].alt_m);
         // 终点 3000 < 地形 6000（物理不可达）→ 保底抬到 ≥ 6100（宁高勿穿山）
@@ -3813,7 +4031,7 @@ mod tests {
             vpp(115.75, 39.45, 2240.0),
             vpp(116.5, 39.9, 2240.0),
         ];
-        apply_vertical_profile(&mut pts, 500.0, 3000.0, 2240.0, None, 100.0);
+        apply_vertical_profile(&mut pts, 500.0, 3000.0, 2240.0, &[], None, 100.0);
         assert!(pts[0].alt_m >= 2240.0 - 0.5, "start floor {}", pts[0].alt_m);
         assert!(pts[1].alt_m >= 2240.0 - 0.5, "mid floor {}", pts[1].alt_m);
         assert!((pts[2].alt_m - 3000.0).abs() < 0.5, "end {}", pts[2].alt_m);
@@ -3829,7 +4047,7 @@ mod tests {
             vpp(116.0, 40.0, 2242.0),   // 巡航段
             vpp(116.5, 40.5, 2242.0),   // 终点（raw 巡航）
         ];
-        apply_vertical_profile(&mut pts, 1000.0, 1500.0, 2242.0, None, 100.0);
+        apply_vertical_profile(&mut pts, 1000.0, 1500.0, 2242.0, &[], None, 100.0);
         assert!(pts[0].alt_m >= 2242.0 - 0.5, "cruise start {}", pts[0].alt_m);
         assert!(
             (pts[1].alt_m - 1500.0).abs() < 0.5,
@@ -3839,6 +4057,312 @@ mod tests {
         assert!(pts[2].alt_m >= 2242.0 - 0.5, "cruise mid {}", pts[2].alt_m);
         // 终点 = max(target 1500, raise_floor 2242) = 2242（目标低于抬升巡航 → 保持抬升）
         assert!(pts[3].alt_m >= 2242.0 - 0.5, "end {}", pts[3].alt_m);
+    }
+
+    #[test]
+    fn vertical_profile_mid_anchor_segmented() {
+        // P8 M2：必经点高度锚点分段——start 3000 → mid 6000 → target 8000，
+        // 四等距点路径：p1 应在 3000→6000 段内（≈4500）、p2 在 6000→8000 段内（≈7000）。
+        let mut pts = vec![
+            vpp(115.0, 39.0, 3000.0),
+            vpp(115.5, 39.45, 3000.0),
+            vpp(116.0, 39.7, 3000.0),
+            vpp(116.5, 39.9, 3000.0),
+        ];
+        apply_vertical_profile(
+            &mut pts,
+            3000.0,
+            8000.0,
+            3000.0,
+            &[(116.0, 39.7, 6000.0)],
+            None,
+            100.0,
+        );
+        assert!((pts[0].alt_m - 3000.0).abs() < 0.5, "start {}", pts[0].alt_m);
+        // p1 位于 start→mid 段中点 → ≈ (3000+6000)/2 = 4500
+        assert!((pts[1].alt_m - 4500.0).abs() < 200.0, "p1 {}", pts[1].alt_m);
+        // p2 = mid 点 → 6000（锚点本身；插值期望 = 6000）
+        assert!((pts[2].alt_m - 6000.0).abs() < 200.0, "p2 {}", pts[2].alt_m);
+        assert!((pts[3].alt_m - 8000.0).abs() < 0.5, "end {}", pts[3].alt_m);
+    }
+
+    #[test]
+    fn vertical_profile_mid_anchor_keeps_profile_segment() {
+        // P8 M2：必经点高度锚点 + 受限区剖面段保护——mid 锚点 1500 与底部剖面一致时
+        // 剖面段仍保持（不被插值扰动）；巡航段按分段插值。
+        let mut pts = vec![
+            vpp(115.0, 39.0, 3000.0),
+            vpp(115.5, 39.45, 1500.0), // 底部穿行剖面段
+            vpp(116.0, 39.9, 1500.0),  // mid 必经点（底部剖面保持）
+            vpp(116.5, 40.2, 3000.0),
+        ];
+        apply_vertical_profile(
+            &mut pts,
+            3000.0,
+            3000.0,
+            3000.0,
+            &[(116.0, 39.9, 1500.0)],
+            None,
+            100.0,
+        );
+        assert!(
+            (pts[1].alt_m - 1500.0).abs() < 0.5,
+            "profile seg kept {}",
+            pts[1].alt_m
+        );
+        assert!((pts[2].alt_m - 1500.0).abs() < 0.5, "mid {}", pts[2].alt_m);
+    }
+
+    #[test]
+    fn relaxed_target_cell_finds_nearest_reachable() {
+        // P8 ③：目标 cell 不可达（INF）但附近可达 → 返回 T 最小可达 cell
+        let grid = 8;
+        let region = Region { min_lon: 0.0, min_lat: 0.0, span_deg: 1.0 };
+        let mut times = vec![f32::INFINITY; grid * grid];
+        times[3 * grid + 3] = 10.0;
+        times[5 * grid + 5] = 20.0;
+        times[4 * grid + 4] = f32::INFINITY; // 目标 cell 本身不可达
+        let res = crate::costfield::FmmResult {
+            times,
+            accepted: vec![false; grid * grid],
+        };
+        let got = relaxed_target_cell(&res, &region, grid, 0.5, 0.5, 10.0);
+        assert!(got.is_some());
+        let (r, c, d) = got.unwrap();
+        assert_eq!((r, c), (3, 3), "T 最小可达 cell");
+        assert!(d > 5.0 && d < 10.5, "距目标距离 {d}");
+    }
+
+    #[test]
+    fn relaxed_target_cell_none_when_all_unreachable() {
+        // P8 ③：容差内全不可达 → None（几何无解 → no_solution）
+        let grid = 8;
+        let region = Region { min_lon: 0.0, min_lat: 0.0, span_deg: 1.0 };
+        let times = vec![f32::INFINITY; grid * grid];
+        let res = crate::costfield::FmmResult {
+            times,
+            accepted: vec![false; grid * grid],
+        };
+        assert!(relaxed_target_cell(&res, &region, grid, 0.5, 0.5, 10.0).is_none());
+    }
+
+    #[test]
+    fn p8_relaxed_target_when_cell_blocked() {
+        // P8 ③ 集成：目标贴禁飞区墙外侧 → 目标 cell 被膨胀墙覆盖（不可达）
+        // → 目标半径放宽到墙外可达 cell（degradation 标注），不静默 no_solution。
+        let s = r#"{
+            "schema_version":"0.20",
+            "mission":{
+                "start":{"lon":115.0,"lat":39.0,"alt_m":3000},
+                "target":{"lon":116.53,"lat":39.9,"alt_m":3000},
+                "terrain":{"source":"none"},
+                "vehicles":[
+                    {"id":"v1","profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":250},
+                     "start_pose":{"lon":115.0,"lat":39.0,"alt_m":3000,"heading_deg":45}}
+                ],
+                "no_fly_zones":[{"id":"nf1","zone_type":"no_fly",
+                    "shape":"circle","geometry":{"center":[116.5,39.9],"radius_km":5},
+                    "alt_min_m":0,"alt_max_m":12000}]
+            }
+        }"#;
+        let out = solve(&parse(s), &SolveParams::default(), 0).unwrap();
+        assert_eq!(out.vehicles[0].status, "planned", "应放宽到达而非无解");
+        let has_relax = out.stats.degradations.iter().any(|d| d.contains("radius relaxed"));
+        assert!(has_relax, "应标注半径放宽: {:?}", out.stats.degradations);
+        // 终点在禁飞区外（放宽 cell 在墙外）
+        let last = out.vehicles[0].path.last().unwrap();
+        let d_km = crate::path::haversine_m(last.x, last.y, 116.5, 39.9) / 1000.0;
+        assert!(d_km > 5.0, "终点应在墙外，距圆心 {d_km:.2} km");
+    }
+
+    #[test]
+    fn build_restricted_profiles_fallback_line_hits_wall_degradation() {
+        // P8 M6（已知限制 #12）：raw 未穿 restricted（浅穿 < 格距）→ fallback
+        // 直线剖面；直线穿 no_fly 硬墙 → **显式降级标注**（不再静默回 raw），
+        // 不触发画墙绕行（need_wall=false）——need_wall 会全局画 restricted 墙，
+        // 主管真实输入 zz33/zz34 中走廊闭合 → 无解（比锯齿交付更坏）。
+        let nf = Zone {
+            id: "nf".into(),
+            zone_type: crate::config::ZoneType::NoFly,
+            shape: ZoneShape::Circle { center: [116.0, 39.5], radius_km: 10.0 },
+            alt_min_m: None,
+            alt_max_m: None,
+            height_semantics: crate::config::HeightSemantics::Msl,
+        };
+        let rz = Zone {
+            id: "rz".into(),
+            zone_type: crate::config::ZoneType::Restricted,
+            shape: ZoneShape::Circle { center: [116.0, 39.45], radius_km: 8.0 },
+            alt_min_m: Some(2000.0),
+            alt_max_m: Some(6000.0),
+            height_semantics: crate::config::HeightSemantics::Msl,
+        };
+        // raw 从 rz 南侧绕过（距圆心 > 22km，不穿 rz）；直线 p0→p1 从 rz/nf 内穿过
+        let seg = crate::path::Path {
+            points: vec![
+                vpp(115.0, 39.0, 3000.0),
+                vpp(115.7, 39.2, 3000.0),
+                vpp(116.0, 39.25, 3000.0),
+                vpp(116.5, 39.3, 3000.0),
+                vpp(116.5, 39.7, 3000.0),
+            ],
+        };
+        let start = Geo::new(115.0, 39.0).unwrap();
+        let target = Geo::new(116.5, 39.7).unwrap();
+        let mut degs = Vec::new();
+        let (_, _, nw) = build_restricted_profiles(
+            &seg,
+            &[rz, nf],
+            3000.0,
+            15.0,
+            Some(12000.0),
+            None,
+            &start,
+            &target,
+            2.0,
+            &mut degs,
+        );
+        assert!(!nw, "不触发画墙（走廊闭合风险）");
+        assert!(
+            degs.iter().any(|d| d.contains("fallback straight profile blocked")),
+            "应显式降级标注: {degs:?}"
+        );
+    }
+
+    #[test]
+    fn build_cost_field_los_mask_rewards_shadow() {
+        // P8 M5：LOS mask 静态代价场——有地形源时，雷达视线被山脊遮挡的 cell
+        // 无代价惩罚（p_los→0），可见 cell 有惩罚（×(1+coef·p)）。
+        struct Ridge;
+        impl TerrainSource for Ridge {
+            fn sample_at(&self, lon: f64, lat: f64) -> Sample {
+                // 南北向山脊 lon∈[0.3,0.9]、lat∈[0.3,0.7] 高 4000m：挡雷达(0,0.5)→东侧视线
+                if lon > 0.3 && lon < 0.9 && lat > 0.3 && lat < 0.7 {
+                    Sample::Land(4000.0)
+                } else {
+                    Sample::Land(0.0)
+                }
+            }
+            fn height_at(&self, lon: f64, lat: f64) -> Option<f64> {
+                match self.sample_at(lon, lat) {
+                    Sample::Land(h) => Some(h),
+                    _ => None,
+                }
+            }
+            fn bounds(&self) -> Option<crate::terrain::GeoBounds> {
+                None
+            }
+            fn resolution_desc(&self) -> String {
+                "ridge".into()
+            }
+        }
+        let region = Region { min_lon: 0.0, min_lat: 0.0, span_deg: 1.0 };
+        let grid = 8;
+        let radars = [crate::config::Radar {
+            id: "r1".into(),
+            lon: 0.0,
+            lat: 0.5,
+            radar_type: crate::config::RadarType::Tracking,
+            radius_km: 200.0,
+            alt_m: 10.0,
+            suppression_post_range_km: None,
+            suppression_factor: None,
+        }];
+        let threat = SphericalRadarThreat::new(
+            &radars,
+            crate::threat::ThreatParams {
+                detection_curve: crate::config::DetectionCurve::Linear,
+                radar_inflation: 1.0,
+                ..Default::default()
+            },
+        );
+        // 有地形（山脊）→ LOS mask 生效；无地形 → 无遮蔽（docs/06 §6）
+        let field_los = build_cost_field(
+            &region,
+            grid,
+            &TerrainHandle::External(Box::new(Ridge)),
+            &[],
+            0.0,
+            &threat,
+            200.0,
+            0.08,
+            true,
+        );
+        let field_nolos = build_cost_field(
+            &region,
+            grid,
+            &TerrainHandle::None,
+            &[],
+            0.0,
+            &threat,
+            200.0,
+            0.08,
+            true,
+        );
+        // 雷达东侧 cell (lat 0.4375, lon 0.9375)：LOS 场视线被山脊挡 → 无惩罚；
+        // 无 LOS 场几何概率 > 0 → 有惩罚。
+        let east_idx = 3 * grid + 7;
+        let east_los = field_los.cost[east_idx];
+        let east_nolos = field_nolos.cost[east_idx];
+        assert!(
+            (east_los - 1.0).abs() < 1e-6,
+            "遮挡 cell 应无惩罚: {east_los}"
+        );
+        assert!(east_nolos > 1.0, "无 LOS 场遮挡 cell 应有惩罚: {east_nolos}");
+        // 雷达西侧 cell (lat 0.4375, lon 0.0625)：视线无遮挡 → 两场一致有惩罚
+        let west_idx = 3 * grid + 0;
+        let west_los = field_los.cost[west_idx];
+        let west_nolos = field_nolos.cost[west_idx];
+        assert!(west_los > 1.0, "可见 cell 应有惩罚: {west_los}");
+        assert!(
+            (west_los - west_nolos).abs() < 1e-4,
+            "可见 cell 两场惩罚应一致: {west_los} vs {west_nolos}"
+        );
+    }
+
+    #[test]
+    fn p8_corridor_refine_triggers_on_blocked() {
+        // P8 ④：四多边形硬墙围成封闭环（target 在环内空区、start 在环外）
+        // → 粗层 FMM 无解 → 走廊细分（grid 翻倍重建代价场）重试 → 仍无解 →
+        // no_solution + degradation 标注（细分触发可观测；不 panic、不假成功）。
+        let s = r#"{
+            "schema_version":"0.20",
+            "mission":{
+                "start":{"lon":114.5,"lat":38.5,"alt_m":3000},
+                "target":{"lon":116.5,"lat":39.9,"alt_m":3000},
+                "terrain":{"source":"none"},
+                "vehicles":[
+                    {"id":"v1","profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":250},
+                     "start_pose":{"lon":114.5,"lat":38.5,"alt_m":3000,"heading_deg":45}}
+                ],
+                "no_fly_zones":[
+                    {"id":"south","zone_type":"no_fly","shape":"polygon",
+                     "geometry":{"vertices":[[114.8,39.0],[117.2,39.0],[117.2,39.3],[114.8,39.3]]},
+                     "alt_min_m":0,"alt_max_m":12000},
+                    {"id":"north","zone_type":"no_fly","shape":"polygon",
+                     "geometry":{"vertices":[[114.8,40.2],[117.2,40.2],[117.2,40.5],[114.8,40.5]]},
+                     "alt_min_m":0,"alt_max_m":12000},
+                    {"id":"west","zone_type":"no_fly","shape":"polygon",
+                     "geometry":{"vertices":[[114.8,39.0],[115.2,39.0],[115.2,40.5],[114.8,40.5]]},
+                     "alt_min_m":0,"alt_max_m":12000},
+                    {"id":"east","zone_type":"no_fly","shape":"polygon",
+                     "geometry":{"vertices":[[116.8,39.0],[117.2,39.0],[117.2,40.5],[116.8,40.5]]},
+                     "alt_min_m":0,"alt_max_m":12000}
+                ]
+            }
+        }"#;
+        let out = solve(&parse(s), &SolveParams::default(), 0).unwrap();
+        assert_eq!(out.vehicles[0].status, "no_solution", "封闭环应无解");
+        let has_refine = out
+            .stats
+            .degradations
+            .iter()
+            .any(|d| d.contains("corridor refined"));
+        assert!(
+            has_refine,
+            "应标注走廊细分重试: {:?}",
+            out.stats.degradations
+        );
     }
 
     #[test]
@@ -4139,6 +4663,7 @@ mod tests {
             &start_geo,
             &target_geo,
             0.0, // 无硬墙 → 外扩不生效
+            &mut Vec::new(),
         );
         assert_eq!(segs.len(), 5, "应切 [首段, desc→in, in→out, out→climb, 尾段]");
         assert_eq!(mask, vec![false, true, false, true, false]);
