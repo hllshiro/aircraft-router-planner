@@ -6,7 +6,8 @@ import type { Vec3, GeoRef } from '../types';
 import { localToGeo } from '../types';
 
 function toThreePos([x, y, z]: Vec3): [number, number, number] {
-  return [x, z, y];
+  // 局部平面 [东, 北, 高] → 场景坐标 [x, z, -y]（Y 轴向上、北=-z，2026-08-14）
+  return [x, z, -y];
 }
 
 interface MidpointMarkerProps {
@@ -63,7 +64,8 @@ export function MidpointMarker({
       RAYCASTER.setFromCamera(NDC, camera);
       if (RAYCASTER.ray.intersectPlane(Y0_PLANE, HIT)) {
         setLocalPos([HIT.x, pos[1], HIT.z]);
-        const g = localToGeo([HIT.x, HIT.z, 0], geoRef);
+        // 场景坐标 z=-北 → 纬度 = ref.lat - z / ky（2026-08-14）
+        const g = localToGeo([HIT.x, -HIT.z, 0], geoRef);
         lastGeoRef.current = { lon: g.lon, lat: g.lat };
       }
     },

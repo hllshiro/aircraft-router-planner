@@ -261,3 +261,45 @@ export function defaultInputConfig(): InputConfig {
     },
   };
 }
+
+
+// === 底图层（2026-08-13：掩膜 / GeoTIFF / WMS 三选一，主管定稿） ===
+export type BaseMapSource = 'mask' | 'tiff' | 'wms' | 'none';
+export type TiffProjection = 'auto' | '4326' | '3857';
+
+export interface BaseMapConfig {
+  source: BaseMapSource;
+  /** mask/tiff 共用文件路径（mask 默认 data/mask_7p5as.mask，与默认地形同目录） */
+  path?: string;
+  /** tiff 投影：auto = 后端读 GeoKey 自动识别 */
+  tiffProjection?: TiffProjection;
+  /** wms：GeoServer WMS 端点（如 http://127.0.0.1:8080/geoserver/wms） */
+  wmsUrl?: string;
+  wmsLayers?: string;
+  wmsCrs?: 'EPSG:4326' | 'EPSG:3857';
+}
+
+export interface BaseMapInfo {
+  nx: number;
+  ny: number;
+  min_lon: number;
+  min_lat: number;
+  max_lon: number;
+  max_lat: number;
+  resolution: string;
+  source: 'mask' | 'tiff';
+  projection: 'mask' | '4326' | '3857';
+  /** nx*ny*4，0..255；越界区域为透明 [0,0,0,0] */
+  rgba: number[];
+}
+
+export function defaultBaseMapConfig(): BaseMapConfig {
+  return {
+    source: 'mask',
+    path: 'data/mask_7p5as.mask',
+    tiffProjection: 'auto',
+    wmsUrl: 'http://127.0.0.1:8080/geoserver/wms',
+    wmsLayers: 'workspace:layer',
+    wmsCrs: 'EPSG:4326',
+  };
+}

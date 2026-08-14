@@ -11,3 +11,9 @@ serde_json = "1"
 tower-http = { version = "0.5", features = ["cors", "fs"] }
 # 地形采样（/api/terrain 直接读 ARPK1，复用核心 lib 的地形源；纯 Rust 零 C 依赖）
 aircraft-router-planner-cli = { path = "../../cli" }
+# 底图层（2026-08-13）：GeoTIFF/OVR 解码（jpeg feature → zune-jpeg 支持 JPEG-in-TIFF）
+tiff = { version = "0.10", features = ["jpeg"] }
+# WMS 代理（局域网 GeoServer；rustls 纯 Rust，不依赖系统 TLS）
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+# 瓦片合并端点 rgba 传输编码（2026-08-13：JSON 数组 → base64，减体积）
+base64 = "0.22"

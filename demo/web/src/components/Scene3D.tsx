@@ -1,9 +1,21 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import * as THREE from 'three';
 import { Canvas } from '@react-three/fiber';
 import { OrbitControls, Grid } from '@react-three/drei';
 import type { ThreeEvent } from '@react-three/fiber';
-import type { Waypoint, GeoRef, VehicleInput, Radar, Zone, VehicleOutput, Vec2, TerrainInfo } from '../types';
+import type {
+  Waypoint,
+  GeoRef,
+  VehicleInput,
+  Radar,
+  Zone,
+  VehicleOutput,
+  Vec2,
+  TerrainConfig,
+  BaseMapConfig,
+} from '../types';
 import { geoToLocal, geoPointToLocal, localToGeo, parseVehicleTargetRef } from '../types';
+import { useViewportTiles, type TileEntry } from '../tiles';
 import { StartMarker } from './StartMarker';
 import { TargetZone } from './TargetZone';
 import { RadarSphere } from './RadarSphere';
@@ -20,10 +32,13 @@ interface Scene3DProps {
   radars: Radar[];
   zones: Zone[];
   results: VehicleOutput[] | null;
-  terrainData: TerrainInfo | null;
+  /** 地形源配置（source=none/path；瓦片按相机视口加载，2026-08-13） */
+  terrainConfig: TerrainConfig;
+  /** 底图配置（mask/tiff 瓦片级纹理；wms 视口级单图） */
+  baseMapConfig: BaseMapConfig;
   /** 场景高度范围（米；起终点/结果路径高度差，无地形时驱动 z 夸张） */
   sceneAltRange: number;
-  /** 场景包围盒 [minLon, minLat, maxLon, maxLat]（sceneBounds；与地形网格/相机视野一致） */
+  /** 场景包围盒 [minLon, minLat, maxLon, maxLat]（sceneBounds；点击平面/无地形 z 夸张用） */
   bounds: [number, number, number, number];
   onGroundClick: (wp: Waypoint) => void;
   onRadarMove: (id: string, lon: number, lat: number) => void;
@@ -36,6 +51,8 @@ interface Scene3DProps {
     lat: number,
   ) => void;
   activeClickMode: 'start' | 'target' | 'midpoint' | 'polygon' | null;
+  /** 瓦片加载状态回调（App 用于 ControlPanel 底图状态 / canvas overlay） */
+  onTilesStatus?: (loading: boolean, error: string | null) => void;
 }
 
 /** 圆形 zone → 局部平面多边形（24 边近似） */
@@ -99,26 +116,27 @@ function GroundClickPlane({
         return;
       }
       last.current = { x: px, y: pz, t: now };
-      onClick(localToGeo([px, pz, 0], geoRef));
+      // 场景坐标 z=-北 → 纬度 = ref.lat - z / ky（2026-08-14）
+      onClick(localToGeo([px, -pz, 0], geoRef));
     },
     [active, onClick, geoRef, suppressUntil],
   );
 
   // 点击平面 = sceneBounds 外扩 3 倍（宽高 ×3，中心不变）：
-  // 起终点/顶点可点在已加载场景之外 → sceneBounds 自动扩展 → 地形重新采样，
-  // 场景随点击逐步扩大（主管 2026-08-10：场景不应被限制在固定大小）。
+  // 起终点/顶点可点在已加载场景之外 → sceneBounds 自动扩展（相机/瓦片不随之调整，
+  // 2026-08-13：相机视口完全独立，起终点变化只影响标记位置）。
   const kx = 111320 * Math.cos((geoRef.lat * Math.PI) / 180);
   const ky = 110574;
   const [minLon, minLat, maxLon, maxLat] = bounds;
   const width = (maxLon - minLon) * kx * 3;
   const height = (maxLat - minLat) * ky * 3;
   const cx = ((minLon + maxLon) / 2 - geoRef.lon) * kx;
-  const cz = ((minLat + maxLat) / 2 - geoRef.lat) * ky;
+  const cy = ((minLat + maxLat) / 2 - geoRef.lat) * ky;
 
   return (
     <mesh
       rotation={[-Math.PI / 2, 0, 0]}
-      position={[cx, 0, cz]}
+      position={[cx, 0, -cy]}
       visible={active}
       onClick={handleClick}
     >
@@ -137,28 +155,43 @@ const ZONE_COLORS: Record<string, string> = {
 /** 禁飞/障碍全高度禁入的可视高度上限（米，乘 zScale；2026-08-12 起无高度区间） */
 const WALL_VISUAL_TOP_M = 30000;
 
-/** 地形 z 夸张系数（与 TerrainMesh 共用，Scene3D 统一计算后传给所有含高度对象）：
- * 有地形数据 → 场景跨度 / 高度范围 × 0.08，clamp [3, 20]（主管 2026-08-10：
- * 原 ×0.25 clamp [10,60] 过大不协调 → 降为 ×0.08 clamp [3,20]）；
- * 无地形数据（source=none / 加载失败）→ 同样按场景跨度 / 场景高度范围（起终点/
- * 结果路径高度差）计算——2026-08-12 修复：原无地形直接返回 1，起终点不同高度时
- * 高度差（如 5000m）相对水平跨度（100km）不可见，轨迹呈水平直线（与事实不符）。 */
-function computeZScale(
-  terrainData: TerrainInfo | null,
+/** 地形 z 夸张系数（多瓦片合并高度范围；2026-08-13 瓦片化）：
+ * 有地形瓦片 → 瓦片合并跨度 / 高度范围 × 0.08，clamp [3, 20]；
+ * 无地形（source=none / 加载失败）→ 场景包围盒跨度 / 场景高度范围（起终点/结果路径
+ * 高度差）× 0.08，clamp [3, 20]。 */
+function computeZScaleFromTiles(
+  tiles: TileEntry[],
   geoRef: GeoRef,
   sceneAltRange: number,
   bounds: [number, number, number, number],
 ): number {
   const lat0 = (geoRef.lat * Math.PI) / 180;
+  const valid = tiles.filter((t) => t.terrain);
   let spanMeters: number;
   let range: number;
-  if (terrainData) {
-    const hs = terrainData.heights.filter((h): h is number => h !== null);
-    const minH = hs.length ? Math.min(...hs) : 0;
-    const maxH = hs.length ? Math.max(...hs) : 0;
+  if (valid.length) {
+    let minH = Infinity;
+    let maxH = -Infinity;
+    let minLon = Infinity;
+    let minLat = Infinity;
+    let maxLon = -Infinity;
+    let maxLat = -Infinity;
+    for (const t of valid) {
+      const b = t.bbox;
+      minLon = Math.min(minLon, b[0]);
+      minLat = Math.min(minLat, b[1]);
+      maxLon = Math.max(maxLon, b[2]);
+      maxLat = Math.max(maxLat, b[3]);
+      for (const h of t.terrain!.heights) {
+        if (h !== null) {
+          minH = Math.min(minH, h);
+          maxH = Math.max(maxH, h);
+        }
+      }
+    }
     spanMeters = Math.hypot(
-      (terrainData.max_lon - terrainData.min_lon) * 111320 * Math.cos(lat0),
-      (terrainData.max_lat - terrainData.min_lat) * 110574,
+      (maxLon - minLon) * 111320 * Math.cos(lat0),
+      (maxLat - minLat) * 110574,
     );
     range = Math.max(maxH - minH, sceneAltRange, 1);
   } else {
@@ -172,7 +205,58 @@ function computeZScale(
   return Math.min(Math.max((spanMeters / range) * 0.08, 3), 20);
 }
 
-/** 每机自定义目标 → 局部坐标（parseVehicleTargetRef 定义在 types.ts，App/api 共享） */
+/** 单瓦片地形网格 + 底图纹理（mask/tiff 瓦片纹理；wms 用视口级纹理） */
+function TileMesh({
+  entry,
+  geoRef,
+  zScale,
+  wmsTexture,
+  wmsBbox,
+  onPick,
+}: {
+  entry: TileEntry;
+  geoRef: GeoRef;
+  zScale: number;
+  wmsTexture: THREE.Texture | null;
+  wmsBbox: [number, number, number, number] | null;
+  onPick?: (wp: Waypoint) => void;
+}) {
+  // mask/tiff：瓦片 RGBA 网格 → CanvasTexture（卸载时 dispose）
+  const tileTex = useMemo(() => {
+    if (!entry.baseMap) return null;
+    const { nx, ny, rgba } = entry.baseMap;
+    const canvas = document.createElement('canvas');
+    canvas.width = nx;
+    canvas.height = ny;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return null;
+    const img = ctx.createImageData(nx, ny);
+    img.data.set(rgba);
+    ctx.putImageData(img, 0, 0);
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.magFilter = THREE.LinearFilter;
+    tex.minFilter = THREE.LinearFilter;
+    return tex;
+  }, [entry.baseMap]);
+  useEffect(() => () => {
+    tileTex?.dispose();
+  }, [tileTex]);
+
+  if (!entry.terrain) return null;
+  const texture = entry.baseMap ? tileTex : wmsTexture;
+  const textureBbox = entry.baseMap ? entry.bbox : wmsBbox;
+  return (
+    <TerrainMesh
+      data={entry.terrain}
+      geoRef={geoRef}
+      zScale={zScale}
+      texture={texture}
+      textureBbox={textureBbox}
+      onPick={onPick}
+    />
+  );
+}
 
 export function Scene3D({
   geoRef,
@@ -181,7 +265,8 @@ export function Scene3D({
   radars,
   zones,
   results,
-  terrainData,
+  terrainConfig,
+  baseMapConfig,
   sceneAltRange,
   bounds,
   onGroundClick,
@@ -189,73 +274,61 @@ export function Scene3D({
   onZoneMove,
   onMidpointMove,
   activeClickMode,
+  onTilesStatus,
 }: Scene3DProps) {
-  // 相机/轨道控制器引用（视野随场景包围盒自适应，见 fitCameraToBounds）
+  // 相机/轨道控制器引用
   const cameraRef = useRef<any>(null);
   const controlsRef = useRef<any>(null);
+  // Canvas 挂载完成（camera/controls 就绪）→ 瓦片系统启动
+  const [sceneReady, setSceneReady] = useState(false);
 
-  // 相机视野随 sceneBounds 自适应（2026-08-11 主管：起终点更改 → 场景应扩展）：
-  // App 传的 geoRef = sceneBounds 中心 → 场景中心恒为局部原点 (0,0,0)；
-  // 相机保持当前方向（用户手动旋转/缩放后的姿态），仅按场景对角线调整距离——
-  // fov 50° 垂直半角 25°，target 处视宽 ≈ 2·d·tan(25°) ≈ 0.93·d，
-  // 取 d = diag/0.75 → 视宽 ≈ 1.24·diag（留 ~24% 余量，完整看到扩展后的场景）。
-  // 跨度变化 < 20% 不调整（拖拽微调起终点时视野不抖动）。
-  // 2026-08-12 修复：target（旋转中心）重置同样受 20% 阈值保护——此前每次
-  // bounds 引用变化（App 每次 render 都新算 sceneBounds）都会无条件执行
-  // ctrl.target.set(0,0,0)，导致任何点击/移动后视角跳回正对场景中心。
-  // 2026-08-13 修复：点击设置终点在场景外时不再自动旋转干扰操作——
-  // ① 去掉 ctrl.target.set(0,0,0)（保留用户旋转中心/pan 位置，仅按对角线调整距离）；
-  // ② fit 期间临时禁用阻尼动画（相机位置突变被平滑成"场景自动旋转"观感的根因）。
-  const lastFit = useRef<{ diag: number } | null>(null);
-  const fitCameraToBounds = useCallback(() => {
-    const cam = cameraRef.current;
-    const ctrl = controlsRef.current;
-    if (!cam || !ctrl) return;
-    const [minLon, minLat, maxLon, maxLat] = bounds;
-    const kx = 111320 * Math.cos((geoRef.lat * Math.PI) / 180);
-    const ky = 110574;
-    const diag = Math.hypot((maxLon - minLon) * kx, (maxLat - minLat) * ky);
-    if (!(diag > 0)) return;
-    const prev = lastFit.current;
-    // 跨度变化 < 20% → 不动相机（含旋转中心）：普通点击/微调不打扰用户视角。
-    if (prev && Math.abs(prev.diag - diag) / diag < 0.2) return;
-    lastFit.current = { diag };
-    const desiredDist = diag / 0.75;
-    // 不重置旋转中心（ctrl.target 保持用户当前 pan/rotate 姿态），
-    // 仅沿当前视线方向调整距离以包含扩展后的场景（2026-08-13：点击设终点在
-    // 场景外时不再把视角拉回正对场景中心）。
-    const dir = cam.position.clone().sub(ctrl.target);
-    const len = dir.length();
-    if (len < 1e-6) {
-      cam.position.set(desiredDist, desiredDist * 0.75, desiredDist);
-    } else {
-      dir.normalize().multiplyScalar(desiredDist);
-      cam.position.copy(ctrl.target).add(dir);
-    }
-    // 一次性应用：临时关闭阻尼动画（drei OrbitControls 默认 enableDamping=true，
-    // 相机位置突变会被平滑成"场景自动旋转"观感），fit 后恢复用户设置
-    const wasDamping = ctrl.enableDamping;
-    ctrl.enableDamping = false;
-    ctrl.update();
-    ctrl.enableDamping = wasDamping;
-    // 注意：geoRef 变化不在此调整——地形网格按新中心整体平移，局部原点恒为
-    // 场景中心，相机相对原点姿态无需跟随（2026-08-12）。
-  }, [bounds, geoRef]);
+  // geoRef 固定为首个 sceneBounds 中心：相机视口完全独立漫游（2026-08-13），
+  // 起终点变化只影响标记位置——局部投影原点不再跟随 sceneBounds 变化（否则
+  // 所有瓦片/标记局部坐标整体平移 → 视野跳动）。
+  const geoRefRef = useRef<GeoRef>(geoRef);
+  const stableGeoRef = geoRefRef.current;
 
-  // 挂载 + 每次 bounds 变化 → 视野对齐（地形已随 bbox 重新采样，相机需跟上）
+  // 视口瓦片系统（相机 change 节流驱动；配置变化清缓存重载）
+  const { tiles, wms, loading: tilesLoading, error: tilesError } = useViewportTiles({
+    terrainConfig,
+    baseMapConfig,
+    cameraRef,
+    controlsRef,
+    geoRef: stableGeoRef,
+    sceneReady,
+  });
+
+  // WMS 视口图纹理（blob URL → TextureLoader；替换时 dispose）
+  const [wmsTexture, setWmsTexture] = useState<THREE.Texture | null>(null);
   useEffect(() => {
-    fitCameraToBounds();
-  }, [fitCameraToBounds]);
+    if (!wms) {
+      setWmsTexture(null);
+      return;
+    }
+    const loader = new THREE.TextureLoader();
+    const tex = loader.load(wms.url);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    setWmsTexture(tex);
+    return () => {
+      THREE.Cache.remove(wms.url);
+      tex.dispose();
+    };
+  }, [wms]);
+
+  // 瓦片加载状态上报（ControlPanel 底图状态 / canvas overlay）
+  useEffect(() => {
+    onTilesStatus?.(tilesLoading, tilesError);
+  }, [tilesLoading, tilesError, onTilesStatus]);
 
   // 统一 z 夸张系数（地形 + 航路 + 标记 + zone 高度共用，保证同一尺度）
   const zScale = useMemo(
-    () => computeZScale(terrainData, geoRef, sceneAltRange, bounds),
-    [terrainData, geoRef, sceneAltRange, bounds],
+    () => computeZScaleFromTiles(tiles, stableGeoRef, sceneAltRange, bounds),
+    [tiles, stableGeoRef, sceneAltRange, bounds],
   );
 
   const targetPos = useMemo(
-    () => geoToLocal(target, geoRef, zScale),
-    [target, geoRef, zScale],
+    () => geoToLocal(target, stableGeoRef, zScale),
+    [target, stableGeoRef, zScale],
   );
 
   // 拖动物体（雷达/zone）状态：拖动期间禁用 OrbitControls，结束 400ms 内抑制地面点击
@@ -288,7 +361,7 @@ export function Scene3D({
 
   const radarMeshes = radars.map((r) => ({
     id: r.id,
-    center: geoPointToLocal(r.lon, r.lat, r.alt_m ?? 10, geoRef, zScale),
+    center: geoPointToLocal(r.lon, r.lat, r.alt_m ?? 10, stableGeoRef, zScale),
     radiusM: r.radius_km * 1000,
   }));
 
@@ -299,7 +372,7 @@ export function Scene3D({
     return {
       id: z.id,
       color: ZONE_COLORS[z.zone_type] ?? '#ff8800',
-      boundary: zoneBoundaryLocal(z, geoRef),
+      boundary: zoneBoundaryLocal(z, stableGeoRef),
       altMin: wall ? 0 : (z.alt_min_m ?? 0) * zScale,
       altMax: wall ? WALL_VISUAL_TOP_M * zScale : (z.alt_max_m ?? 12000) * zScale,
     };
@@ -312,12 +385,12 @@ export function Scene3D({
         if (z.shape !== 'polygon') return [];
         return (z.geometry as { vertices: [number, number][] }).vertices.map(
           ([lon, lat]) => {
-            const p = geoPointToLocal(lon, lat, z.alt_min_m ?? 0, geoRef, zScale);
+            const p = geoPointToLocal(lon, lat, z.alt_min_m ?? 0, stableGeoRef, zScale);
             return { id: `${z.id}_${lon}_${lat}`, pos: p, color: z.zone_type };
           },
         );
       }),
-    [zones, geoRef, zScale],
+    [zones, stableGeoRef, zScale],
   );
 
   // 车辆路径（输出，经纬高 → 局部平面；高度乘 zScale 贴合地形表面）
@@ -327,10 +400,10 @@ export function Scene3D({
       id: v.id,
       status: v.status,
       points: v.path.map((p) =>
-        geoPointToLocal(p.x, p.y, p.alt_m, geoRef, zScale),
+        geoPointToLocal(p.x, p.y, p.alt_m, stableGeoRef, zScale),
       ),
     }));
-  }, [results, geoRef, zScale]);
+  }, [results, stableGeoRef, zScale]);
 
   // 必经点（输入；可拖动——MidpointMarker）
   const midPoints = useMemo(
@@ -339,10 +412,10 @@ export function Scene3D({
         (v.mid_waypoints ?? []).map((m, idx) => ({
           vehicleId: v.id,
           index: idx,
-          pos: geoToLocal(m, geoRef, zScale),
+          pos: geoToLocal(m, stableGeoRef, zScale),
         })),
       ),
-    [vehicles, geoRef, zScale],
+    [vehicles, stableGeoRef, zScale],
   );
 
   // 每机自定义目标（非 mission.target 的 target_ref → 红色标记，与全局蓝色目标区分）
@@ -350,45 +423,63 @@ export function Scene3D({
     () =>
       vehicles.flatMap((v) => {
         const t = parseVehicleTargetRef(v, target);
-        return t ? [{ id: v.id, pos: geoToLocal(t, geoRef, zScale) }] : [];
+        return t ? [{ id: v.id, pos: geoToLocal(t, stableGeoRef, zScale) }] : [];
       }),
-    [vehicles, target, geoRef, zScale],
+    [vehicles, target, stableGeoRef, zScale],
   );
 
   return (
     <Canvas
+      // 场景坐标（2026-08-14 修复朝北镜像）：x=东、y=上、z=-北（物理右手系）
+      // 默认相机 = 正南高空俯视（主管 2026-08-14）：正南 80000、高 60000
+      // → 看向原点即朝北：北在上、南在下、东在右（地图式方位）
       camera={{
-        position: [80000, 60000, 80000],
+        position: [0, 60000, 80000],
+        up: [0, 1, 0],
         fov: 50,
         near: 10,
         far: 10000000,
       }}
       onCreated={({ camera }) => {
         cameraRef.current = camera;
-        // 挂载即 fit 一次（首帧相机可能未就绪，fitCameraToBounds 内已防御）
-        fitCameraToBounds();
+        // 首帧相机必须先看向场景中心：否则 quaternion 保持默认（看向 -z），
+        // viewportBBox 视线交点偏南（黄海/连云港=海），首屏会加载错误瓦片
+        // （初始渲染显示海色/错乱）。OrbitControls 挂载后 target 仍为 (0,0,0)，
+        // 与这里 lookAt 一致，不会造成跳变。
+        camera.lookAt(0, 0, 0);
+        camera.updateProjectionMatrix();
+        setSceneReady(true);
       }}
       style={{ background: '#1c2942' }}
     >
       <ambientLight intensity={0.85} />
       <hemisphereLight args={['#b8c8f0', '#4a5a78', 0.7]} />
-      <directionalLight position={[20000, 30000, 10000]} intensity={1.1} />
+      <directionalLight position={[20000, 30000, -10000]} intensity={1.1} />
 
       <OrbitControls
-        ref={controlsRef}
+        ref={(c) => {
+          controlsRef.current = c;
+          if (c) {
+            setSceneReady(true);
+          }
+        }}
         makeDefault
         maxPolarAngle={Math.PI / 2.1}
         enabled={!dragActive}
       />
 
-      {terrainData && (
-        <TerrainMesh
-          data={terrainData}
-          geoRef={geoRef}
+      {/* 视口瓦片：地形网格 + 底图纹理（mask/tiff 瓦片级；wms 视口级单图） */}
+      {tiles.map((t) => (
+        <TileMesh
+          key={t.key}
+          entry={t}
+          geoRef={stableGeoRef}
           zScale={zScale}
+          wmsTexture={wmsTexture}
+          wmsBbox={wms?.bbox ?? null}
           onPick={activeClickMode !== null ? handlePick : undefined}
         />
-      )}
+      ))}
 
       <Grid
         args={[100000, 100000, 20, 20]}
@@ -411,7 +502,7 @@ export function Scene3D({
             v.start_pose.lon,
             v.start_pose.lat,
             v.start_pose.alt_m,
-            geoRef,
+            stableGeoRef,
             zScale,
           )}
           heading={v.start_pose.heading_deg ?? 45}
@@ -421,7 +512,7 @@ export function Scene3D({
 
       {/* 每机自定义目标（红色小标记；mission.target 缺省不显示，复用全局 TargetZone） */}
       {vehicleTargets.map((t) => (
-        <mesh key={t.id} position={[t.pos[0], t.pos[2], t.pos[1]]}>
+        <mesh key={t.id} position={[t.pos[0], t.pos[2], -t.pos[1]]}>
           <sphereGeometry args={[250, 32, 16]} />
           <meshStandardMaterial color="#ff4466" />
         </mesh>
@@ -433,7 +524,7 @@ export function Scene3D({
           id={r.id}
           center={r.center}
           radiusM={r.radiusM}
-          geoRef={geoRef}
+          geoRef={stableGeoRef}
           onRadarMove={onRadarMove}
           onDragStateChange={handleDragState}
         />
@@ -446,7 +537,7 @@ export function Scene3D({
           altMin={z.altMin}
           altMax={z.altMax}
           color={z.color}
-          geoRef={geoRef}
+          geoRef={stableGeoRef}
           onZoneMove={onZoneMove}
           onDragStateChange={handleDragState}
         />
@@ -454,7 +545,7 @@ export function Scene3D({
 
       {/* 多边形顶点锚点（底部高亮球） */}
       {polygonVerts.map((p, i) => (
-        <mesh key={`pv_${i}`} position={[p.pos[0], p.pos[2] + 20, p.pos[1]]}>
+        <mesh key={`pv_${i}`} position={[p.pos[0], p.pos[2] + 20, -p.pos[1]]}>
           <sphereGeometry args={[120, 16, 8]} />
           <meshBasicMaterial color="#ffcc00" />
         </mesh>
@@ -467,7 +558,7 @@ export function Scene3D({
           vehicleId={m.vehicleId}
           index={m.index}
           center={m.pos}
-          geoRef={geoRef}
+          geoRef={stableGeoRef}
           onMidpointMove={onMidpointMove}
           onDragStateChange={handleDragState}
         />
@@ -485,7 +576,7 @@ export function Scene3D({
       <GroundClickPlane
         active={activeClickMode !== null}
         onClick={handlePick}
-        geoRef={geoRef}
+        geoRef={stableGeoRef}
         suppressUntil={dragSuppressUntil}
         bounds={bounds}
       />

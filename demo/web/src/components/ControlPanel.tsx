@@ -8,8 +8,12 @@ import type {
   VehicleInput,
   WeaponInput,
   WeaponType,
+  BaseMapConfig,
+  BaseMapSource,
+  TiffProjection,
 } from '../types';
 import { WEAPON_DEFAULT_RANGE_KM } from '../types';
+import { sanitizePath } from '../api';
 import { ResultPanel } from './ResultPanel';
 
 interface ControlPanelProps {
@@ -25,6 +29,11 @@ interface ControlPanelProps {
   /** 每机拾取目标下标（点击设置起/终点，2026-08-10） */
   pickVehicleIdx: number | null;
   onPickVehicle: (idx: number | null) => void;
+  /** 底图层（2026-08-13：掩膜/GeoTIFF/WMS 三选一，配置置入左侧功能区） */
+  baseMapConfig: BaseMapConfig;
+  onBaseMapConfigChange: (cfg: BaseMapConfig) => void;
+  baseMapLoading: boolean;
+  baseMapError: string | null;
 }
 
 /** 每机当前目标（自定义 target_ref 或 mission.target） */
@@ -57,12 +66,19 @@ export function ControlPanel({
   onEditingZoneId,
   pickVehicleIdx,
   onPickVehicle,
+  baseMapConfig,
+  onBaseMapConfigChange,
+  baseMapLoading,
+  baseMapError,
 }: ControlPanelProps) {
   const mission = config.mission;
   const update = (patch: Partial<InputConfig>) =>
     onConfigChange({ ...config, ...patch });
   const updateMission = (patch: Partial<InputConfig['mission']>) =>
     update({ mission: { ...mission, ...patch } });
+
+  const updateBaseMap = (patch: Partial<BaseMapConfig>) =>
+    onBaseMapConfigChange({ ...baseMapConfig, ...patch });
 
   const updateVehicleAt = (idx: number, patch: Partial<VehicleInput>) => {
     const vehicles = [...mission.vehicles];
@@ -640,6 +656,116 @@ export function ControlPanel({
           </div>
         )}
       </div>
+
+      {/* BaseMap（2026-08-13 主管定稿：掩膜 / GeoTIFF / WMS 三选一；置入左侧功能区） */}
+      <h3>底图</h3>
+      <div className="field-row">
+        <div>
+          <label>数据源</label>
+          <select
+            value={baseMapConfig.source}
+            onChange={(e) =>
+              // 切换数据源时清空路径（2026-08-13）：mask 旧路径传给 tiff
+              // 会因文件不是 TIFF 打开失败；tiff 旧路径传给 mask 同理
+              updateBaseMap({
+                source: e.target.value as BaseMapSource,
+                path: undefined,
+              })
+            }
+          >
+            <option value="none">无</option>
+            <option value="mask">海陆掩膜</option>
+            <option value="tiff">GeoTIFF 文件</option>
+            <option value="wms">GeoServer WMS</option>
+          </select>
+        </div>
+      </div>
+      {(baseMapConfig.source === 'mask' || baseMapConfig.source === 'tiff') && (
+        <div className="field-row">
+          <div className="wide">
+            <label>路径</label>
+            <input
+              type="text"
+              value={baseMapConfig.path ?? ''}
+              onChange={(e) => updateBaseMap({ path: sanitizePath(e.target.value) })}
+              placeholder={
+                baseMapConfig.source === 'mask'
+                  ? '如 data/mask_7p5as.mask'
+                  : '如 data/map.tif'
+              }
+            />
+          </div>
+        </div>
+      )}
+      {baseMapConfig.source === 'tiff' && (
+        <div className="field-row">
+          <div>
+            <label>投影</label>
+            <select
+              value={baseMapConfig.tiffProjection ?? 'auto'}
+              onChange={(e) =>
+                updateBaseMap({
+                  tiffProjection: e.target.value as TiffProjection,
+                })
+              }
+            >
+              <option value="auto">自动（GeoKey）</option>
+              <option value="4326">EPSG:4326</option>
+              <option value="3857">EPSG:3857</option>
+            </select>
+          </div>
+        </div>
+      )}
+      {baseMapConfig.source === 'wms' && (
+        <>
+          <div className="field-row">
+            <div className="wide">
+              <label>WMS URL</label>
+              <input
+                type="text"
+                value={baseMapConfig.wmsUrl ?? ''}
+                onChange={(e) => updateBaseMap({ wmsUrl: e.target.value })}
+                placeholder="如 http://127.0.0.1:8080/geoserver/wms"
+              />
+            </div>
+          </div>
+          <div className="field-row">
+            <div className="wide">
+              <label>图层 (layers)</label>
+              <input
+                type="text"
+                value={baseMapConfig.wmsLayers ?? ''}
+                onChange={(e) => updateBaseMap({ wmsLayers: e.target.value })}
+                placeholder="如 workspace:layer"
+              />
+            </div>
+            <div>
+              <label>坐标系</label>
+              <select
+                value={baseMapConfig.wmsCrs ?? 'EPSG:4326'}
+                onChange={(e) =>
+                  updateBaseMap({
+                    wmsCrs: e.target.value as 'EPSG:4326' | 'EPSG:3857',
+                  })
+                }
+              >
+                <option value="EPSG:4326">EPSG:4326</option>
+                <option value="EPSG:3857">EPSG:3857</option>
+              </select>
+            </div>
+          </div>
+        </>
+      )}
+      {(baseMapLoading || baseMapError) && (
+        <div className="field-row basemap-panel-status-row">
+          {baseMapLoading && (
+            <span className="basemap-panel-status loading">⏳ 底图加载中…</span>
+          )}
+          {baseMapError && (
+            <span className="basemap-panel-status error">⚠ {baseMapError}</span>
+          )}
+        </div>
+      )}
 
       {/* Radars */}
       <h3>雷达 ({mission.red_forces.radars.length})</h3>

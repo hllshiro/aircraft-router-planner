@@ -71,8 +71,10 @@ export function NFZPrism({
       const dx = HIT.x - sx.x;
       const dz = HIT.z - sx.z;
       lastDeltaRef.current = { x: dx, z: dz };
+      // 场景坐标 z=-北（2026-08-14 右手系）：场景 +z 增量 = 向南移动，
+      // Shape 的 y 轴是北 → 北坐标变化取反（by - dz），否则拖动方向与鼠标相反
       setLocalBoundary(
-        startBoundaryRef.current.map(([bx, by]) => [bx + dx, by + dz]),
+        startBoundaryRef.current.map(([bx, by]) => [bx + dx, by - dz]),
       );
     },
     [camera, gl],
@@ -88,7 +90,8 @@ export function NFZPrism({
     if (d && (Math.abs(d.x) > 0.5 || Math.abs(d.z) > 0.5)) {
       const lat0 = (geoRef.lat * Math.PI) / 180;
       const dLon = d.x / (111320 * Math.cos(lat0));
-      const dLat = d.z / 110574;
+      // 场景坐标 z=-北 → 纬度增量取反（2026-08-14）
+      const dLat = -d.z / 110574;
       onZoneMove(id, dLon, dLat);
     }
   }, [id, geoRef, onDragStateChange, onZoneMove]);
@@ -135,15 +138,13 @@ export function NFZPrism({
   const height = altMax - altMin;
   if (height <= 0 || localBoundary.length < 3) return null;
 
-  // 局部平面 [东, 北] → Shape(x=东, y=北)；绕 x 轴 +90° 使 shape 北(y) → three z 正
-  // （与 StartMarker/锚点/路径的 toThreePos [东,高,北] 一致；旧 rotation [-π/2] 会把
-  // 北映射到 three z 负 → 多边形渲染 z 镜像，顶点锚点与渲染形状南北对不上）。
-  // extrude 深度沿 shape z 轴：+90° 后指向 -y（向下），故 mesh 底面放 altMax 顶面向下
-  // 挤出 height 到 altMin（底面仍与锚点 altMin 水平对齐）。
+  // 局部平面 [东, 北] → Shape(x=东, y=北)；绕 x 轴 -90° 使 shape 北(y) → three z 负
+  // （2026-08-14 场景坐标改为北=-z 修复朝北镜像；extrude 深度沿 shape z 轴：
+  // -90° 后指向 +y（向上），故 mesh 底面放 altMin 顶面向上挤出 height 到 altMax）
   return (
     <mesh
-      position={[0, altMax, 0]}
-      rotation={[Math.PI / 2, 0, 0]}
+      position={[0, altMin, 0]}
+      rotation={[-Math.PI / 2, 0, 0]}
       onPointerDown={handleDown}
       onClick={stopClick}
     >

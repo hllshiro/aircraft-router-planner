@@ -3,7 +3,8 @@ import { Line } from '@react-three/drei';
 import type { Vec3 } from '../types';
 
 function toThreePos([x, y, z]: Vec3): [number, number, number] {
-  return [x, z, y];
+  // 局部平面 [东, 北, 高] → 场景坐标 [x, z, -y]（Y 轴向上、北=-z，2026-08-14）
+  return [x, z, -y];
 }
 
 interface PathLineProps {

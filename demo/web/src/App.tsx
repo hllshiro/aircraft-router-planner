@@ -1,17 +1,17 @@
-import { useState, useCallback, useEffect, useMemo } from 'react';
+import { useState, useCallback, useMemo } from 'react';
 import { Scene3D } from './components/Scene3D';
 import { ControlPanel } from './components/ControlPanel';
 import type {
   InputConfig,
   PlanResult,
-  TerrainInfo,
   Waypoint,
   Zone,
   CircleGeometry,
   PolygonGeometry,
+  BaseMapConfig,
 } from './types';
-import { defaultInputConfig, parseVehicleTargetRef } from './types';
-import { planRoute, sceneBounds, fetchTerrain } from './api';
+import { defaultInputConfig, parseVehicleTargetRef, defaultBaseMapConfig } from './types';
+import { planRoute, sceneBounds } from './api';
 
 type ClickMode = 'start' | 'target' | 'midpoint' | 'polygon' | null;
 
@@ -34,68 +34,25 @@ export default function App() {
   const [pickVehicleIdx, setPickVehicleIdx] = useState<number | null>(null);
   // 多边形拾取编辑目标 zone id（clickMode === 'polygon' 时生效）
   const [editingZoneId, setEditingZoneId] = useState<string | null>(null);
-  // 地形网格（source=path 时按场景范围采样）
-  const [terrainData, setTerrainData] = useState<TerrainInfo | null>(null);
-  const [terrainError, setTerrainError] = useState<string | null>(null);
+  // 底图层（2026-08-13：掩膜 / GeoTIFF / WMS 三选一；地形/底图瓦片由 Scene3D 按
+  // 相机视口加载——2026-08-13 主管：视口完全独立，漫游到哪加载到哪）
+  const [baseMapConfig, setBaseMapConfig] = useState<BaseMapConfig>(
+    defaultBaseMapConfig,
+  );
+  const [baseMapLoading, setBaseMapLoading] = useState(false);
+  const [baseMapError, setBaseMapError] = useState<string | null>(null);
+  // 视口瓦片是否在加载（canvas overlay 用）
+  const [tilesLoading, setTilesLoading] = useState(false);
 
-  useEffect(() => {
-    const t = config.mission.terrain;
-    if (t.source !== 'path' || !t.path) {
-      setTerrainData(null);
-      setTerrainError(null);
-      return;
-    }
-    let cancelled = false;
-    setTerrainError(null);
-    // 外部格式（GeoTIFF/DTED/SRTM）：渲染范围=数据范围、精度=server 按跨度自适应
-    // （2026-08-11 主管：载入外部地形时渲染应达到数据的范围与精度，而非场景包围盒）
-    const isExternal = /\.(tif|tiff|hgt|dt0|dt1|dt2)$/i.test(t.path);
-    if (isExternal) {
-      fetchTerrain(t.path, null, null)
-        .then((d) => {
-          if (!cancelled) setTerrainData(d);
-        })
-        .catch((e) => {
-          if (!cancelled) {
-            setTerrainData(null);
-            setTerrainError(String(e));
-          }
-        });
-      return () => {
-        cancelled = true;
-      };
-    }
-    const bbox = sceneBounds(config);
-    // 96×96：跨度变大（sceneBounds 1.4 倍自适应）后保持地形精细度（server 上限 128）
-    fetchTerrain(t.path, bbox, [96, 96])
-      .then((d) => {
-        if (!cancelled) setTerrainData(d);
-      })
-      .catch((e) => {
-        if (!cancelled) {
-          setTerrainData(null);
-          setTerrainError(String(e));
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [
-    config.mission.terrain.source,
-    config.mission.terrain.path,
-    config.mission.start.lon,
-    config.mission.start.lat,
-    config.mission.target.lon,
-    config.mission.target.lat,
-    // 每机起点/目标变化 → bbox 变化 → 地形网格刷新（2026-08-10 每机独立起终点）
-    JSON.stringify(
-      config.mission.vehicles.map((v) => [
-        v.start_pose.lon,
-        v.start_pose.lat,
-        v.target_ref ?? '',
-      ]),
-    ),
-  ]);
+  // Scene3D 瓦片加载状态回调（loading/error 汇总 → ControlPanel 底图区 + overlay）
+  const handleTilesStatus = useCallback(
+    (loading: boolean, error: string | null) => {
+      setBaseMapLoading(loading);
+      setBaseMapError(error);
+      setTilesLoading(loading);
+    },
+    [],
+  );
 
   const handlePlan = async () => {
     setLoading(true);
@@ -305,6 +262,10 @@ export default function App() {
           onEditingZoneId={setEditingZoneId}
           pickVehicleIdx={pickVehicleIdx}
           onPickVehicle={setPickVehicleIdx}
+          baseMapConfig={baseMapConfig}
+          onBaseMapConfigChange={setBaseMapConfig}
+          baseMapLoading={baseMapLoading}
+          baseMapError={baseMapError}
         />
       </div>
       <div className="canvas">
@@ -323,7 +284,8 @@ export default function App() {
             ...config.mission.obstacles,
           ]}
           results={result?.vehicles ?? null}
-          terrainData={terrainData}
+          terrainConfig={config.mission.terrain}
+          baseMapConfig={baseMapConfig}
           sceneAltRange={sceneAltRange}
           bounds={sceneBounds(config)}
           onGroundClick={handleGroundClick}
@@ -331,12 +293,13 @@ export default function App() {
           onZoneMove={handleZoneMove}
           onMidpointMove={handleMidpointMove}
           activeClickMode={clickMode}
+          onTilesStatus={handleTilesStatus}
         />
-        {terrainError && (
-          <div className="canvas-overlay-error">⚠ 地形加载失败: {terrainError}</div>
+        {baseMapError && (
+          <div className="canvas-overlay-error">⚠ 数据加载失败: {baseMapError}</div>
         )}
-        {config.mission.terrain.source === 'path' && !terrainData && !terrainError && (
-          <div className="canvas-overlay-loading">⏳ 地形采样中…</div>
+        {tilesLoading && (
+          <div className="canvas-overlay-loading">⏳ 视口数据加载中…</div>
         )}
       </div>
     </div>
