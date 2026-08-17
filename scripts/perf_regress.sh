@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # P6-B 性能回归：release 真实地形案例必须在 3s 预算内完成（不得 degraded_timeout）。
 # 用法：scripts/perf_regress.sh [input.json] [terrain.arpack]
-# 缺省输入 = cli/tests/p5_report.json（主管 2026-08-12 案例：3 必经点 + 禁飞圆 + 真实地形）
+# 缺省输入 = cli/tests/perf_gate.json（主管 2026-08-12 案例：3 必经点 + 禁飞圆 + 真实地形）
 # 跨平台：WSL/git-bash 下用 wslpath 转 Windows 绝对路径（Windows exe 不解析 Linux 路径）。
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-INPUT="${1:-cli/tests/p5_report.json}"
+INPUT="${1:-cli/tests/perf_gate.json}"
 TERRAIN="${2:-data/east_asia_7p5as.arpack}"
 BUDGET="${ARP_BUDGET_MS:-3000}"
 

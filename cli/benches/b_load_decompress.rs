@@ -1,4 +1,4 @@
-//! t_load_decompress 基准（技术方案 5.1：内置格式加载 ≤300ms 目标，落账 phase0_baseline）。
+//! t_load_decompress 基准（技术方案 5.1：内置格式加载 ≤300ms 目标，落账 docs/10 §8 标定值）。
 //!
 //! 场景：ARPK1 raw 块包 1024×1024（≈4 块）→ parse（magic/版本/SHA-256/索引校验）
 //! + 热采样 1000 次（按需解压缓存）。目标：parse+校验+首次采样 < 300ms。

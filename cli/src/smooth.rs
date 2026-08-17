@@ -23,7 +23,7 @@ const DUBINS_CHORD_TOL_M: f64 = 1000.0;
 /// 运动学/地形/禁飞仍严格复验。
 const CATMULL_CHORD_TOL_M: f64 = 500.0;
 
-/// 平滑器参数（Phase 0 标定前用保守初值，参数化可调；标定项见 docs/phase0_baseline.md）。
+/// 平滑器参数（Phase 0 标定前用保守初值，参数化可调；标定项见 docs/10 §8）。
 #[derive(Debug, Clone)]
 pub struct SmoothOptions {
     /// 机型（Phase 4 机型分流；旋翼机可悬停/极小转弯半径——急转/垂直机动合法，

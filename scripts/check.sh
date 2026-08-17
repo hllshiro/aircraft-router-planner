@@ -21,9 +21,9 @@ cargo build --release -p aircraft-router-planner-cli
 
 echo "==> [2/5] 回归测试（lib / crash / determinism / regress）"
 cargo test --lib
-cargo test --test crash
+cargo test --test crash_suite
 cargo test --test determinism
-cargo test --test regress
+cargo test --test regress_phase0
 if [ "$WITH_COMPARE" = "1" ]; then
   echo "==> [2b] 压缩解压性能/正确性（field_build_compare，单独门禁）"
   cargo test --test field_build_compare

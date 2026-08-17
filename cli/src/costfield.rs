@@ -8,7 +8,7 @@
 //!   NoData 5x 初值、OOB 禁行墙，主管 2026-08-04 拍板）；
 //! - Phase 2 以真实威胁/地形构建代价场（本模块只做传播骨架）。
 //!
-//! Phase 0 实测（docs/phase0_baseline.md）：128² 单次传播 2.62ms，常数 11-12.5ns/op。
+//! Phase 0 实测（docs/10 §8 标定值）：128² 单次传播 2.62ms，常数 11-12.5ns/op。
 
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
