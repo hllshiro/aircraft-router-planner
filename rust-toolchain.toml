@@ -1,0 +1,6 @@
+# 项目统一 Rust 工具链版本（本地与 CI 单一事实来源）。
+# 依赖 MSRV 现状（2026-08）：nalgebra 0.35 / safe_arch / wide 需 1.89、geo 0.33 需 1.88、
+# ruzstd 0.9 需 1.87、icu_* 2.2 需 1.86 —— 故最低 1.89；本机实测 1.95 亦满足。
+# 如需始终跟随最新稳定版，可改为 channel = "stable"。
+[toolchain]
+channel = "1.89.0"
