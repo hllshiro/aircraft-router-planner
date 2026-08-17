@@ -1,7 +1,9 @@
 name: ci
 
-# 日常检查门禁：push 到 master/main 与 pull_request 触发。
-# 只做构建/测试/静态依赖红线检查；跨平台交叉编译与发布见 release.yml（仅 v* tag 触发）。
+# 分层门禁：
+#   - static-check：push 到 master/main 与 PR 都跑，仅快速静态检查（cargo check + 依赖红线），不执行测试。
+#   - test：仅 pull_request 触发，全量测试门禁（单元/崩溃/确定性/回归）。
+#   - 跨平台交叉编译与发布：见 release.yml，仅 v* tag 触发。
 
 on:
   push:
@@ -12,7 +14,38 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  static-check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.89.0"
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+      - name: Static check (type-check, no codegen/test)
+        run: cargo check --workspace --all-targets
+      - name: Static dependency red-line (no blas/proj/C backend)
+        shell: bash
+        run: |
+          if cargo tree -e normal | grep -iE "openblas|zlib|curl|\bproj\b|gdal|pcre|ssl"; then
+            echo "FAIL: C dependency leak" >&2
+            exit 1
+          fi
+
   test:
+    # 全量测试门禁：仅 PR 触发，日常 push 跳过（代价高，避免每次提交都跑）。
+    if: github.event_name == 'pull_request'
     strategy:
       fail-fast: false
       matrix:
@@ -41,7 +74,7 @@ jobs:
           cargo test --test regress_phase0
           # 压缩解压性能/正确性 field_build_compare（~7min，真实地形 1024²
           # 冷缓存 zstd 解压对比）不在全量门禁：仅在修改/验证压缩解压相关
-          # 代码时手动运行 cargo test --test compare（主管 2026-08-13 决策）
+          # 代码时手动运行 cargo test --test field_build_compare（主管 2026-08-13 决策）
       - name: Static dependency red-line (no blas/proj/C backend)
         shell: bash
         run: |
