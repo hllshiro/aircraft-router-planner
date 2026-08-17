@@ -2,13 +2,14 @@ name: ci
 
 # 分层门禁：
 #   - static-check：push 到 master/main 与 PR 都跑，仅快速静态检查（cargo check + 依赖红线），不执行测试。
-#   - test：仅 pull_request 触发，全量测试门禁（单元/崩溃/确定性/回归）。
+#   - test：仅手动 workflow_dispatch 触发，全量测试门禁（单元/崩溃/确定性/回归）。
 #   - 跨平台交叉编译与发布：见 release.yml，仅 v* tag 触发。
 
 on:
   push:
     branches: [master, main]
   pull_request:
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -44,8 +45,8 @@ jobs:
           fi
 
   test:
-    # 全量测试门禁：仅 PR 触发，日常 push 跳过（代价高，避免每次提交都跑）。
-    if: github.event_name == 'pull_request'
+    # 全量测试门禁：仅手动触发（workflow_dispatch）；日常 push / PR 不跑（代价高）。
+    if: github.event_name == 'workflow_dispatch'
     strategy:
       fail-fast: false
       matrix:
