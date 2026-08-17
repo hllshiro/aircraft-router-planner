@@ -40,6 +40,14 @@ scripts/check.sh            # 构建 + 全套回归 + 静态红线 + 性能预�
 - 构建/依赖/发布：[docs/11-工程化与构建.md](docs/11-工程化与构建.md)
 - Demo 可视化：[docs/09-演示应用.md](docs/09-演示应用.md) / [demo/README.md](demo/README.md)
 
+## 版本与发布
+
+- 版本号唯一事实来源：`Cargo.toml` 的 `[workspace.package] version`；发布 tag 必须为 `v<version>`。
+- 变更记录：[CHANGELOG.md](CHANGELOG.md)（Keep a Changelog 格式）。
+- 版本升级：`scripts/bump_version.sh <new_version>`。
+- 发布：推送 `v*` tag 触发 [.github/workflows/release.yml](.github/workflows/release.yml)，
+  交叉编译 `windows/linux × amd64/arm64` 四个 CLI 产物并创建 GitHub Release（含 SHA256SUMS）。
+
 ## 数据说明
 
 默认地形（`east_asia_7p5as.arpack`，GMTED2010 东亚 7.5 弧秒）与掩膜
