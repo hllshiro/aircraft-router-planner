@@ -1,4 +1,4 @@
-import { useCallback } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
   InputConfig,
   PlanResult,
@@ -13,7 +13,7 @@ import type {
   TiffProjection,
 } from '../types';
 import { WEAPON_DEFAULT_RANGE_KM } from '../types';
-import { sanitizePath } from '../api';
+import { fetchElevation, sanitizePath } from '../api';
 import { ResultPanel } from './ResultPanel';
 
 interface ControlPanelProps {
@@ -77,6 +77,18 @@ export function ControlPanel({
   const updateMission = (patch: Partial<InputConfig['mission']>) =>
     update({ mission: { ...mission, ...patch } });
 
+  // —— 起终点地面海拔（2026-08-14：高度输入框 min = 地面海拔；低于地面自动抬升）——
+  // ref 存最新状态/回调，避免 250ms 防抖查询回调用陈旧闭包覆盖用户的并发修改
+  const missionRef = useRef(mission);
+  missionRef.current = mission;
+  const configRef = useRef(config);
+  configRef.current = config;
+  const onConfigChangeRef = useRef(onConfigChange);
+  onConfigChangeRef.current = onConfigChange;
+  const [groundAlt, setGroundAlt] = useState<
+    Record<string, { s: number | null; t: number | null }>
+  >({});
+
   const updateBaseMap = (patch: Partial<BaseMapConfig>) =>
     onBaseMapConfigChange({ ...baseMapConfig, ...patch });
 
@@ -85,6 +97,72 @@ export function ControlPanel({
     vehicles[idx] = { ...vehicles[idx], ...patch };
     updateMission({ vehicles });
   };
+
+  // 起终点经纬度签名：仅经纬度/地形路径变化才重新查询海拔（高度变化不触发）
+  const startTargetKey = useMemo(
+    () =>
+      mission.vehicles
+        .map(
+          (v) =>
+            `${v.id}|${v.start_pose.lon.toFixed(5)},${v.start_pose.lat.toFixed(5)}|${vehicleTarget(v, mission.target).lon.toFixed(5)},${vehicleTarget(v, mission.target).lat.toFixed(5)}`,
+        )
+        .join(';') + '|' + mission.terrain.path,
+    [mission.vehicles, mission.target, mission.terrain.path],
+  );
+
+  // 经纬度变化（防抖 250ms）→ 查询该点地面海拔 → 设置 min；
+  // 当前高度低于地面 → 自动抬升到地面海拔（主管 2026-08-14）
+  useEffect(() => {
+    const timers: number[] = [];
+    const schedule = (
+      idx: number,
+      key: string,
+      lon: number,
+      lat: number,
+      kind: 's' | 't',
+    ) => {
+      timers.push(
+        window.setTimeout(() => {
+          // path 缺省用默认地形（与 types.ts 默认一致；无效路径 → fetchElevation 返回 null，静默无 min）
+          const terrainPath =
+            missionRef.current.terrain.path ?? 'data/east_asia_7p5as.arpack';
+          fetchElevation(terrainPath, lon, lat).then((e) => {
+            setGroundAlt((prev) => ({ ...prev, [key]: { ...prev[key], [kind]: e } }));
+            if (e == null) return;
+            const m = missionRef.current;
+            const v = m.vehicles[idx];
+            if (!v) return;
+            if (kind === 's') {
+              if (v.start_pose.alt_m < e) {
+                const vehicles = [...m.vehicles];
+                vehicles[idx] = { ...v, start_pose: { ...v.start_pose, alt_m: e } };
+                onConfigChangeRef.current({
+                  ...configRef.current,
+                  mission: { ...m, vehicles },
+                });
+              }
+            } else {
+              const tgt = vehicleTarget(v, m.target);
+              if (tgt.alt_m < e) {
+                const vehicles = [...m.vehicles];
+                vehicles[idx] = { ...v, target_ref: `${tgt.lon},${tgt.lat},${e}` };
+                onConfigChangeRef.current({
+                  ...configRef.current,
+                  mission: { ...m, vehicles },
+                });
+              }
+            }
+          });
+        }, 250),
+      );
+    };
+    missionRef.current.vehicles.forEach((v, idx) => {
+      const tgt = vehicleTarget(v, missionRef.current.target);
+      schedule(idx, v.id, v.start_pose.lon, v.start_pose.lat, 's');
+      schedule(idx, v.id, tgt.lon, tgt.lat, 't');
+    });
+    return () => timers.forEach((t) => window.clearTimeout(t));
+  }, [startTargetKey]);
   const updateProfileAt = (idx: number, patch: Partial<VehicleInput['profile']>) => {
     const vehicles = [...mission.vehicles];
     vehicles[idx] = {
@@ -353,6 +431,20 @@ export function ControlPanel({
               <input
                 type="number"
                 value={v.start_pose.alt_m}
+                min={groundAlt[v.id]?.s ?? undefined}
+                title={
+                  groundAlt[v.id]?.s != null
+                    ? `最小高度 = 该点地面海拔 ${Math.round(groundAlt[v.id]!.s!)}m`
+                    : '最小高度 = 地面海拔（查询中…）'
+                }
+                onBlur={() => {
+                  const minAlt = groundAlt[v.id]?.s;
+                  if (minAlt != null && v.start_pose.alt_m < minAlt) {
+                    updateVehicleAt(idx, {
+                      start_pose: { ...v.start_pose, alt_m: minAlt },
+                    });
+                  }
+                }}
                 onChange={(e) =>
                   updateVehicleAt(idx, {
                     start_pose: { ...v.start_pose, alt_m: +e.target.value },
@@ -408,6 +500,21 @@ export function ControlPanel({
               <input
                 type="number"
                 value={vehicleTarget(v, mission.target).alt_m}
+                min={groundAlt[v.id]?.t ?? undefined}
+                title={
+                  groundAlt[v.id]?.t != null
+                    ? `最小高度 = 该点地面海拔 ${Math.round(groundAlt[v.id]!.t!)}m`
+                    : '最小高度 = 地面海拔（查询中…）'
+                }
+                onBlur={() => {
+                  const minAlt = groundAlt[v.id]?.t;
+                  const tgt = vehicleTarget(v, mission.target);
+                  if (minAlt != null && tgt.alt_m < minAlt) {
+                    updateVehicleAt(idx, {
+                      target_ref: `${tgt.lon},${tgt.lat},${minAlt}`,
+                    });
+                  }
+                }}
                 onChange={(e) =>
                   updateVehicleAt(idx, {
                     target_ref: `${vehicleTarget(v, mission.target).lon},${vehicleTarget(v, mission.target).lat},${+e.target.value}`,

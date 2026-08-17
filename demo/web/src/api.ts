@@ -54,6 +54,30 @@ export async function fetchTerrain(
   return data as TerrainInfo;
 }
 
+/** 查询单点地面海拔（MSL 米）；范围外/无数据/失败 → null。
+ *  2026-08-14：起终点高度输入框最小高度 = 该点地面海拔。 */
+export async function fetchElevation(
+  path: string,
+  lon: number,
+  lat: number,
+): Promise<number | null> {
+  try {
+    const resp = await fetch('/api/elevation', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path, lon, lat }),
+    });
+    const data = await readJsonResponse(resp, '海拔');
+    if (data.error) {
+      return null;
+    }
+    const e = data.elevation_m;
+    return typeof e === 'number' && Number.isFinite(e) ? e : null;
+  } catch {
+    return null; // 查询失败静默：输入框无 min，不影响使用
+  }
+}
+
 /** 场景包围盒：start/target + 各机起点（vehicles[].start_pose）包围，跨度按
  *  start→target 距离自适应（1.4 倍 + 最小 2.5°×2.2°），覆盖全场景 + 四周余量，
  *  避免地形网格只覆盖路径附近（主管 2026-08-06：地形块太小；2026-08-08：多机起点）。 */

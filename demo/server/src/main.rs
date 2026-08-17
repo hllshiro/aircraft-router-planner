@@ -287,6 +287,36 @@ async fn terrain_route(Json(payload): Json<TerrainReq>) -> Json<Value> {    let 
     }))
 }
 
+// ===================== /api/elevation（单点地面海拔） =====================
+
+#[derive(Deserialize)]
+struct ElevationReq {
+    path: String,
+    lon: f64,
+    lat: f64,
+}
+
+/// POST /api/elevation：查询单点地面海拔（MSL 米；范围外/无数据 → null）。
+/// 2026-08-14：前端起终点高度输入框的最小高度 = 该点地面海拔。
+async fn elevation_route(Json(payload): Json<ElevationReq>) -> Json<Value> {
+    if !payload.lon.is_finite()
+        || !payload.lat.is_finite()
+        || payload.lon < -180.0
+        || payload.lon > 180.0
+        || payload.lat < -90.0
+        || payload.lat > 90.0
+    {
+        return Json(serde_json::json!({ "error": "invalid lon/lat" }));
+    }
+    let src = match get_source(&payload.path) {
+        Ok(s) => s,
+        Err(e) => return Json(serde_json::json!({ "error": format!("open terrain: {e}") })),
+    };
+    // height_at 返回 Option<f64>；NaN 视为无数据 → null（serde_json 不支持 NaN 序列化）
+    let elev = src.height_at(payload.lon, payload.lat).filter(|v| v.is_finite());
+    Json(serde_json::json!({ "elevation_m": elev }))
+}
+
 // ===================== /api/tile（瓦片合并端点） =====================
 
 #[derive(Deserialize)]
@@ -415,6 +445,7 @@ async fn main() {
     let app = Router::new()
         .route("/api/plan", post(plan_route))
         .route("/api/terrain", post(terrain_route))
+        .route("/api/elevation", post(elevation_route))
         .route("/api/basemap", post(basemap::basemap_route))
         .route("/api/tile", post(tile_route))
         .route("/api/wms", get(basemap::wms_proxy))

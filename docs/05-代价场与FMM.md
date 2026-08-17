@@ -1,6 +1,6 @@
 # 05 — 代价场与 FMM 传播、空间索引
 
-> 代码位置：`cli/src/costfield.rs`（336 行）、`cli/src/spatial.rs`（185 行）
+> 代码位置：`cli/src/costfield.rs`（524 行）、`cli/src/spatial.rs`（210 行）
 > 设计依据：技术方案 4.2.1（代价场融合规则）、4.4（FMM 定案主方案）、5.1（预算 ~15%）、十三轮共识（确定性热路径）
 > 迁移来源：phase0/fmm.rs（B1 实测：128² 单次传播 2.62ms，常数 11-12.5ns/op）
 

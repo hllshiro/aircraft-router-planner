@@ -493,8 +493,24 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
         seg_ends.push(v.start);
         seg_ends.extend(v.mid_waypoints.iter().copied());
         seg_ends.push(target);
+        // 起终点地面抬升（主管 2026-08-14）：起点/终点 < 当地地面海拔 → 强制抬到
+        // 地面 MSL **再计算**（物理可达底线）；高于地面则保持用户设定（任务硬约束）。
+        // 起终点是任务约束，不因中间地形抬升——中间段高度由抬升决策自动插入的
+        // 中间锚点（terrain_anchor）+ 逐点地形保底解决。
+        let ground_at = |lon: f64, lat: f64| -> f64 {
+            terrain
+                .as_source()
+                .and_then(|t| match t.sample_at(lon, lat) {
+                    crate::terrain::Sample::Land(h) => Some(h),
+                    _ => None,
+                })
+                .unwrap_or(0.0)
+        };
         // 机型平滑参数提前（受限区剖面需要 max_climb：决定下降/爬升距离）
         let (opts, phys_min_radius_m) = crate::smooth::smooth_options_for(&v.profile, &params_merged);
+        // 起点低于当地地面 → 抬到地面 MSL（主管 2026-08-14 三反：起终点贴地合理，
+        // 不加净空；起飞/降落段允许贴近地形，中间巡航段才保净空）
+        let start_alt_norm = v.alt_m.max(ground_at(v.start.lon, v.start.lat));
         // 受限区墙（剖面直穿语义，主管 2026-08-06 二轮+三轮）：飞行高度落在 restricted
         // 高度区间内 → 比较底部穿行 / 顶部绕飞（底部可行恒更优，否则顶部）→ 可行则
         // 不画墙，FMM 直穿后由 build_restricted_profiles 沿 raw 路径生成剖面；两者都
@@ -522,10 +538,24 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
         let mut terrain_probe_done = false;   // 已用无过滤场探测路径
         let mut terrain_alt_raised = false;   // 已抬升巡航高度
         let mut terrain_fallback_done = false; // 已回退无过滤场（保底）
-        // 有效巡航高度（可被抬升逻辑更新；初始 = 起点高度）
-        let mut alt_eff = v.alt_m;
+        // 有效巡航高度（可被抬升逻辑更新；初始 = 起终点地面抬升后的起点高度）
+        let mut alt_eff = start_alt_norm;
+        // 方案 B（主管 2026-08-14）：抬升决策记录撞山区段最高地形点 → 自动中间锚点
+        // (lon, lat, 抬升高度)；apply_vertical_profile 据此在中间爬升/下降，
+        // 起点/终点保持用户高度（不再整条路径强制抬到抬升巡航高度）。
+        let mut terrain_anchor: Option<(f64, f64, f64)> = None;
         // 平滑终检产物（循环内填充、循环外输出）：
         let mut warnings: Vec<String> = Vec::new();
+        // 起点低于当地地面 → 抬到地面 MSL（主管 2026-08-14 三反：起终点是起飞/降落
+        // 场景，贴地合理、不叠加净空余量；仅低于地面时物理保底抬到地面）。
+        if start_alt_norm > v.alt_m + 0.5 {
+            warnings.push(format!(
+                "start altitude below terrain: raised {:.0}->{:.0}m (terrain {:.0}m)",
+                v.alt_m,
+                start_alt_norm,
+                ground_at(v.start.lon, v.start.lat)
+            ));
+        }
         // loop 无条件进入且每个 break 前必赋值（attempts>6 兜底 / final_rep.ok /
         // 失败回退），故无需初始值
         let mut pts: Vec<crate::path::PathPoint>;
@@ -829,6 +859,9 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
             if !terrain_alt_raised && terrain.as_source().is_some() {
                 let t = terrain.as_source().unwrap();
                 let mut path_max_terr: f64 = 0.0;
+                // 记录撞山区段最高地形点坐标（方案 B 自动中间锚点）
+                let mut path_max_lon = 0.0;
+                let mut path_max_lat = 0.0;
                 for ends in seg_ends.windows(2) {
                     let (a, b) = (ends[0], ends[1]);
                     let seg_len_m = crate::path::haversine_m(a.lon, a.lat, b.lon, b.lat);
@@ -838,7 +871,11 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                         let lon = a.lon + (b.lon - a.lon) * tt;
                         let lat = a.lat + (b.lat - a.lat) * tt;
                         if let Sample::Land(h) = t.sample_at(lon, lat) {
-                            path_max_terr = path_max_terr.max(h);
+                            if h > path_max_terr {
+                                path_max_terr = h;
+                                path_max_lon = lon;
+                                path_max_lat = lat;
+                            }
                         }
                     }
                 }
@@ -852,6 +889,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                     if new_alt > alt_eff + 0.5 && ceiling_ok {
                         terrain_alt_raised = true;
                         alt_eff = new_alt;
+                        terrain_anchor = Some((path_max_lon, path_max_lat, new_alt));
                         eprintln!(
                             "[debug] terrain path collision -> raise cruise alt {:.0}->{:.0}m (path terrain {:.0}m, v={})",
                             v.alt_m, alt_eff, path_max_terr, v.id
@@ -1302,11 +1340,36 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                 // 抬升严格递增（>alt_eff+0.5 且 ≤ceiling）单调有界，attempts 上限
                 // 兜底。原 FAIL 分支（smoothing_failed + 直线替代 + 雷达替代）仅在
                 // 抬升不可行/超限后执行。
-                let terr_max = final_rep.issues.iter().filter_map(|s| {
-                    let pos = s.find("(terrain ")?;
-                    let tail = s[pos + "(terrain ".len()..].trim_end_matches(')').trim();
-                    tail.trim_end_matches('m').trim().parse::<f64>().ok()
-                }).fold(0.0_f64, f64::max).max(seg_terr_max);
+                let mut terr_anchor: Option<(f64, f64, f64)> = None; // (lon, lat, terrain h)
+                let mut terr_max = 0.0_f64;
+                for iss in &final_rep.issues {
+                    let Some(pos) = iss.find("(terrain ") else { continue };
+                    let tail = iss[pos + "(terrain ".len()..].trim_end_matches(')').trim();
+                    let Ok(h) = tail.trim_end_matches('m').trim().parse::<f64>() else { continue };
+                    if h > terr_max {
+                        terr_max = h;
+                        // issue 前缀含 "sample (lon=..,lat=..)" → 解析坐标（自动锚点用）
+                        let coord = (|| {
+                            let lon = iss.find("lon=").and_then(|p| {
+                                let s: String = iss[p + 4..]
+                                    .chars()
+                                    .take_while(|c| c.is_ascii_digit() || *c == '.' || *c == '-')
+                                    .collect();
+                                s.parse().ok()
+                            })?;
+                            let lat = iss.find("lat=").and_then(|p| {
+                                let s: String = iss[p + 4..]
+                                    .chars()
+                                    .take_while(|c| c.is_ascii_digit() || *c == '.' || *c == '-')
+                                    .collect();
+                                s.parse().ok()
+                            })?;
+                            Some((lon, lat, h))
+                        })();
+                        terr_anchor = coord;
+                    }
+                }
+                let terr_max = terr_max.max(seg_terr_max);
                 if terr_max > 0.0 {
                     let clearance = opts.clearance_m.max(1.0);
                     let new_alt = (terr_max + clearance + 100.0).max(v.alt_m);
@@ -1314,9 +1377,28 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                     if new_alt > alt_eff + 0.5 && ceiling_ok {
                         terrain_alt_raised = true;
                         alt_eff = new_alt;
+                        // 自动中间锚点：优先 verify issue 坐标；缺失（seg_terr_max 更大 /
+                        // issue 无坐标）→ 沿当前走廊 raw_joined 采样地形找最高点（近似）。
+                        let anchor = terr_anchor.or_else(|| {
+                            let t = terrain.as_source()?;
+                            let mut best: Option<(f64, f64, f64)> = None;
+                            let mut bh = 0.0_f64;
+                            for p in &raw_joined.points {
+                                if let Sample::Land(h) = t.sample_at(p.lon, p.lat) {
+                                    if h > bh {
+                                        bh = h;
+                                        best = Some((p.lon, p.lat, h));
+                                    }
+                                }
+                            }
+                            best.map(|(lo, la, _)| (lo, la, new_alt))
+                        });
+                        if let Some(a) = anchor {
+                            terrain_anchor = Some(a);
+                        }
                         eprintln!(
                             "[debug] smooth terrain clearance -> raise cruise alt {:.0}->{:.0}m (terrain {:.0}m, v={})",
-                            v.alt_m, alt_eff, terr_max, v.id
+                            start_alt_norm, alt_eff, terr_max, v.id
                         );
                         continue 'fmm_attempt;
                     }
@@ -1658,12 +1740,13 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
         }
             break 'fmm_attempt;
         }
-        // 抬升提示（2026-08-10）：巡航高度被抬升必须显式告知（低空任务被地形抬升）。
-        if terrain_alt_raised && alt_eff > v.alt_m + 0.5 {
+        // 抬升提示（2026-08-10 / 2026-08-14）：中间段巡航高度被地形抬升必须显式告知；
+        // 起点/终点保持用户高度（任务硬约束，不因中间障碍抬升——中间段由自动锚点爬升）。
+        if terrain_alt_raised && alt_eff > start_alt_norm + 0.5 {
             let terr_max = (alt_eff - opts.clearance_m.max(1.0) - 100.0).max(0.0);
             let msg = format!(
-                "terrain clearance: cruise altitude raised {:.0}->{:.0}m (terrain up to {:.0}m)",
-                v.alt_m, alt_eff, terr_max
+                "terrain clearance: cruise altitude raised {:.0}->{:.0}m (terrain up to {:.0}m); start/target kept at user altitudes",
+                start_alt_norm, alt_eff, terr_max
             );
             warnings.push(msg.clone());
             degradations.push(msg);
@@ -1748,16 +1831,55 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
             .and_then(|w| w.envelope.as_ref())
             .and_then(|e| e.alt_m)
             .map_or(v.target_alt_m, |[lo, hi]| v.target_alt_m.clamp(lo, hi));
+        // 终点地面抬升（主管 2026-08-14 三反）：终点 < 当地地面 → 抬到地面 MSL（物理
+        // 保底，不加净空——目标点是降落场景，贴地合理；在武器包线 clamp 之后兜底）。
+        let target_alt_norm = target_alt_eff.max(ground_at(target.lon, target.lat));
+        if target_alt_norm > target_alt_eff + 0.5 {
+            warnings.push(format!(
+                "target altitude below terrain: raised {:.0}->{:.0}m (terrain {:.0}m)",
+                target_alt_eff,
+                target_alt_norm,
+                ground_at(target.lon, target.lat)
+            ));
+        }
+        // 垂直剖面锚点 = 用户必经点 + 抬升决策自动插入的撞山最高点锚点（方案 B）
+        let mut mid_anchors = v
+            .mid_waypoints
+            .iter()
+            .zip(v.mid_alts.iter())
+            .map(|(g, &a)| (g.lon, g.lat, a))
+            .collect::<Vec<_>>();
+        if let Some((alon, alat, aalt)) = terrain_anchor {
+            mid_anchors.push((alon, alat, aalt));
+        }
         apply_vertical_profile(
             &mut pts,
-            v.alt_m,
-            target_alt_eff,
+            start_alt_norm,
+            target_alt_norm,
             alt_eff,
-            &v.mid_waypoints
-                .iter()
-                .zip(v.mid_alts.iter())
-                .map(|(g, &a)| (g.lon, g.lat, a))
-                .collect::<Vec<_>>(),
+            &mid_anchors,
+            terrain.as_source(),
+            opts.clearance_m,
+        );
+        // 地形跟随细化（方案 B 2026-08-14）：中间段沿地形缓爬升/下降，起终点保持
+        // 用户高度；插值不足以覆盖地形处插入段内细化点（净空 ≥ clearance）；起点段/
+        // 终点段（起飞/降落）插入点按 max_climb_angle 爬升/下降线（净空 < 100 允许、
+        // 不穿地，主管 2026-08-14 三反）。
+        terrain_follow_insert(
+            &mut pts,
+            terrain.as_source(),
+            opts.clearance_m,
+            v.profile
+                .max_climb_angle_deg
+                .unwrap_or(params_merged.default_max_climb_angle_deg),
+        );
+        // 爬升率平滑（主管 2026-08-14 低空场景）：起终点/绕障处抬升下降近乎垂直，
+        // 固定翼巡航不可行 → 限制相邻点坡度 ≤ max_climb_angle_deg（净空优先）。
+        apply_climb_rate(
+            &mut pts,
+            v.profile
+                .max_climb_angle_deg
+                .unwrap_or(params_merged.default_max_climb_angle_deg),
             terrain.as_source(),
             opts.clearance_m,
         );
@@ -2004,18 +2126,22 @@ fn seg_seg_closest(
     (best_h, best_ta, best_tb)
 }
 
-/// 垂直剖面（2026-08-12 主管 demo 轨迹倾斜）：输出路径高度从起点高度
-/// （start_pose.alt_m）按累计水平距离线性过渡到目标高度（resolve 目标 alt）。
-/// - 起终点同高（|Δ|<0.5m）→ 保持现状（受限区剖面/抬升巡航语义不变）；
-/// - **剖面段保持**：插值前路径中间点高度 = 巡航高度（alt_eff）；显著偏离
-///   巡航高度的点 = 受限区底部穿行/顶部绕飞剖面（build_restricted_profiles 已按
-///   语义生成并经验证）→ 垂直剖面不覆盖（zigzag24 底部 1500m 剖面保持）；
-/// - **抬升场景**（alt_eff > start_alt，地形要求）→ 巡航段不得低于抬升巡航高度
-///   （既有地形安全裁决；zigzag26 起点 500→2240 的既有行为保持），终点仍爬升；
+/// 垂直剖面（2026-08-12 主管 demo 轨迹倾斜 + 2026-08-14 起终点约束修正）：
+/// 输出路径高度从起点高度按累计水平距离线性过渡到目标高度。
+/// - **起终点 = 任务硬约束**：起点/终点锚点 = 用户设定（低于地面时已在输入侧抬到
+///   地面 MSL），**不因中间地形抬升**——不再整条路径强制抬到抬升巡航高度
+///   （主管 2026-08-14：中间高度变化靠改变航路中间点，不强制改起终点）；
+/// - **抬升场景**（cruise_alt > start_alt，地形要求）→ 中间段按 mid_anchors
+///   （含抬升决策自动插入的撞山最高点锚点，方案 B）插值爬升/下降，逐点地形保底
+///   兜底净空；**起终点同高也不早退**（起终点钉用户高度、中间段仍按锚点/保底抬升）；
+/// - **剖面段保持**：原高度显著偏离巡航高度的点 = 受限区底部穿行/顶部绕飞剖面
+///   （build_restricted_profiles 已按语义生成并经验证）→ 垂直剖面不覆盖
+///   （zigzag24 底部 1500m 剖面保持）；
 /// - 非抬升场景（alt_eff == start_alt）→ 平滑线性过渡（下降场景也生效）；
-/// - 终点 = 用户指定目标高度（保底不覆盖用户意图）；
-/// - 地形可用时逐点保底：高度 ≥ 地形 + 净空 + 100m（下降段不穿山）；
-/// - 不重跑 verify：高度调整只升不降（相对既有 verify 高度），净空结论保持。
+/// - 中间点地形保底：高度 ≥ 地形 + 净空 + 100m（下降段不穿山）；
+///   起终点地形保底：≥ 地面（不叠加净空余量——地面是物理可达底线，输入侧已抬升）；
+/// - 不重跑 verify：中间段高度由保底保证净空（≥ 既有 verify 高度或更高）；
+///   起终点按用户约束（输入侧已保证 ≥ 地面）。
 fn apply_vertical_profile(
     pts: &mut [crate::path::PathPoint],
     start_alt: f64,
@@ -2025,7 +2151,10 @@ fn apply_vertical_profile(
     terrain: Option<&dyn TerrainSource>,
     clearance_m: f64,
 ) {
-    if pts.len() < 2 || (target_alt - start_alt).abs() < 0.5 {
+    // 抬升场景（cruise > start）：即使起终点同高也必须处理（起终点钉用户高度、
+    // 中间段按自动锚点/保底抬升）；非抬升且同高 → 无高度调整需求（保持现状）。
+    let raised = cruise_alt > start_alt + 0.5;
+    if pts.len() < 2 || ((target_alt - start_alt).abs() < 0.5 && !raised) {
         return;
     }
     // 累计水平距离（等距投影近似，仅作剖面插值参数）
@@ -2039,13 +2168,9 @@ fn apply_vertical_profile(
         cum[i] = cum[i - 1] + dx.hypot(dy);
     }
     let clearance = clearance_m.max(1.0);
-    // 抬升场景下限：巡航段高度不得低于抬升巡航高度（地形安全裁决）；
-    // 非抬升（cruise == start）→ 无下限，线性插值平滑过渡（下降生效）。
-    let raise_floor = if cruise_alt > start_alt + 0.5 {
-        cruise_alt
-    } else {
-        f64::NEG_INFINITY
-    };
+    // 方案 B（2026-08-14）：不再强制中间点 ≥ 抬升巡航高度（raise_floor）——
+    // 中间段高度 = 锚点线性插值（起终点 + 用户必经点 + 自动撞山锚点）+ 地形保底，
+    // 形成"起点爬升 → 过山 → 下降回目标"的自然轮廓，起终点不被抬升。
     // P8 M2：必经点高度锚点分段（mid_anchors = (lon, lat, alt) 序列）。
     // 分段插值节点表 [(idx, alt)]：起点 (0, start_alt) → 必经点最近点 → 终点。
     // 段端点（必经点/目标）是硬约束不被平滑移除 → 最近点顺序匹配可靠（index 递增）。
@@ -2088,15 +2213,175 @@ fn apply_vertical_profile(
         let (hi, h_hi) = anchors[(k + 1).min(anchors.len() - 1)];
         let seg_len = (cum[hi] - cum[lo]).max(1.0);
         let t = ((cum[i] - cum[lo]) / seg_len).clamp(0.0, 1.0);
-        let mut h = (h_lo + (h_hi - h_lo) * t).max(raise_floor);
-        // 地形保底（含终点）：目标点在地形以下（物理不可达）→ 抬到安全高度
-        // （zigzag26 目标 2000m、终点地形 2097m → 保底；宁高勿穿山）
+        let mut h = h_lo + (h_hi - h_lo) * t;
+        // 地形保底：中间点 ≥ 地形 + 净空（2026-08-14 主管低空场景：保底余量 +100
+        // 会让起点段形成"余量高台阶"（如起点 500m、地形 377m → 保底 578m，起点旁
+        // 250m 内爬升 78m ≈ 17° 超过 15° 爬升率）→ 保底 = 地形 + 净空，恰为 verify
+        // 口径；更高的余量由抬升锚点（new_alt = 地形+净空+100）与 apply_climb_rate
+        // 兜底）；起终点 ≥ 地面（主管 2026-08-14 三反：起终点是起飞/降落场景，贴地
+        // 合理、不叠加净空余量——起终点是任务约束，地面是物理可达底线；起飞段允许
+        // 贴近地形，中间巡航段才保净空；输入侧已规范化）。
         if let Some(tsrc) = terrain {
             if let Sample::Land(g) = tsrc.sample_at(pts[i].lon, pts[i].lat) {
-                h = h.max(g + clearance + 100.0);
+                if i == 0 || i == pts.len() - 1 {
+                    h = h.max(g);
+                } else {
+                    h = h.max(g + clearance);
+                }
             }
         }
         pts[i].alt_m = h;
+    }
+}
+
+/// 地形跟随细化（方案 B，主管 2026-08-14）：沿路径各段 250m 细采样找段内
+/// **最差峰**（插值高度 − 地形+净空 缺口最大处），插值不足以覆盖时在峰顶插入
+/// 1 个新路径点（高度 = 峰顶 + 净空）。
+/// 每段每轮最多插入 1 点 → 递归后每个独立峰各 1 点：既保证净空（7.5as 网格
+/// ~230m，250m 采样基本全覆盖，不再像 1000m 相位错过 500m 宽尖峰 → 78m 穿山），
+/// 又避免逐 500m 采样导致的避障段航路点过密（主管 2026-08-14 反馈：62 点）。
+/// 插入点坐标在原段直线上（纯细分，不改变水平路径形状/转弯角）；起终点保持
+/// 用户高度（任务硬约束），中间段沿地形缓爬升/下降；更高的余量由抬升锚点
+/// （new_alt = 地形+净空+100）与 apply_climb_rate 兜底。
+fn terrain_follow_insert(
+    pts: &mut Vec<crate::path::PathPoint>,
+    terrain: Option<&dyn TerrainSource>,
+    clearance_m: f64,
+    max_climb_angle_deg: f64,
+) {
+    let Some(tsrc) = terrain else { return };
+    let clearance = clearance_m.max(1.0);
+    let tan_a = max_climb_angle_deg.max(1.0).to_radians().tan();
+    let mut guard = 0;
+    loop {
+        guard += 1;
+        if guard > 64 {
+            break;
+        }
+        let mut inserted = false;
+        let mut i = 0;
+        while i + 1 < pts.len() {
+            let a = pts[i];
+            let b = pts[i + 1];
+            let seg_len_m = crate::path::haversine_m(a.lon, a.lat, b.lon, b.lat);
+            // 短段（< 2 个采样间隔）端点已保底，无内部峰可插
+            if seg_len_m < 600.0 {
+                i += 1;
+                continue;
+            }
+            let n = ((seg_len_m / 250.0).ceil() as usize).max(1);
+            // 段内最差峰：need(地形+净空) − 插值 最大处（含缺口为负 = 净空充足）
+            let mut worst_tt = -1.0;
+            let mut worst_gap = f64::NEG_INFINITY;
+            let mut worst_need = 0.0;
+            for k in 1..n {
+                let tt = k as f64 / n as f64;
+                let lon = a.lon + (b.lon - a.lon) * tt;
+                let lat = a.lat + (b.lat - a.lat) * tt;
+                let alt_interp = a.alt_m + (b.alt_m - a.alt_m) * tt;
+                if let Sample::Land(h) = tsrc.sample_at(lon, lat) {
+                    let need = h + clearance;
+                    let gap = need - alt_interp;
+                    if gap > worst_gap {
+                        worst_gap = gap;
+                        worst_tt = tt;
+                        worst_need = need;
+                    }
+                }
+            }
+            if worst_tt > 0.0 && worst_gap > 0.5 {
+                let lon = a.lon + (b.lon - a.lon) * worst_tt;
+                let lat = a.lat + (b.lat - a.lat) * worst_tt;
+                let mut new_alt = worst_need;
+                // 起点段/终点段 = 起飞/降落段（主管 2026-08-14 三反：起终点贴地合理，
+                // 不加净空；爬升/下降坡度 ≤ max_climb_angle 优先，净空 < 100 允许但
+                // ≥ 地形不穿地）→ 插入点高度 = min(地形+净空, 15° 爬升/下降线)，
+                // 保证起点段按 15° 平滑起飞（不再 22° 陡爬 + 17m 贴山）、
+                // 终点段按 15° 平滑降落。
+                let is_start_seg = i == 0;
+                let is_end_seg = i + 2 == pts.len();
+                if is_start_seg || is_end_seg {
+                    let end_ref = if is_start_seg { pts[0] } else { pts[pts.len() - 1] };
+                    let dist_to_ref =
+                        crate::path::haversine_m(lon, lat, end_ref.lon, end_ref.lat);
+                    new_alt = new_alt.min(end_ref.alt_m + tan_a * dist_to_ref);
+                    // 不穿地（起飞/降落段净空 ≥ 0 底线）
+                    if let Sample::Land(h) = tsrc.sample_at(lon, lat) {
+                        new_alt = new_alt.max(h);
+                    }
+                }
+                pts.insert(i + 1, crate::path::PathPoint::new(lon, lat, new_alt));
+                inserted = true;
+            } else {
+                i += 1;
+            }
+        }
+        if !inserted {
+            break;
+        }
+    }
+}
+
+/// 爬升率平滑（主管 2026-08-14：起终点/绕障处抬升下降近乎垂直，固定翼巡航不可行）：
+/// 限制相邻路径点坡度 ≤ max_climb_angle_deg（上坡与下坡同限）。
+/// - 前向（起点→终点）：超陡爬升段压低到「前点 + tan×距离」，但不低于地形保底
+///   （净空优先，压不低则保持保底——物理上该段只能绕飞或贴地爬升）；
+/// - 后向（终点→起点）：超陡下降段压低前点到「后点 + tan×距离」（同样不低于
+///   地形保底；压低只会让该点净空更紧张但保底兜底，不会穿山）；
+/// - 迭代直到收敛（前向压低可能改变后向可行性）。
+fn apply_climb_rate(
+    pts: &mut [crate::path::PathPoint],
+    max_climb_angle_deg: f64,
+    terrain: Option<&dyn TerrainSource>,
+    clearance_m: f64,
+) {
+    if pts.len() < 2 {
+        return;
+    }
+    let tan_a = max_climb_angle_deg.max(1.0).to_radians().tan();
+    let clearance = clearance_m.max(1.0);
+    let floor_at = |lon: f64, lat: f64| -> f64 {
+        terrain.map_or(f64::NEG_INFINITY, |t| match t.sample_at(lon, lat) {
+            Sample::Land(h) => h + clearance,
+            _ => f64::NEG_INFINITY,
+        })
+    };
+    let mut guard = 0;
+    loop {
+        guard += 1;
+        if guard > 32 {
+            break;
+        }
+        let mut changed = false;
+        // 前向：限制上升率（pts[i] ≤ pts[i-1] + tan×dist）
+        for i in 1..pts.len() {
+            let (a, b) = (pts[i - 1], pts[i]);
+            let dist = crate::path::haversine_m(a.lon, a.lat, b.lon, b.lat);
+            let max_alt = a.alt_m + tan_a * dist;
+            if pts[i].alt_m > max_alt + 0.5 {
+                let new = max_alt.max(floor_at(pts[i].lon, pts[i].lat));
+                if new < pts[i].alt_m - 0.5 {
+                    pts[i].alt_m = new;
+                    changed = true;
+                }
+            }
+        }
+        // 后向：限制下降率（pts[i] ≤ pts[i+1] + tan×dist，前点不能比后点高太多）
+        for i in (0..pts.len() - 1).rev() {
+            let (a, b) = (pts[i], pts[i + 1]);
+            let dist = crate::path::haversine_m(a.lon, a.lat, b.lon, b.lat);
+            let max_alt = b.alt_m + tan_a * dist;
+            if pts[i].alt_m > max_alt + 0.5 {
+                let new = max_alt.max(floor_at(pts[i].lon, pts[i].lat));
+                if new < pts[i].alt_m - 0.5 {
+                    pts[i].alt_m = new;
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
     }
 }
 
@@ -4200,7 +4485,9 @@ mod tests {
 
     #[test]
     fn vertical_profile_descent_terrain_floor() {
-        // 下降 8000→3000，中间点地形 6000m：插值 5500 被地形保底抬到 ≥ 6100（净空+100）
+        // 下降 8000→3000，中间点地形 6000m：插值 5500 被地形保底抬到 ≥ 6100（净空+100）；
+        // 终点 3000 < 地形 6000 → 起终点保底只抬到地面（主管 2026-08-14 三反：起终点是
+        // 起飞/降落场景，贴地合理、不叠加净空余量——起终点是任务约束，输入侧已规范化）。
         struct FakeTerrain;
         impl TerrainSource for FakeTerrain {
             fn sample_at(&self, _lon: f64, _lat: f64) -> Sample {
@@ -4224,45 +4511,76 @@ mod tests {
         apply_vertical_profile(&mut pts, 8000.0, 3000.0, 8000.0, &[], Some(&FakeTerrain), 100.0);
         assert!((pts[0].alt_m - 8000.0).abs() < 0.5, "start {}", pts[0].alt_m);
         assert!(pts[1].alt_m >= 6100.0, "mid floor {}", pts[1].alt_m);
-        // 终点 3000 < 地形 6000（物理不可达）→ 保底抬到 ≥ 6100（宁高勿穿山）
-        assert!(pts[2].alt_m >= 6100.0, "end floor {}", pts[2].alt_m);
+        // 终点 3000 < 地形 6000 → 保底抬到地面 6000（起终点不叠加净空余量）
+        assert!((pts[2].alt_m - 6000.0).abs() < 0.5, "end floor {}", pts[2].alt_m);
     }
 
     #[test]
-    fn vertical_profile_raised_cruise_floor() {
-        // 抬升场景：start 500 目标 3000、巡航已抬升 2240（raw 路径点高度 = 2240）
-        // → 中间高度不得低于 2240；终点 = 目标 3000。
+    fn vertical_profile_raised_cruise_keeps_start_target() {
+        // 抬升场景：start 500 目标 3000、巡航已抬升 2240（raw 路径点高度 = 2240）。
+        // 2026-08-14 新语义：起终点 = 用户高度（不被抬升）；中间 = 锚点插值
+        // （无自动锚点/地形时线性过渡 500→3000，不再强制 ≥ 2240）。
         let mut pts = vec![
             vpp(115.0, 39.0, 2240.0),
             vpp(115.75, 39.45, 2240.0),
             vpp(116.5, 39.9, 2240.0),
         ];
         apply_vertical_profile(&mut pts, 500.0, 3000.0, 2240.0, &[], None, 100.0);
-        assert!(pts[0].alt_m >= 2240.0 - 0.5, "start floor {}", pts[0].alt_m);
-        assert!(pts[1].alt_m >= 2240.0 - 0.5, "mid floor {}", pts[1].alt_m);
+        assert!((pts[0].alt_m - 500.0).abs() < 0.5, "start kept {}", pts[0].alt_m);
+        assert!((pts[1].alt_m - 1750.0).abs() < 200.0, "mid interpolated {}", pts[1].alt_m);
         assert!((pts[2].alt_m - 3000.0).abs() < 0.5, "end {}", pts[2].alt_m);
+    }
+
+    #[test]
+    fn vertical_profile_raised_same_alt_auto_anchor() {
+        // 主管 2026-08-14 核心场景：起终点同高 500、中间 2240m 峰 → 抬升 2440。
+        // 抬升决策自动插入撞山最高点锚点 (mid, 2440)：起终点保持 500，
+        // 中间段在锚点处爬升到 2440（方案 B：靠改变航路中间点，不强制改起终点）。
+        let mut pts = vec![
+            vpp(115.0, 39.0, 2440.0),
+            vpp(115.75, 39.45, 2440.0),
+            vpp(116.5, 39.9, 2440.0),
+        ];
+        apply_vertical_profile(
+            &mut pts,
+            500.0,
+            500.0,
+            2440.0,
+            &[(115.75, 39.45, 2440.0)],
+            None,
+            100.0,
+        );
+        assert!((pts[0].alt_m - 500.0).abs() < 0.5, "start kept {}", pts[0].alt_m);
+        assert!((pts[1].alt_m - 2440.0).abs() < 0.5, "mid anchor {}", pts[1].alt_m);
+        assert!((pts[2].alt_m - 500.0).abs() < 0.5, "end kept {}", pts[2].alt_m);
     }
 
     #[test]
     fn vertical_profile_keeps_restricted_profile_segment() {
         // 受限区底部穿行剖面段（1500m，zigzag24）：原高度显著偏离巡航 2242 →
-        // 保持原高度，垂直剖面不覆盖；巡航段（== 2242）正常插值（含终点 raise_floor）。
+        // 保持原高度，垂直剖面不覆盖；巡航段（== 2242）正常插值。
+        // 2026-08-14 新语义：起终点 = 用户高度（start 1000 / target 1500），
+        // 不再被抬升巡航高度覆盖；中间巡航段 = 锚点插值（1000→1500）。
         let mut pts = vec![
-            vpp(115.0, 39.0, 2242.0),   // 巡航段
+            vpp(115.0, 39.0, 2242.0),   // 巡航段（起点）
             vpp(115.5, 39.5, 1500.0),   // 剖面段（底部穿行）
             vpp(116.0, 40.0, 2242.0),   // 巡航段
             vpp(116.5, 40.5, 2242.0),   // 终点（raw 巡航）
         ];
         apply_vertical_profile(&mut pts, 1000.0, 1500.0, 2242.0, &[], None, 100.0);
-        assert!(pts[0].alt_m >= 2242.0 - 0.5, "cruise start {}", pts[0].alt_m);
+        assert!((pts[0].alt_m - 1000.0).abs() < 0.5, "start kept {}", pts[0].alt_m);
         assert!(
             (pts[1].alt_m - 1500.0).abs() < 0.5,
             "profile seg kept {}",
             pts[1].alt_m
         );
-        assert!(pts[2].alt_m >= 2242.0 - 0.5, "cruise mid {}", pts[2].alt_m);
-        // 终点 = max(target 1500, raise_floor 2242) = 2242（目标低于抬升巡航 → 保持抬升）
-        assert!(pts[3].alt_m >= 2242.0 - 0.5, "end {}", pts[3].alt_m);
+        assert!(
+            (pts[2].alt_m - 1333.0).abs() < 200.0,
+            "cruise mid interpolated {}",
+            pts[2].alt_m
+        );
+        // 终点 = 用户目标 1500（不再被抬升巡航高度覆盖）
+        assert!((pts[3].alt_m - 1500.0).abs() < 0.5, "end {}", pts[3].alt_m);
     }
 
     #[test]
@@ -5983,9 +6301,11 @@ mod tests {
         let out = solve(&input, &SolveParams::default(), 0).unwrap();
         let v = &out.vehicles[0];
         assert_eq!(v.status, "planned");
+        // 2026-08-14 新语义：中间段按自动锚点 + 地形跟随细化爬升/下降，路径可含
+        // 少量中间点（起→爬升细化→峰锚点→下降→终）；不是网格楼梯（几百点）。
         assert!(
-            v.path.len() <= 3,
-            "应平滑交付直线，实际 {} 点",
+            v.path.len() <= 20,
+            "应平滑交付（可含中间爬升细化点），实际 {} 点",
             v.path.len()
         );
         assert!(
@@ -5999,24 +6319,301 @@ mod tests {
             "应提示巡航高度抬升，实际 {:?}",
             v.warnings
         );
-        // 密采样复核：输出路径任何点净空 ≥ 100m（不撞山）
+        // 起终点保持用户高度（主管 2026-08-14：起终点是任务硬约束，不被中间障碍抬升）
+        assert!(
+            (v.path[0].alt_m - 500.0).abs() < 1.0,
+            "起点应保持用户高度 500m，实际 {}",
+            v.path[0].alt_m
+        );
+        assert!(
+            (v.path.last().unwrap().alt_m - 2000.0).abs() < 1.0,
+            "终点应保持用户高度 2000m，实际 {}",
+            v.path.last().unwrap().alt_m
+        );
+        // 密采样复核：沿输出路径各段采样（间隔 ≤1km），任何点净空 ≥ 100m（不撞山）
         let t = crate::terrain::open_source(&cand).unwrap();
-        let a = &v.path[0];
-        let b = v.path.last().unwrap();
-        let n = 2000;
         let mut min_clr = f64::INFINITY;
-        for i in 0..=n {
-            let tt = i as f64 / n as f64;
-            let lon = a.x + (b.x - a.x) * tt;
-            let lat = a.y + (b.y - a.y) * tt;
-            let alt = a.alt_m + (b.alt_m - a.alt_m) * tt;
-            if let crate::terrain::Sample::Land(h) = t.sample_at(lon, lat) {
-                min_clr = min_clr.min(alt - h);
+        let mut min_clr_lon = 0.0;
+        let mut min_clr_lat = 0.0;
+        let mut min_clr_alt = 0.0;
+        let mut min_clr_terr = 0.0;
+        for w in v.path.windows(2) {
+            let (a, b) = (w[0], w[1]);
+            let seg_len_m = crate::path::haversine_m(a.x, a.y, b.x, b.y);
+            let n = ((seg_len_m / 1_000.0).ceil() as usize).max(2);
+            for i in 0..=n {
+                let tt = i as f64 / n as f64;
+                let lon = a.x + (b.x - a.x) * tt;
+                let lat = a.y + (b.y - a.y) * tt;
+                let alt = a.alt_m + (b.alt_m - a.alt_m) * tt;
+                if let crate::terrain::Sample::Land(h) = t.sample_at(lon, lat) {
+                    let clr = alt - h;
+                    if clr < min_clr {
+                        min_clr = clr;
+                        min_clr_lon = lon;
+                        min_clr_lat = lat;
+                        min_clr_alt = alt;
+                        min_clr_terr = h;
+                    }
+                }
             }
         }
         assert!(
             min_clr >= 100.0,
-            "交付路径撞山：最小净空 {min_clr:.1}m < 100m"
+            "交付路径撞山：最小净空 {min_clr:.1}m < 100m (at {min_clr_lon:.4},{min_clr_lat:.4} alt {min_clr_alt:.1} terr {min_clr_terr:.1})"
+        );
+    }
+
+    #[test]
+    fn zigzag37_lowalt_longrange_climb_rate_sparse() {
+        // 主管 2026-08-14 低空长程输入（east_asia 7.5as 真实地形）：v1 start_pose
+        // （108.80,34.36）→ target_ref（114.61,35.48），543km，起终点 500m。
+        // 主管反馈两个问题：①起点到第一中间点/绕障处抬升下降近乎垂直（旧保底
+        // 余量 +100 造成起点段 17° 爬升台阶）→ 修复：中间点保底 = 地形+净空
+        // （-100 余量），新增 apply_climb_rate 双向限制坡度 ≤ max_climb_angle_deg；
+        // ②避障段航路点过密（旧 500m 逐点采样 + 旧保底触发 → 62 点）→ 修复：
+        // terrain_follow_insert 改 250m 峰顶捕获（每段最差峰 1 点）→ 3 点交付。
+        // 断言：起点/终点保持 500m；点数 ≤ 30（简化）；相邻点坡度 ≤ 15.5°；
+        // 密采样最小净空 ≥ 100m（250m 峰顶捕获 + 保底兜底，不撞山）。
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+        let cand = root.join("data/east_asia_7p5as.arpack");
+        if !cand.exists() {
+            eprintln!("skip zigzag37: real terrain missing ({})", cand.display());
+            return;
+        }
+        let s = r#"{
+            "schema_version":"0.20",
+            "mission":{
+                "start":{"lon":115.9,"lat":39.8,"alt_m":3000},
+                "target":{"lon":116.8,"lat":40.3,"alt_m":3000},
+                "vehicles":[
+                    {"id":"v1","profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":250,"min_turn_radius_m":442,"max_climb_angle_deg":15},
+                     "start_pose":{"lon":108.80355022508975,"lat":34.36335179705683,"alt_m":500,"heading_deg":45},
+                     "mid_waypoints":[],"target_ref":"114.60616311030468,35.47949267040714,500"}],
+                "red_forces":{"radars":[]},
+                "no_fly_zones":[],"restricted_zones":[],"obstacles":[],
+                "terrain":{"source":"path","path":"__P__"},
+                "parameters":{}
+            }
+        }"#;
+        let s = s.replace("__P__", &cand.to_string_lossy().replace('\\', "\\\\"));
+        let input = parse(&s);
+        let out = solve(&input, &SolveParams::default(), 0).unwrap();
+        let v = &out.vehicles[0];
+        assert_eq!(v.status, "planned");
+        // 简化：不再 62 点密集（主管反馈），≤ 30 点
+        assert!(
+            v.path.len() <= 30,
+            "应简化交付（峰顶捕获 + 爬升率平滑），实际 {} 点",
+            v.path.len()
+        );
+        // 起终点保持用户高度（任务硬约束）
+        assert!(
+            (v.path[0].alt_m - 500.0).abs() < 1.0,
+            "起点应保持 500m，实际 {}",
+            v.path[0].alt_m
+        );
+        assert!(
+            (v.path.last().unwrap().alt_m - 500.0).abs() < 1.0,
+            "终点应保持 500m，实际 {}",
+            v.path.last().unwrap().alt_m
+        );
+        // 爬升率：相邻点坡度 ≤ max_climb(15°) + 0.5° 容差（±1m 数值误差）
+        let tan_max = 15.5_f64.to_radians().tan();
+        for w in v.path.windows(2) {
+            let (a, b) = (w[0], w[1]);
+            let dist = crate::path::haversine_m(a.x, a.y, b.x, b.y);
+            if dist > 1.0 {
+                let slope = (b.alt_m - a.alt_m).abs() / dist;
+                assert!(
+                    slope <= tan_max + 1e-6,
+                    "相邻点坡度 {:.2}° > 15°（{}->{} {:.0}m/{:.0}m）",
+                    slope.atan().to_degrees(),
+                    a.alt_m,
+                    b.alt_m,
+                    b.alt_m - a.alt_m,
+                    dist
+                );
+            }
+        }
+        // 密采样复核：沿输出路径各段采样（间隔 ≤1km），任何点净空 ≥ 100m（不撞山）
+        let t = crate::terrain::open_source(&cand).unwrap();
+        let mut min_clr = f64::INFINITY;
+        let mut min_clr_lon = 0.0;
+        let mut min_clr_lat = 0.0;
+        for w in v.path.windows(2) {
+            let (a, b) = (w[0], w[1]);
+            let seg_len_m = crate::path::haversine_m(a.x, a.y, b.x, b.y);
+            let n = ((seg_len_m / 1_000.0).ceil() as usize).max(2);
+            for i in 0..=n {
+                let tt = i as f64 / n as f64;
+                let lon = a.x + (b.x - a.x) * tt;
+                let lat = a.y + (b.y - a.y) * tt;
+                let alt = a.alt_m + (b.alt_m - a.alt_m) * tt;
+                if let crate::terrain::Sample::Land(h) = t.sample_at(lon, lat) {
+                    let clr = alt - h;
+                    if clr < min_clr {
+                        min_clr = clr;
+                        min_clr_lon = lon;
+                        min_clr_lat = lat;
+                    }
+                }
+            }
+        }
+        assert!(
+            min_clr >= 100.0,
+            "交付路径撞山：最小净空 {min_clr:.1}m < 100m (at {min_clr_lon:.4},{min_clr_lat:.4})"
+        );
+    }
+
+    #[test]
+    fn zigzag38_diag_waypoint_clears() {
+        // 诊断（主管 2026-08-14 必经点输入）：打印密采样最小净空位置，定位穿山段
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+        let cand = root.join("data/east_asia_7p5as.arpack");
+        if !cand.exists() {
+            eprintln!("skip zigzag38: real terrain missing ({})", cand.display());
+            return;
+        }
+        let s = r#"{
+            "schema_version":"0.20",
+            "mission":{
+                "start":{"lon":115.9,"lat":39.8,"alt_m":3000},
+                "target":{"lon":116.8,"lat":40.3,"alt_m":3000},
+                "vehicles":[
+                    {"id":"v1","profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":250,"min_turn_radius_m":442,"max_climb_angle_deg":15},
+                     "start_pose":{"lon":108.5977738058285,"lat":34.41492692430844,"alt_m":509.46948220662387,"heading_deg":45},
+                     "mid_waypoints":[{"lon":110.81014859597492,"lat":34.6052448050566,"alt_m":600}],
+                     "target_ref":"114.60995162291289,35.076567074698545,500"}],
+                "red_forces":{"radars":[]},
+                "no_fly_zones":[],"restricted_zones":[],"obstacles":[],
+                "terrain":{"source":"path","path":"__P__"},
+                "parameters":{}
+            }
+        }"#;
+        let s = s.replace("__P__", &cand.to_string_lossy().replace('\\', "\\\\"));
+        let input = parse(&s);
+        let out = solve(&input, &SolveParams::default(), 0).unwrap();
+        let v = &out.vehicles[0];
+        assert_eq!(v.status, "planned");
+        // 起点贴地保持（主管 2026-08-14 三反：起终点不加净空，起飞/降落贴地合理）
+        assert!(
+            (v.path[0].alt_m - 510.7).abs() < 1.0,
+            "起点应保持贴地 ~510.7m，实际 {}",
+            v.path[0].alt_m
+        );
+        // 必经点保持用户高度 600（中间点保底 = 地形+净空，此处地形 < 500 不触发）
+        let wp = v
+            .path
+            .iter()
+            .find(|p| (p.x - 110.8133).abs() < 0.01 && (p.y - 34.6057).abs() < 0.01);
+        assert!(wp.is_some(), "必经点应在路径上");
+        assert!(
+            (wp.unwrap().alt_m - 600.0).abs() < 1.0,
+            "必经点应保持 600m，实际 {}",
+            wp.unwrap().alt_m
+        );
+        // 终点 500 保持
+        assert!(
+            (v.path.last().unwrap().alt_m - 500.0).abs() < 1.0,
+            "终点应保持 500m，实际 {}",
+            v.path.last().unwrap().alt_m
+        );
+        // 点数 ≤ 20（峰顶捕获 + 起终点 15° 爬升段，避免 62 点密集）
+        assert!(v.path.len() <= 20, "应简化交付，实际 {} 点", v.path.len());
+        // 起点段坡度 ≤ 15.5°（固定翼爬升率，容忍 0.5° 舍入）
+        let d0 = crate::path::haversine_m(
+            v.path[0].x,
+            v.path[0].y,
+            v.path[1].x,
+            v.path[1].y,
+        )
+        .max(1.0);
+        let climb_deg = ((v.path[1].alt_m - v.path[0].alt_m) / d0)
+            .atan()
+            .to_degrees();
+        assert!(
+            climb_deg <= 15.5,
+            "起点段爬升 {climb_deg:.1}° 超过 15° 爬升率"
+        );
+        // 中间段密采样（50m）净空 ≥ 99.5m（0.5m 采样相位容差）；起点段/终点段为
+        // 起飞/降落段允许净空 < 100（主管 2026-08-14 三反），但 ≥ 0（不穿地）
+        let t = crate::terrain::open_source(&cand).unwrap();
+        let mut min_clr = f64::INFINITY;
+        let mut min_clr_lon = 0.0;
+        let mut min_clr_lat = 0.0;
+        let first = v.path[0];
+        let last = v.path[v.path.len() - 1];
+        let mut total_len = 0.0;
+        let mut seg_lens: Vec<f64> = Vec::new();
+        for w in v.path.windows(2) {
+            let l = crate::path::haversine_m(w[0].x, w[0].y, w[1].x, w[1].y);
+            seg_lens.push(l);
+            total_len += l;
+        }
+        let mut cum = 0.0;
+        for (wi, w) in v.path.windows(2).enumerate() {
+            let (a, b) = (w[0], w[1]);
+            let seg_len_m = seg_lens[wi];
+            let n = ((seg_len_m / 50.0).ceil() as usize).max(2);
+            for i in 0..=n {
+                let tt = i as f64 / n as f64;
+                let is_endpoint = (i == 0 && a.x == first.x && a.y == first.y)
+                    || (i == n && b.x == last.x && b.y == last.y);
+                let d_along = cum + seg_len_m * tt;
+                // 起终点各 1km 内 = 起飞/降落段（净空 < 100 允许，主管 2026-08-14 三反）
+                let is_takeoff_landing =
+                    d_along < 1000.0 || (total_len - d_along) < 1000.0;
+                if is_endpoint || is_takeoff_landing {
+                    continue;
+                }
+                let lon = a.x + (b.x - a.x) * tt;
+                let lat = a.y + (b.y - a.y) * tt;
+                let alt = a.alt_m + (b.alt_m - a.alt_m) * tt;
+                if let crate::terrain::Sample::Land(h) = t.sample_at(lon, lat) {
+                    let clr = alt - h;
+                    if clr < min_clr {
+                        min_clr = clr;
+                        min_clr_lon = lon;
+                        min_clr_lat = lat;
+                    }
+                }
+            }
+            cum += seg_len_m;
+        }
+        assert!(
+            min_clr >= 99.0,
+            "中间段穿山：最小净空 {min_clr:.1}m < 99.0m (at {min_clr_lon:.4},{min_clr_lat:.4})"
+        );
+        // 主管指定穿山位置诊断：打印该处地形 + 路径插值高度 + 净空
+        let t = crate::terrain::open_source(&cand).unwrap();
+        for (plon, plat) in [(110.1095464514442, 34.54625076296954), (110.17114075373888, 34.55149067388675)] {
+            let terr = match t.sample_at(plon, plat) {
+                crate::terrain::Sample::Land(h) => h,
+                _ => f64::NAN,
+            };
+            // 路径段 [pts[i], pts[i+1]] 内插值
+            let mut interp = f64::NAN;
+            for w in v.path.windows(2) {
+                let (a, b) = (w[0], w[1]);
+                let d = crate::path::haversine_m(a.x, a.y, b.x, b.y);
+                let d1 = crate::path::haversine_m(a.x, a.y, plon, plat);
+                let d2 = crate::path::haversine_m(b.x, b.y, plon, plat);
+                if d > 0.0 && (d1 + d2 - d).abs() < d * 0.02 {
+                    let tt = d1 / d;
+                    interp = a.alt_m + (b.alt_m - a.alt_m) * tt;
+                    break;
+                }
+            }
+            eprintln!(
+                "ZIGZAG38 主管位置 ({plon},{plat}): terr={terr:.1} interp={interp:.1} clr={:.1}",
+                interp - terr
+            );
+        }
+        eprintln!(
+            "ZIGZAG38 ok: points={} start_alt={:.1} min_clr={min_clr:.1}m at ({min_clr_lon:.4},{min_clr_lat:.4})",
+            v.path.len(),
+            v.path[0].alt_m
         );
     }
 
@@ -6070,8 +6667,8 @@ mod tests {
         for (vi, v) in out.vehicles.iter().enumerate() {
             assert_eq!(v.status, "planned", "v{} 应 planned", vi + 1);
             assert!(
-                v.path.len() <= 20,
-                "v{} 应平滑交付（修复前 v2 471 点网格楼梯），实际 {} 点",
+                v.path.len() <= 60,
+                "v{} 应平滑交付（2026-08-14 方案 B 可含地形跟随细化点；修复前 v2 471 点网格楼梯），实际 {} 点",
                 vi + 1,
                 v.path.len()
             );
