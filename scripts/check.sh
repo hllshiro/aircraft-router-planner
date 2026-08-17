@@ -33,7 +33,7 @@ else
 fi
 
 echo "==> [3/5] 静态依赖红线：禁 blas/proj/C 后端（技术方案 3.2.1）"
-if cargo tree -e normal | grep -iE "openblas|zlib|curl|proj|gdal|pcre|ssl"; then
+if cargo tree -e normal | grep -iE "openblas|zlib|curl|\bproj\b|gdal|pcre|ssl"; then
   echo "FAIL: C 依赖泄漏" >&2
   exit 1
 fi

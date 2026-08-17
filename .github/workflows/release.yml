@@ -37,6 +37,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: "1.89.0"
           targets: ${{ matrix.target }}
 
       # Linux musl 静态二进制（零 glibc 依赖）用 zig 作交叉链接器，
