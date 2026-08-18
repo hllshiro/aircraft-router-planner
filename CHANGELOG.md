@@ -9,6 +9,16 @@
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-18
+
+### Added
+- `arp-cli schema` 子命令：用 schemars 动态生成输入/输出 JSON Schema（代码即事实，零漂移）。
+
+### Changed
+- help 风格改为 `arp-cli` / `arp-cli help` / `arp-cli help <command>`，移除 `--help` 标志。
+- 规划动作显式化为 `arp-cli plan` 子命令（裸 `arp-cli` 现显示顶层 help；**破坏性变更**，原 `arp-cli < mission.json` 管道改为 `arp-cli plan < mission.json`）。
+- 地形转换/重压缩从核心 CLI 剥离为独立内部工具 `arp-convert`（`convert/` crate，**不随核心 CLI 发布**，随用随编）。
+
 ## [0.1.0] - 2026-08-17
 
 首个可交付版本。
