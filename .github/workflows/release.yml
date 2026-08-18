@@ -43,21 +43,17 @@ jobs:
           toolchain: "1.89.0"
           targets: ${{ matrix.target }}
 
-      # Linux musl 静态二进制（零 glibc 依赖）用 zig 作交叉链接器，
+      # Linux musl 静态二进制（零 glibc 依赖）用 cross（Docker 交叉工具链）构建，
       # 统一覆盖 x86_64 与 aarch64 两个 musl 目标（纯 Rust 项目，无 C 依赖）。
-      - name: Install zig (cross linker)
-        if: runner.os == 'Linux'
-        uses: mlugg/setup-zig@v1
-
-      - name: Install cargo-zigbuild
+      - name: Install cross
         if: runner.os == 'Linux'
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-zigbuild
+          tool: cross
 
-      - name: Build (Linux musl via zigbuild)
+      - name: Build (Linux musl via cross)
         if: runner.os == 'Linux'
-        run: cargo zigbuild --release --target ${{ matrix.target }} -p aircraft-router-planner-cli
+        run: cross build --release --target ${{ matrix.target }} -p aircraft-router-planner-cli
 
       - name: Build (Windows MSVC)
         if: runner.os == 'Windows'
