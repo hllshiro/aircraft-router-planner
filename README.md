@@ -6,11 +6,12 @@
 ## 仓库结构
 
 ```
-├── cli/            # ★ 核心 CLI（lib + bin）——正式工程
+├── cli/            # ★ 核心 CLI（lib + bin）——正式工程，核心功能只有路径规划
 │   ├── src/        # 契约 / 坐标 / 地形数据源 / 代价场 / FMM / 平滑 / 求解器
 │   ├── tests/      # crash_suite / determinism / field_build_compare / 回归集
 │   ├── benches/    # 内置格式加载基准
 │   └── examples/   # 开发期调试工具
+├── convert/        # 内部地形转换工具（arp-convert：外部格式 → ARPK1；不随核心 CLI 发布，随用随编）
 ├── phase0/         # Phase 0 性能原型与基准 crate（历史，b1–b5 可复跑，见 phase0/README.md）
 ├── demo/           # 开发期可视化工具（server: Axum 后端 / web: React+Three.js 前端）
 ├── docs/           # 技术文档集（技术方案.md 权威设计 + 01–11 实现现状）
@@ -24,8 +25,16 @@
 # 构建核心 CLI（静态编译红线：零第三方 C/DLL 依赖）
 cargo build --release -p aircraft-router-planner-cli
 
-# 运行（从 stdin 读任务 JSON，输出路径 JSON）
-cat mission.json | target/release/aircraft-router-planner-cli
+# 运行（plan 子命令：从 stdin 读任务 JSON，输出路径 JSON）
+cat mission.json | target/release/aircraft-router-planner-cli plan
+
+# 查看帮助（help 风格：arp-cli / arp-cli help / arp-cli help <command>，不使用 --help）
+target/release/aircraft-router-planner-cli          # 顶层 help
+target/release/aircraft-router-planner-cli schema   # 输出输入/输出 JSON Schema
+
+# 内部地形转换工具（不随核心 CLI 发布，随用随编）
+cargo build --release -p arp-convert
+target/release/arp-convert convert <in.tif> <out.arpack>
 
 # 测试与全量门禁
 cargo test --lib

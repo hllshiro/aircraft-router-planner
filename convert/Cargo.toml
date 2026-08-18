@@ -1,0 +1,25 @@
+# AircraftRouterPlanner 内部地形转换工具（arp-convert）。
+#
+# 从核心 CLI 剥离的数据准备功能（需求：不随核心 CLI 发布，随用随编）。
+# 复用核心 lib（aircraft-router-planner-cli）的 ARPK1 读取/校验（BuiltinSource）与错误类型。
+#
+# 依赖版本与核心 lib（cli/Cargo.toml）保持一致，共享依赖树、零 C 红线：
+#   tiff 必须与核心 lib 一致——parse_georef 签名跨 crate 传递 tiff::Decoder 类型，
+#   版本不一致会导致类型不匹配。
+
+[package]
+name = "arp-convert"
+version.workspace = true
+edition.workspace = true
+description = "AircraftRouterPlanner 内部地形转换工具：外部格式（GeoTIFF/DTED/SRTM）→ ARPK1；不随核心 CLI 发布"
+
+[dependencies]
+aircraft-router-planner-cli = { path = "../cli" }
+clap.workspace = true
+# 转换输入/编码依赖（与核心 lib 同版本）
+tiff = "0.9"
+dted2 = "1.0.0"
+miniz_oxide = "0.8"
+ruzstd = "0.9"
+sha2 = "0.10"
+memmap2 = "0.9"

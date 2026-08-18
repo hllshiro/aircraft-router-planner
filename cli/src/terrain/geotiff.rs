@@ -27,17 +27,17 @@ const TAG_GDAL_NODATA: Tag = Tag::Unknown(42113);
 
 /// 地理参考（tiepoint + pixelscale，无旋转）。
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct GeoRef {
-    pub(crate) min_lon: f64,
-    pub(crate) min_lat: f64,
-    pub(crate) max_lon: f64,
-    pub(crate) max_lat: f64,
-    pub(crate) cell_lon_deg: f64,
-    pub(crate) cell_lat_deg: f64,
+pub struct GeoRef {
+    pub min_lon: f64,
+    pub min_lat: f64,
+    pub max_lon: f64,
+    pub max_lat: f64,
+    pub cell_lon_deg: f64,
+    pub cell_lat_deg: f64,
     /// 源像素行 0 = 北（scale_y < 0）→ 采样行翻转。
-    pub(crate) row_flip: bool,
+    pub row_flip: bool,
     /// 源像素列 0 = 东（scale_x < 0，罕见）→ 采样列翻转。
-    pub(crate) col_flip: bool,
+    pub col_flip: bool,
 }
 
 /// GeoTIFF 源（两级：全量内存网格 / chunk 按需 + LRU）。
@@ -119,7 +119,7 @@ fn lock_decoder(
 
 /// 解析地理参考（ModelTiepoint + ModelPixelScale，无旋转）。
 /// 拒绝：无 tiepoint/scale（无地理参考）、退化 cell、非仿射 Transformation。
-pub(crate) fn parse_georef(
+pub fn parse_georef(
     dec: &mut Decoder<std::fs::File>,
     width: u32,
     height: u32,
@@ -216,7 +216,7 @@ fn resolve_sy(sy0: f64, tj: f64, height: usize, y0_tie: f64) -> f64 {
 }
 
 /// GDAL_NODATA tag → 空洞值（None = 无标记；F32/F64 的 NaN 仍按空洞）。
-pub(crate) fn read_gdal_nodata(dec: &mut Decoder<std::fs::File>) -> Option<f32> {
+pub fn read_gdal_nodata(dec: &mut Decoder<std::fs::File>) -> Option<f32> {
     dec.get_tag_ascii_string(TAG_GDAL_NODATA)
         .ok()
         .and_then(|s| s.trim().parse::<f64>().ok())

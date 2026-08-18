@@ -25,6 +25,7 @@ rand.workspace = true
 rstar.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+schemars.workspace = true
 thiserror.workspace = true
 # 数据源（发布版必含，技术方案 3.2 C）
 geotiff = "0.1"

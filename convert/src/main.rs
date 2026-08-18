@@ -1,24 +1,178 @@
-//! 地形转换：外部格式（GeoTIFF / DTED / SRTM .hgt）→ ARPK1（自有格式）。
+//! arp-convert：AircraftRouterPlanner 内部地形转换工具（**不随核心 CLI 发布**）。
 //!
-//! 2026-08-07 主管拍板：提供转换命令（用户任意大型地形文件 → ARPK1）。
-//! 2026-08-08 主管拍板：内置纯 Rust 压缩编码器直接输出压缩 ARPK1 ——
-//! COMPRESSION_DEFLATE（miniz_oxide，flate2 官方 rust 后端，零 C 红线；成熟纯 Rust
-//! zstd 编码器不存在，zstd-pure-rs 为 immature LLM 翻译有数据损坏风险；实测真实地形
-//! 差分块 deflate 压缩比 4.06:1 ≥ zstd 3.98:1）。压缩块变长 → 索引动态记录 + finish
-//! 回填 + 流式重读算 SHA（与开发期 Python convert 语义一致）。
-//! 输入侧：DTED/GeoTIFF 由 dted2/geotiff crate 全量持有（单片尺寸小，可接受）；
-//! 大 GeoTIFF tile 流式读取随 M3（tile LRU）一并替换（TODO）。
+//! 从核心 CLI（arp-cli）剥离的数据准备功能：外部地形格式（GeoTIFF / DTED / SRTM .hgt）
+//! → 自有紧凑格式 ARPK1；以及 ARPK1 块压缩重压缩。随用随编（`cargo build --release -p arp-convert`）。
+//!
+//! 子命令：
+//!   - convert     外部格式 → ARPK1
+//!   - recompress  ARPK1 块压缩 → deflate（默认）/ zstd（实验性）
+//!
+//! 历史（自 cli/src/terrain/convert.rs 迁移）：内置纯 Rust 压缩编码器直接输出压缩 ARPK1
+//! —— COMPRESSION_DEFLATE（miniz_oxide，flate2 官方 rust 后端，零 C 红线）。压缩块变长 →
+//! 索引动态记录 + finish 回填 + 流式重读算 SHA。
 
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
+use clap::{Parser, Subcommand};
+
 use sha2::{Digest, Sha256};
 
-use super::builtin::{
+use aircraft_router_planner_cli::error::AppError;
+use aircraft_router_planner_cli::terrain::builtin::{
     BLOCK_SIZE, COMPRESSION_DEFLATE, COMPRESSION_RAW, COMPRESSION_ZSTD, FORMAT_VERSION,
     HEADER_SIZE, MAGIC, SEMANTICS_EQUIANGULAR, VDATUM_EGM96, VDATUM_ELLIPSOID,
 };
-use crate::error::AppError;
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "arp-convert",
+    version,
+    about = "AircraftRouterPlanner 内部地形转换工具（不随核心 CLI 发布）",
+    disable_help_flag = true,
+    arg_required_else_help = true
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// 地形转换：外部格式（GeoTIFF/DTED/SRTM .hgt）→ ARPK1（自有格式）
+    Convert {
+        /// 输入地形文件（.tif/.tiff/.dt0/.dt1/.dt2/.hgt）
+        input: PathBuf,
+        /// 输出 ARPK1 文件
+        output: PathBuf,
+        /// 输出 source 描述（缺省用输入格式+尺寸）
+        #[arg(long)]
+        source: Option<String>,
+        /// 空洞值（缺省 -32768）
+        #[arg(long, default_value_t = -32768)]
+        no_data: i16,
+        /// 垂直基准：ellipsoid（椭球高，缺省 egm96）
+        #[arg(long)]
+        ellipsoid: bool,
+        /// 实验性：zstd 块压缩（默认 deflate）
+        #[arg(long)]
+        experimental_zstd: bool,
+    },
+    /// ARPK1 重压缩：任意块压缩（raw/zstd/deflate）→ deflate（默认）
+    Recompress {
+        /// 输入 ARPK1 文件
+        input: PathBuf,
+        /// 输出 ARPK1 文件
+        output: PathBuf,
+        /// 实验性：zstd 块压缩（默认 deflate）
+        #[arg(long)]
+        experimental_zstd: bool,
+    },
+}
+
+fn main() {
+    let cli = Cli::parse();
+    match &cli.command {
+        Command::Convert {
+            input,
+            output,
+            source,
+            no_data,
+            ellipsoid,
+            experimental_zstd,
+        } => {
+            match run_convert(
+                input,
+                output,
+                source.as_deref(),
+                *no_data,
+                *ellipsoid,
+                *experimental_zstd,
+            ) {
+                Ok(()) => {}
+                Err(e) => {
+                    eprintln!("arp-convert convert: hard failure: {e}");
+                    std::process::exit(2);
+                }
+            }
+        }
+        Command::Recompress {
+            input,
+            output,
+            experimental_zstd,
+        } => match run_recompress(input, output, *experimental_zstd) {
+            Ok(()) => {}
+            Err(e) => {
+                eprintln!("arp-convert recompress: hard failure: {e}");
+                std::process::exit(2);
+            }
+        },
+    }
+}
+
+/// convert 子命令实现：转换 + 校验（mmap 打开 + verify_sha）+ 统计输出。
+fn run_convert(
+    input: &std::path::Path,
+    output: &std::path::Path,
+    source: Option<&str>,
+    no_data: i16,
+    ellipsoid: bool,
+    experimental_zstd: bool,
+) -> Result<(), AppError> {
+    let started = std::time::Instant::now();
+    let opts = ConvertOptions {
+        source: source.unwrap_or("").to_string(),
+        no_data,
+        datum_ellipsoid: ellipsoid,
+        experimental_zstd,
+    };
+    let stats = convert_file(input, output, &opts)?;
+    // 转换产物自校验：mmap 打开（结构校验）+ verify_sha（全量）
+    let s = aircraft_router_planner_cli::terrain::builtin::BuiltinSource::open(output)?;
+    s.verify_sha()
+        .map_err(|e| AppError::Data(format!("convert output sha mismatch: {e}")))?;
+    println!(
+        "converted: {} -> {}\n  grid {}x{} origin ({:.6}, {:.6}) cell {:.6}deg x {:.6}deg\n  blocks {} data {} bytes ({} MB) in {:.1}s\n  source: {}",
+        input.display(),
+        output.display(),
+        stats.rows,
+        stats.cols,
+        stats.origin_lon,
+        stats.origin_lat,
+        stats.cell_lon_deg,
+        stats.cell_lat_deg,
+        stats.n_blocks,
+        stats.bytes_written,
+        stats.bytes_written as f64 / 1e6,
+        started.elapsed().as_secs_f64(),
+        stats.source_desc
+    );
+    Ok(())
+}
+
+/// recompress 子命令实现：块压缩 → 默认 deflate（实验性 `--experimental-zstd` → zstd）
+/// + 产物自校验（open + verify_sha）。
+fn run_recompress(
+    input: &std::path::Path,
+    output: &std::path::Path,
+    experimental_zstd: bool,
+) -> Result<(), AppError> {
+    let started = std::time::Instant::now();
+    let bytes = recompress_arpk1(input, output, experimental_zstd)?;
+    let s = aircraft_router_planner_cli::terrain::builtin::BuiltinSource::open(output)?;
+    s.verify_sha()
+        .map_err(|e| AppError::Data(format!("recompress output sha mismatch: {e}")))?;
+    println!(
+        "recompressed: {} -> {}\n  {} bytes ({} MB) in {:.1}s\n  compression: {}",
+        input.display(),
+        output.display(),
+        bytes,
+        bytes as f64 / 1e6,
+        started.elapsed().as_secs_f64(),
+        if experimental_zstd { "zstd (experimental, ruzstd Fastest)" } else { "deflate (miniz_oxide)" },
+    );
+    Ok(())
+}
 
 /// 转换选项。
 #[derive(Debug, Clone)]
@@ -134,7 +288,7 @@ struct GeoTiffGrid {
 
 impl GeoTiffGrid {
     fn open(path: &Path) -> Result<Self, AppError> {
-        use super::geotiff;
+        use aircraft_router_planner_cli::terrain::geotiff;
         use tiff::decoder::{DecodingResult, Decoder};
         use tiff::tags::Tag;
 
@@ -784,8 +938,8 @@ pub fn recompress_arpk1(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::terrain::builtin::BuiltinSource;
-    use crate::terrain::TerrainSource;
+    use aircraft_router_planner_cli::terrain::builtin::BuiltinSource;
+    use aircraft_router_planner_cli::terrain::TerrainSource;
 
     /// 构造 SRTM .hgt 字节（大端 i16 行优先；行 0 = 北）。
     /// 网格：3×3，值 = 行号*10 + 列号（便于验证翻转：南行序应为 2*10+.. → 0*10+..）。
@@ -918,7 +1072,7 @@ mod tests {
         let stats = convert_file(&tif, &arpk, &opts).unwrap();
         let s = BuiltinSource::open(&arpk).unwrap();
         s.verify_sha().unwrap();
-        let g = super::super::geotiff::GeoTiffSource::open(&tif).unwrap();
+        let g = aircraft_router_planner_cli::terrain::geotiff::GeoTiffSource::open(&tif).unwrap();
         // 网格中心采样对比
         let lon = stats.origin_lon + (stats.cols as f64 / 2.0) * stats.cell_lon_deg;
         let lat = stats.origin_lat + (stats.rows as f64 / 2.0) * stats.cell_lat_deg;
@@ -941,7 +1095,7 @@ mod tests {
     /// 采样与原始逐点一致）+ 块压缩字段 = deflate。
     #[test]
     fn recompress_to_deflate_roundtrip() {
-        use crate::terrain::builtin::{write_pack_raw, COMPRESSION_DEFLATE};
+        use aircraft_router_planner_cli::terrain::builtin::{write_pack_raw, COMPRESSION_DEFLATE};
         let dir = std::env::temp_dir();
         let id = std::process::id();
         let src = dir.join(format!("recomp_src_{id}.arpack"));
@@ -1000,7 +1154,7 @@ mod tests {
     /// open + verify_sha + 采样与原始逐点一致（ruzstd 0.9 Fastest 编解码 round-trip）。
     #[test]
     fn recompress_to_zstd_experimental_roundtrip() {
-        use crate::terrain::builtin::{write_pack_raw, COMPRESSION_ZSTD};
+        use aircraft_router_planner_cli::terrain::builtin::{write_pack_raw, COMPRESSION_ZSTD};
         let dir = std::env::temp_dir();
         let id = std::process::id();
         let src = dir.join(format!("recompz_src_{id}.arpack"));
@@ -1053,7 +1207,7 @@ mod tests {
     /// open + verify_sha + 采样一致（solver 读取路径 round-trip）。
     #[test]
     fn convert_zstd_experimental_roundtrip() {
-        use crate::terrain::builtin::COMPRESSION_ZSTD;
+        use aircraft_router_planner_cli::terrain::builtin::COMPRESSION_ZSTD;
         let dir = std::env::temp_dir();
         let id = std::process::id();
         let hgt = dir.join(format!("N39E116_{id}.hgt"));

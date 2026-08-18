@@ -3,10 +3,11 @@
 //! 输出契约四态：`success` / `degraded_timeout` / `no_solution` / `input_invalid`。
 //! 任何错误最终以 JSON 形式从 stdout 输出（管道形态），硬故障（IO/内部）才走 stderr。
 
+use schemars::JsonSchema;
 use serde::Serialize;
 
 /// 输入非法原因码（`status = "input_invalid"` 时必填，供下游精确诊断）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum InputInvalidReason {
     /// JSON 语法/结构畸形（不可解析、类型错误、缺必填字段、多余未知字段）
@@ -72,7 +73,7 @@ pub enum AppError {
 }
 
 /// 输出 JSON 错误体（status != success 时使用）。
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ErrorBody {
     pub code: String,
     pub message: String,

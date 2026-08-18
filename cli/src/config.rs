@@ -9,6 +9,7 @@
 
 use crate::coord::{Datum, Geo, VerticalDatum};
 use crate::error::{AppError, InputInvalidReason};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// 当前 schema 版本（与方案 v0.20 对齐）。
@@ -17,7 +18,7 @@ pub const SCHEMA_VERSION: &str = "0.20";
 // ==================== 输入契约 ====================
 
 /// 任务输入（顶层）。未知字段 → 畸形。
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Input {
     pub schema_version: String,
@@ -28,7 +29,7 @@ pub struct Input {
     pub mission: Mission,
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Default, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CrsConfig {
     /// WGS84 / CGCS2000 / GRS80（默认 WGS84；其余 datum fail-fast，见 4.2.3）
@@ -42,7 +43,7 @@ pub struct CrsConfig {
     pub input_projection: InputProjection,
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Default, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct OutputCrsConfig {
     /// lonlat / utm / gk3 / web_mercator / custom_tm
@@ -50,7 +51,7 @@ pub struct OutputCrsConfig {
     pub projection: OutputProjectionName,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default, JsonSchema)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum DatumName {
     #[default]
@@ -68,7 +69,7 @@ impl DatumName {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default, JsonSchema)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum VerticalName {
     #[default]
@@ -77,7 +78,7 @@ pub enum VerticalName {
     Ellipsoid,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum InputProjection {
     #[default]
@@ -86,7 +87,7 @@ pub enum InputProjection {
     Gk3(u8),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum OutputProjectionName {
     #[default]
@@ -97,7 +98,7 @@ pub enum OutputProjectionName {
 }
 
 /// 任务（mission）—— A/B 起终点为显式顶层字段（四轮共识）。
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Mission {
     pub start: Waypoint,
@@ -121,7 +122,7 @@ pub struct Mission {
 }
 
 /// 航路点（经纬度 + 高程，米；高程 = MSL 或椭球高，随 crs.vertical）。
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Waypoint {
     pub lon: f64,
@@ -136,7 +137,7 @@ impl Waypoint {
 }
 
 /// 车辆输入（十三轮共识多机契约）：profile + 起点 pose + 目标引用 + 任务场景。
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct VehicleInput {
     pub id: String,
@@ -153,7 +154,7 @@ pub struct VehicleInput {
 }
 
 /// 车辆性能参数集（八轮共识：输入显式提供，缺省落默认参数表占位，缺参 fail-fast）。
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct VehicleProfile {
     pub aircraft_type: AircraftType,
@@ -180,7 +181,7 @@ pub struct VehicleProfile {
     pub detection_probability: Option<f64>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum AircraftType {
     FixedWing,
@@ -204,7 +205,7 @@ impl Default for VehicleProfile {
 }
 
 /// 起点位姿（多机时每机独立起点；单机时与 mission.start 一致）。
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct VehiclePose {
     pub lon: f64,
@@ -216,7 +217,7 @@ pub struct VehiclePose {
 }
 
 /// 红方部署。
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Default, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RedForces {
     #[serde(default)]
@@ -225,7 +226,7 @@ pub struct RedForces {
     pub sams: Vec<Sam>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Radar {
     pub id: String,
@@ -250,7 +251,7 @@ fn default_antenna_m() -> f64 {
     10.0
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RadarType {
     EarlyWarning,
@@ -259,7 +260,7 @@ pub enum RadarType {
 }
 
 /// 红方地空导弹（Phase 2 威胁建模占位；Phase 1 仅解析）。
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Sam {
     pub id: String,
@@ -269,7 +270,7 @@ pub struct Sam {
 }
 
 /// 禁飞/限飞/非地形障碍物（几何语义同禁飞区硬阈值，4.2.1/4.5）。
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Zone {
     pub id: String,
@@ -288,7 +289,7 @@ pub struct Zone {
     pub height_semantics: HeightSemantics,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ZoneType {
     NoFly,
@@ -304,14 +305,14 @@ impl Zone {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, tag = "shape", content = "geometry", rename_all = "snake_case")]
 pub enum ZoneShape {
     Circle { center: [f64; 2], radius_km: f64 },
     Polygon { vertices: Vec<[f64; 2]> },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum HeightSemantics {
     #[default]
@@ -320,7 +321,7 @@ pub enum HeightSemantics {
 }
 
 /// 地形配置（4.2.4 默认场景 / 4.2.5 内置契约）。
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Default, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TerrainConfig {
     /// none（默认，海拔 0 平面）/ builtin（内置数据包）/ path（外部文件）
@@ -337,7 +338,7 @@ pub struct TerrainConfig {
     pub vertical_datum: Option<VerticalDatumName>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum TerrainSourceType {
     #[default]
@@ -346,7 +347,7 @@ pub enum TerrainSourceType {
     Path,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum VerticalDatumName {
     Ellipsoid,
@@ -363,7 +364,7 @@ impl VerticalDatumName {
 }
 
 /// 武器类型（2026-08-12 主管定案：空空导弹 / 空地导弹 / 航空炸弹；**默认不启用**）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum WeaponType {
     /// 空空导弹（AAM）
@@ -387,7 +388,7 @@ impl WeaponType {
 }
 
 /// 武器映射条目（2026-08-12 主管定案：语义 = 武器类型 + 武器射程；默认不启用）。
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct WeaponEntry {
     pub weapon_id: String,
@@ -420,7 +421,7 @@ impl WeaponEntry {
 }
 
 /// 发射包线（航向/高度/速度窗）。
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Default, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct LaunchEnvelope {
     #[serde(default)]
@@ -432,7 +433,7 @@ pub struct LaunchEnvelope {
 }
 
 /// 默认参数表覆盖（全部可选，未提供用 DefaultParams）。
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Default, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ParamsOverride {
     #[serde(default)]
@@ -466,7 +467,7 @@ pub struct ParamsOverride {
     pub weapon_map: Option<Vec<WeaponEntry>>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum DetectionCurve {
     /// Swerling I 模型（默认，2026-08-13 base_p 标定定案）：
@@ -651,7 +652,7 @@ impl DefaultParams {
 // ==================== 输出契约 ====================
 
 /// 输出 JSON（C11：顶层携带 schema_version；status 四态契约）。
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct Output {
     pub schema_version: String,
     pub status: String,
@@ -687,7 +688,7 @@ impl Output {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct VehicleOutput {
     pub id: String,
@@ -698,7 +699,7 @@ pub struct VehicleOutput {
     pub warnings: Vec<String>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct PathPoint {
     /// 经度（度，WGS84；主管决策 2026-08-05：输入输出坐标点均为经纬高定义，x=经度）
@@ -709,7 +710,7 @@ pub struct PathPoint {
     pub alt_m: f64,
 }
 
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct Stats {
     pub fmm_ms: f64,

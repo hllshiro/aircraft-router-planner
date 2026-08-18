@@ -1,9 +1,14 @@
-//! AircraftRouterPlanner CLI 入口。
+//! AircraftRouterPlanner 核心 CLI 入口。
 //!
-//! 管道形态（技术方案 8 章）：stdin 读任务 JSON → stdout 输出结果 JSON；
-//! 可选参数：--input / --output / --seed / --config。
-//! Phase 1 骨架：解析 + InputValidator 校验 + status 契约输出（success 占位，
-//! 无解算路径——Phase 2 接入 solver 后填充）。
+//! 核心功能只有一条：**路径规划**（`plan` 子命令）——stdin/`--input` 读任务 JSON →
+//! stdout/`--output` 写结果 JSON（status 四态契约）。
+//!
+//! help 风格（2026 起约定）：不使用 `--help`/`-h` 标志；直接 `arp-cli` 或 `arp-cli help`
+//! 显示顶层帮助，`arp-cli help <command>` 显示子命令帮助。
+//!
+//! 子命令：
+//!   - `plan`   路径规划（核心）
+//!   - `schema` 输出输入/输出 JSON Schema（schemars 动态生成，代码即事实）
 
 use std::io::{Read, Write};
 use std::path::PathBuf;
@@ -11,179 +16,147 @@ use std::path::PathBuf;
 use aircraft_router_planner_cli::config::{self, Input, Output};
 use aircraft_router_planner_cli::error::{AppError, ErrorBody, InputInvalidReason};
 use aircraft_router_planner_cli::solver::{self, SolveParams};
-use aircraft_router_planner_cli::terrain::convert::{self, ConvertOptions};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "aircraft-router-planner",
+    name = "arp-cli",
     version,
-    about = "AircraftRouterPlanner 核心 CLI：JSON 契约解析 / 校验 / 航路规划 / 地形转换",
-    long_about = "管道形态：stdin 读任务 JSON → stdout 输出结果 JSON。\
-                  \nstatus 契约：success / degraded_timeout / no_solution / input_invalid。\
-                  \n子命令 convert：外部地形（GeoTIFF/DTED/SRTM .hgt）→ ARPK1（自有格式）。"
+    about = "AircraftRouterPlanner 核心 CLI：航路路径规划",
+    long_about = "核心功能只有一条：路径规划（plan）。\
+                  \n任务 JSON → 结果 JSON（status 四态契约：success / degraded_timeout / \
+                  \nno_solution / input_invalid）。",
+    after_help = "JSON Schema：`arp-cli schema` 查看输入/输出 schema（schemars 动态生成，代码即事实）。\n子命令帮助：`arp-cli help <command>`。",
+    // 不使用 --help/-h 标志：用 `arp-cli` / `arp-cli help` / `arp-cli help <command>`
+    disable_help_flag = true,
+    // 无任何参数 → 显示顶层 help（即 `arp-cli` == `arp-cli help`）
+    arg_required_else_help = true
 )]
-struct Args {
-    /// 任务 JSON 文件（缺省读 stdin）
-    #[arg(short, long)]
-    input: Option<PathBuf>,
-    /// 结果 JSON 文件（缺省写 stdout）
-    #[arg(short, long)]
-    output: Option<PathBuf>,
-    /// 随机种子（确定性：相同种子逐位一致）
-    #[arg(long)]
-    seed: Option<u64>,
-    /// 默认参数表覆盖文件（JSON）
-    #[arg(short, long)]
-    config: Option<PathBuf>,
-    /// 地形文件（ARPK1；缺省用输入 terrain.path；none 源不加载）
-    #[arg(long)]
-    terrain: Option<PathBuf>,
-    /// 海岸掩膜文件（GSHHG 3 态；缺省自动探测默认掩膜 east_asia_7p5as.mask）
-    #[arg(long)]
-    mask: Option<PathBuf>,
-    /// 粗网格分辨率（缺省 256；任务区域自适应）
-    #[arg(long, default_value_t = 256)]
-    grid: usize,
-    /// 子命令：地形转换（外部格式 → ARPK1）
+struct Cli {
     #[command(subcommand)]
-    cmd: Option<Command>,
+    command: Command,
 }
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// 地形转换：外部格式（GeoTIFF/DTED/SRTM .hgt）→ ARPK1（自有格式）
-    Convert {
-        /// 输入地形文件（.tif/.tiff/.dt0/.dt1/.dt2/.hgt）
-        input: PathBuf,
-        /// 输出 ARPK1 文件
-        output: PathBuf,
-        /// 输出 source 描述（缺省用输入格式+尺寸）
+    /// 路径规划（核心）：stdin 或 --input 读任务 JSON → stdout 或 --output 写结果 JSON
+    Plan {
+        /// 任务 JSON 文件（缺省读 stdin）
+        #[arg(short, long)]
+        input: Option<PathBuf>,
+        /// 结果 JSON 文件（缺省写 stdout）
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// 随机种子（确定性：相同种子逐位一致；当前为保留字段）
         #[arg(long)]
-        source: Option<String>,
-        /// 空洞值（缺省 -32768）
-        #[arg(long, default_value_t = -32768)]
-        no_data: i16,
-        /// 垂直基准：ellipsoid（椭球高，缺省 egm96）
+        seed: Option<u64>,
+        /// 默认参数表覆盖文件（JSON；当前为保留字段）
+        #[arg(short, long)]
+        config: Option<PathBuf>,
+        /// 地形文件（ARPK1；缺省用输入 terrain.path；none 源不加载）
         #[arg(long)]
-        ellipsoid: bool,
-        /// 实验性：zstd 块压缩（ruzstd 0.9 encoding Fastest ≈ zstd level 1；
-        /// 压缩率低于 deflate，默认不启用）
+        terrain: Option<PathBuf>,
+        /// 海岸掩膜文件（GSHHG 3 态；缺省自动探测默认掩膜）
         #[arg(long)]
-        experimental_zstd: bool,
+        mask: Option<PathBuf>,
+        /// 粗网格分辨率（缺省 256；任务区域自适应）
+        #[arg(long, default_value_t = 256)]
+        grid: usize,
     },
-    /// ARPK1 重压缩：任意块压缩（raw/zstd/deflate）→ deflate（默认，内置纯 Rust 编码器）；
-    /// `--experimental-zstd` 输出 zstd 块压缩（实验性）
-    Recompress {
-        /// 输入 ARPK1 文件
-        input: PathBuf,
-        /// 输出 ARPK1 文件
-        output: PathBuf,
-        /// 实验性：zstd 块压缩（ruzstd 0.9 encoding Fastest ≈ zstd level 1；
-        /// 压缩率低于 deflate，默认不启用）
-        #[arg(long)]
-        experimental_zstd: bool,
+    /// 输出输入/输出 JSON Schema（schemars 动态生成，代码即事实）
+    Schema {
+        /// 输出哪个 schema（缺省 all）
+        #[arg(value_enum, default_value_t = SchemaTarget::All)]
+        target: SchemaTarget,
     },
+}
+
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+enum SchemaTarget {
+    /// 仅输入 schema（任务 JSON）
+    Input,
+    /// 仅输出 schema（结果 JSON）
+    Output,
+    /// 输入 + 输出（默认）
+    All,
+}
+
+/// plan 子命令参数集合（与 clap 结构解耦，便于传参）。
+struct PlanArgs {
+    input: Option<PathBuf>,
+    output: Option<PathBuf>,
+    seed: Option<u64>,
+    config: Option<PathBuf>,
+    terrain: Option<PathBuf>,
+    mask: Option<PathBuf>,
+    grid: usize,
 }
 
 fn main() {
-    let args = Args::parse();
-    // 子命令优先（转换是独立工具形态，不走任务 JSON 契约）
-    if let Some(Command::Convert { input, output, source, no_data, ellipsoid, experimental_zstd }) = &args.cmd {
-        match run_convert(input, output, source.as_deref(), *no_data, *ellipsoid, *experimental_zstd) {
-            Ok(()) => {}
-            Err(e) => {
-                eprintln!("aircraft-router-planner convert: hard failure: {e}");
+    let cli = Cli::parse();
+    match cli.command {
+        Command::Plan {
+            input,
+            output,
+            seed,
+            config,
+            terrain,
+            mask,
+            grid,
+        } => {
+            let args = PlanArgs {
+                input,
+                output,
+                seed,
+                config,
+                terrain,
+                mask,
+                grid,
+            };
+            if let Err(e) = run_plan(&args) {
+                // 硬故障（IO/内部）：stderr + 非零退出（不静默）
+                eprintln!("arp-cli plan: hard failure: {e}");
                 std::process::exit(2);
             }
         }
-        return;
+        Command::Schema { target } => run_schema(target),
     }
-    if let Some(Command::Recompress { input, output, experimental_zstd }) = &args.cmd {
-        match run_recompress(input, output, *experimental_zstd) {
-            Ok(()) => {}
-            Err(e) => {
-                eprintln!("aircraft-router-planner recompress: hard failure: {e}");
-                std::process::exit(2);
-            }
+}
+
+/// `schema` 子命令：用 schemars 动态生成输入/输出 JSON Schema（代码即事实，零漂移）。
+fn run_schema(target: SchemaTarget) {
+    let input_schema = schemars::schema_for!(Input);
+    let output_schema = schemars::schema_for!(Output);
+    match target {
+        SchemaTarget::Input => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&input_schema).expect("serialize input schema")
+            );
         }
-        return;
-    }
-    match run(&args) {
-        Ok(()) => {}
-        // 硬故障（IO/内部）：stderr + 非零退出（不静默）
-        Err(e) => {
-            eprintln!("aircraft-router-planner: hard failure: {e}");
-            std::process::exit(2);
+        SchemaTarget::Output => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&output_schema).expect("serialize output schema")
+            );
+        }
+        SchemaTarget::All => {
+            let combined = serde_json::json!({
+                "input": input_schema,
+                "output": output_schema,
+            });
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&combined).expect("serialize combined schema")
+            );
         }
     }
 }
 
-/// convert 子命令实现：转换 + 校验（mmap 打开 + verify_sha）+ 统计输出。
-fn run_convert(
-    input: &std::path::Path,
-    output: &std::path::Path,
-    source: Option<&str>,
-    no_data: i16,
-    ellipsoid: bool,
-    experimental_zstd: bool,
-) -> Result<(), AppError> {
-    let started = std::time::Instant::now();
-    let opts = ConvertOptions {
-        source: source.unwrap_or("").to_string(),
-        no_data,
-        datum_ellipsoid: ellipsoid,
-        experimental_zstd,
-    };
-    let stats = convert::convert_file(input, output, &opts)?;
-    // 转换产物自校验：mmap 打开（结构校验）+ verify_sha（全量）
-    let s = aircraft_router_planner_cli::terrain::builtin::BuiltinSource::open(output)?;
-    s.verify_sha()
-        .map_err(|e| AppError::Data(format!("convert output sha mismatch: {e}")))?;
-    println!(
-        "converted: {} -> {}\n  grid {}x{} origin ({:.6}, {:.6}) cell {:.6}deg x {:.6}deg\n  blocks {} data {} bytes ({} MB) in {:.1}s\n  source: {}",
-        input.display(),
-        output.display(),
-        stats.rows,
-        stats.cols,
-        stats.origin_lon,
-        stats.origin_lat,
-        stats.cell_lon_deg,
-        stats.cell_lat_deg,
-        stats.n_blocks,
-        stats.bytes_written,
-        stats.bytes_written as f64 / 1e6,
-        started.elapsed().as_secs_f64(),
-        stats.source_desc
-    );
-    Ok(())
-}
+fn run_plan(args: &PlanArgs) -> Result<(), AppError> {
+    // seed/config 为保留字段（当前解算路径暂未消费），显式忽略避免未使用告警。
+    let _ = (args.seed, args.config.as_deref());
 
-/// recompress 子命令实现：块压缩 → 默认 deflate（实验性 `--experimental-zstd` → zstd）
-/// + 产物自校验（open + verify_sha）。
-fn run_recompress(
-    input: &std::path::Path,
-    output: &std::path::Path,
-    experimental_zstd: bool,
-) -> Result<(), AppError> {
-    let started = std::time::Instant::now();
-    let bytes = convert::recompress_arpk1(input, output, experimental_zstd)?;
-    let s = aircraft_router_planner_cli::terrain::builtin::BuiltinSource::open(output)?;
-    s.verify_sha()
-        .map_err(|e| AppError::Data(format!("recompress output sha mismatch: {e}")))?;
-    println!(
-        "recompressed: {} -> {}\n  {} bytes ({} MB) in {:.1}s\n  compression: {}",
-        input.display(),
-        output.display(),
-        bytes,
-        bytes as f64 / 1e6,
-        started.elapsed().as_secs_f64(),
-        if experimental_zstd { "zstd (experimental, ruzstd Fastest)" } else { "deflate (miniz_oxide)" },
-    );
-    Ok(())
-}
-
-fn run(args: &Args) -> Result<(), AppError> {
     let started = std::time::Instant::now();
 
     // 1. 读输入
@@ -212,9 +185,7 @@ fn run(args: &Args) -> Result<(), AppError> {
         return Ok(());
     }
 
-    // 4. 解算（Phase 4 M1 接入：代价场 → FMM → 回溯 → 平滑链 → 输出契约）。
-    //    外部地形（GeoTIFF/DTED/SRTM）由 solver 直接调对应解析库取数（主管
-    //    2026-08-11：不需要转换，solver 层 open_source 分派）。
+    // 4. 解算（代价场 → FMM → 回溯 → 平滑链 → 输出契约）。
     let params = SolveParams {
         terrain_path: args.terrain.clone(),
         mask_path: args.mask.clone(),
@@ -230,7 +201,7 @@ fn run(args: &Args) -> Result<(), AppError> {
         Ok(out) => out,
         // 解算层错误 → 按类型映射 status（P6-B：DegradedTimeout → degraded_timeout；
         // NoSolution → no_solution；InputInvalid（如地形文件缺失）→ input_invalid；
-        // 其余（Io/Data/Internal）走上层硬故障，不 exit 2 语义仅限可预期输入问题）。
+        // 其余（Io/Data/Internal）走上层硬故障）。
         Err(e) => {
             let body: ErrorBody = (&e).into();
             let status = match &e {
@@ -258,7 +229,7 @@ fn read_input(path: Option<&std::path::Path>) -> Result<String, AppError> {
     Ok(buf)
 }
 
-fn write_output(args: &Args, out: &Output) -> Result<(), AppError> {
+fn write_output(args: &PlanArgs, out: &Output) -> Result<(), AppError> {
     let json = serde_json::to_string_pretty(out)?;
     match &args.output {
         Some(p) => {
