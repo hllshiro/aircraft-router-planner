@@ -103,6 +103,58 @@ fn legacy_contract_fields_rejected() {
     }
 }
 
+/// v0.21 第二波护栏：mission 包裹层、旧 start/target/vehicles/weapons/zone_type 键 → malformed_json。
+#[allow(dead_code)] // 供 aircraft_empty_rejected 使用；该测试在 MissingAircraft 引入前被注释
+const MIN_AIRCRAFT: &str = r#"{"aircraft":[{"id":"a1","start":{"lon":116.30,"lat":39.90,"alt_m":500},"target":{"lon":117.10,"lat":40.20,"alt_m":1000}}]}"#;
+
+#[test]
+fn legacy_mission_wrapper_rejected() {
+    let s = r#"{"mission":{"start":{"lon":116.30,"lat":39.90,"alt_m":500},"target":{"lon":117.10,"lat":40.20,"alt_m":1000}}}"#;
+    assert!(Input::from_json_str(s).is_err(), "mission 包裹层应被拒");
+}
+
+#[test]
+fn legacy_top_level_start_target_rejected() {
+    let cases: &[&str] = &[
+        r#"{"start":{"lon":116.30,"lat":39.90,"alt_m":500},"aircraft":[]}"#,
+        r#"{"target":{"lon":117.10,"lat":40.20,"alt_m":1000},"aircraft":[]}"#,
+    ];
+    for s in cases {
+        assert!(Input::from_json_str(s).is_err(), "顶层 start/target 应被拒: {s}");
+    }
+}
+
+#[test]
+fn legacy_vehicles_key_rejected() {
+    let s = r#"{"mission":{"start":{"lon":116.30,"lat":39.90,"alt_m":500},"target":{"lon":117.10,"lat":40.20,"alt_m":1000}},"vehicles":[{"id":"v1","profile":{"aircraft_type":"FIXED_WING"},"start_pose":{"lon":116.30,"lat":39.90,"alt_m":500}}]}"#;
+    assert!(Input::from_json_str(s).is_err(), "vehicles 键应被拒");
+}
+
+#[test]
+fn legacy_weapons_array_rejected() {
+    let s = r#"{"mission":{"start":{"lon":116.30,"lat":39.90,"alt_m":500},"target":{"lon":117.10,"lat":40.20,"alt_m":1000}},"weapons":[{"weapon_id":"v1_w1","weapon_type":"agm"}]}"#;
+    assert!(Input::from_json_str(s).is_err(), "顶层 weapons 键应被拒");
+}
+
+#[test]
+fn legacy_zone_type_key_rejected() {
+    let s = r#"{"mission":{"start":{"lon":116.30,"lat":39.90,"alt_m":500},"target":{"lon":117.10,"lat":40.20,"alt_m":1000}},"no_fly_zones":[{"id":"z1","zone_type":"no_fly","shape":"circle","geometry":{"center":[116.5,39.9],"radius_km":50}}]}"#;
+    assert!(Input::from_json_str(s).is_err(), "zone_type 键应被拒");
+}
+
+// `InputInvalidReason::MissingAircraft` 尚不存在（Task 2 引入），`#[ignore]` 只跳过运行仍会编译失败，
+// 故本测试整体注释（含 #[ignore]），Task 2 移除 MissingAircraft 后取消注释。
+// #[ignore]
+// #[test]
+// fn aircraft_empty_rejected() {
+//     let s = r#"{"aircraft":[]}"#;
+//     let i = Input::from_json_str(s).unwrap();
+//     match config::validate(&i) {
+//         Err(AppError::InputInvalid(InputInvalidReason::MissingAircraft)) => {}
+//         other => panic!("expected missing_aircraft, got {other:?}"),
+//     }
+// }
+
 // ==================== coord ====================
 
 #[test]
