@@ -710,7 +710,6 @@ mod tests {
             shape: s,
             alt_min_m: Some(0.0),
             alt_max_m: Some(10000.0),
-            height_semantics: Default::default(),
         };
         let poly_wall = mk(
             ZoneType::NoFly,
@@ -860,7 +859,6 @@ mod tests {
             },
             alt_min_m: Some(2000.0),
             alt_max_m: Some(4000.0),
-            height_semantics: Default::default(),
         };
         let restricted = vec![z];
         // 带内 → 直线被拒（restricted 覆盖直线）→ 无路径（单障碍 none → 直线但受限拒）
@@ -1074,13 +1072,12 @@ mod tests {
 
     #[test]
     fn radar_edge_weight_detours_high_cost() {
-        use crate::config::{Radar, RadarType};
+        use crate::config::Radar;
         use crate::threat::{SphericalRadarThreat, ThreatParams};
         let radar = Radar {
             id: "r".into(),
             lon: 116.5,
             lat: 39.5,
-            radar_type: RadarType::Tracking,
             radius_km: 40.0,
             alt_m: 10.0,
             suppression_post_range_km: None,

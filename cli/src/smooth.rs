@@ -1219,8 +1219,7 @@ pub fn verify_path(
                         a.alt_m + (b.alt_m - a.alt_m) * tt,
                     );
                     if let Ok(g) = crate::coord::Geo::new(lon, lat) {
-                        let ground = ctx.terrain.and_then(|t| t.height_at(lon, lat));
-                        if crate::config::zone_contains_at(z, &g, alt, ground) {
+                        if crate::config::zone_contains_at(z, &g, alt) {
                             rep.issues.push(format!(
                                 "segment {i}: inside zone (alt band) at t={tt:.3} alt={alt:.0}"
                             ));
@@ -1240,11 +1239,10 @@ pub fn verify_path(
             if let Some(zs) = ctx.zones {
                 let geo_ok = crate::coord::Geo::new(lon, lat).ok();
                 if let Some(g) = geo_ok {
-                    // 完整 Zone 语义：水平 + 高度区间（AGL 需地面高度）；硬墙已在上面
+                    // 完整 Zone 语义：水平 + 高度区间（MSL 直比）；硬墙已在上面
                     // 净距检查覆盖（全高度墙），这里只查 Restricted（高度层语义）。
-                    let ground = ctx.terrain.and_then(|t| t.height_at(lon, lat));
                     if zs.iter().any(|z| {
-                        !z.is_wall() && crate::config::zone_contains_at(z, &g, alt, ground)
+                        !z.is_wall() && crate::config::zone_contains_at(z, &g, alt)
                     }) {
                         rep.issues.push(format!(
                             "sample (lon={lon:.4},lat={lat:.4},alt={alt:.0}) inside zone (alt band)"
@@ -1864,7 +1862,6 @@ mod chain_tests {
             },
             alt_min_m: Some(0.0),
             alt_max_m: Some(1000.0),
-            height_semantics: crate::config::HeightSemantics::Msl,
         };
         let zones = [z];
         let opts = SmoothOptions::default();

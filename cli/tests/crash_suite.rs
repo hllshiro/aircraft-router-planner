@@ -381,7 +381,6 @@ fn output_serialize_with_extremes_no_panic() {
     let s = serde_json::to_string(&out).expect("serialize ok");
     assert!(s.contains("input_invalid"));
     let out2 = Output {
-        schema_version: "0.20".into(),
         status: "success".into(),
         error: None,
         elapsed_ms: Some(0),

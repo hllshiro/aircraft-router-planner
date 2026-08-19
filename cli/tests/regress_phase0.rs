@@ -19,7 +19,7 @@
 
 use std::path::{Path, PathBuf};
 
-use aircraft_router_planner_cli::config::{self, HeightSemantics, Input, Zone, ZoneShape};
+use aircraft_router_planner_cli::config::{self, Input, Zone, ZoneShape};
 use aircraft_router_planner_cli::coord::Geo;
 use aircraft_router_planner_cli::solver::{self, SolveParams};
 
@@ -89,14 +89,11 @@ fn point_in_polygon(verts: &[[f64; 2]], p: &Geo) -> bool {
     inside
 }
 
-/// 高度带判定（与 zone_contains_at 同语义：MSL 直接比较；AGL 无地面 → 保守视为在带内；
-/// 无高度区间（NoFly/Obstacle 全高度）→ 拦截）。
+/// 高度带判定（与 zone_contains_at 同语义：MSL 直比；无高度区间
+/// （NoFly/Obstacle 全高度）→ 拦截）。
 fn alt_in_band(z: &Zone, alt_m: f64) -> bool {
     match (z.alt_min_m, z.alt_max_m) {
-        (Some(lo), Some(hi)) => match z.height_semantics {
-            HeightSemantics::Msl => alt_m >= lo && alt_m <= hi,
-            HeightSemantics::Agl => true, // 无地面高度 → 保守拦截
-        },
+        (Some(lo), Some(hi)) => alt_m >= lo && alt_m <= hi,
         _ => true, // 无高度区间 → 全高度拦截
     }
 }

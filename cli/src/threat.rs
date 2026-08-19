@@ -1,4 +1,4 @@
-//! 雷达威胁模型（Phase 4 M3 基础版，主管拍板：几何距离 + LOS + 压制 + detection_probability）。
+//! 雷达威胁模型（Phase 4 M3 基础版，主管拍板：几何距离 + LOS + 压制）。
 //!
 //! 语义（技术方案 4.5 + 十轮共识）：
 //! - 每雷达球体探测：水平距离 ≤ 有效半径（radius_km × radar_inflation，被压制时再缩）；
@@ -269,7 +269,6 @@ mod tests {
             id: "r1".into(),
             lon,
             lat,
-            radar_type: crate::config::RadarType::Tracking,
             radius_km,
             alt_m: 10.0,
             suppression_post_range_km: None,
