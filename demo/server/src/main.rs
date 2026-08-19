@@ -51,7 +51,6 @@ async fn plan_route(Json(mut payload): Json<Value>) -> Json<Value> {
     match run_cli(&input_json) {
         Ok(json) => Json(json),
         Err(msg) => Json(serde_json::json!({
-            "schema_version": "0.20",
             "status": "input_invalid",
             "error": {
                 "code": "INTERNAL_SERVER_ERROR",

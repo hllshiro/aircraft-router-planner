@@ -24,15 +24,12 @@ export interface VehicleProfile {
   max_climb_angle_deg?: number;
   max_bank_deg?: number;
   ceiling_m?: number;
-  /** 探测概率参数（隐蔽突防折算项，0..=1）。契约保留字段；实际威胁模型由 parameters.detection_curve（默认 swerling1）+ 内部 base_p=0.9 标定表驱动（2026-08-13） */
-  detection_probability?: number;
 }
 
 export interface VehiclePose {
   lon: number;
   lat: number;
   alt_m: number;
-  heading_deg?: number;
 }
 
 export interface VehicleInput {
@@ -44,13 +41,10 @@ export interface VehicleInput {
   mid_waypoints?: Waypoint[];
 }
 
-export type RadarType = 'early_warning' | 'tracking' | 'fire_control';
-
 export interface Radar {
   id: string;
   lon: number;
   lat: number;
-  radar_type: RadarType;
   radius_km: number;
   alt_m?: number;
   suppression_post_range_km?: number;
@@ -76,13 +70,11 @@ export interface Zone {
   /** 仅限飞区（restricted）需要高度区间；禁飞/障碍全高度禁入，省略（2026-08-12） */
   alt_min_m?: number;
   alt_max_m?: number;
-  height_semantics?: 'msl' | 'agl';
 }
 
 export interface TerrainConfig {
   source: 'none' | 'builtin' | 'path';
   path?: string;
-  resolution_m?: number;
 }
 
 export interface ParamsOverride {
@@ -126,7 +118,6 @@ export interface Mission {
 }
 
 export interface InputConfig {
-  schema_version: string;
   mission: Mission;
 }
 
@@ -157,7 +148,6 @@ export interface ErrorDetail {
 }
 
 export interface PlanResult {
-  schema_version: string;
   status: 'success' | 'degraded_timeout' | 'no_solution' | 'input_invalid';
   error?: ErrorDetail | null;
   elapsed_ms?: number;
@@ -232,7 +222,6 @@ export function localToGeo(v: Vec3, ref: GeoRef): Waypoint {
 // === 默认配置（北京近郊演示场景） ===
 export function defaultInputConfig(): InputConfig {
   return {
-    schema_version: '0.20',
     mission: {
       start: { lon: 115.9, lat: 39.8, alt_m: 3000 },
       target: { lon: 116.8, lat: 40.3, alt_m: 3000 },
@@ -245,7 +234,7 @@ export function defaultInputConfig(): InputConfig {
             min_turn_radius_m: 442,
             max_climb_angle_deg: 15,
           },
-          start_pose: { lon: 115.9, lat: 39.8, alt_m: 3000, heading_deg: 45 },
+          start_pose: { lon: 115.9, lat: 39.8, alt_m: 3000 },
           mid_waypoints: [],
         },
       ],

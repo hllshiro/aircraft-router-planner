@@ -505,7 +505,7 @@ export function Scene3D({
             stableGeoRef,
             zScale,
           )}
-          heading={v.start_pose.heading_deg ?? 45}
+          heading={45}
         />
       ))}
       <TargetZone center={targetPos} />

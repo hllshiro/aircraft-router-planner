@@ -62,7 +62,6 @@ export default function App() {
       setResult(res);
     } catch (err) {
       setResult({
-        schema_version: '0.20',
         status: 'input_invalid',
         error: {
           code: 'NETWORK_ERROR',

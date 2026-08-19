@@ -208,7 +208,6 @@ export function ControlPanel({
         lon: mission.start.lon,
         lat: mission.start.lat,
         alt_m: mission.start.alt_m,
-        heading_deg: 45,
       },
       mid_waypoints: [],
     };
@@ -228,7 +227,6 @@ export function ControlPanel({
       id,
       lon: (mission.start.lon + mission.target.lon) / 2,
       lat: (mission.start.lat + mission.target.lat) / 2,
-      radar_type: 'tracking',
       radius_km: 50,
       alt_m: 10,
     };
@@ -303,7 +301,6 @@ export function ControlPanel({
       // 限飞区需要高度区间（[alt_min, alt_max] 高度带禁入）
       alt_min_m: 0,
       alt_max_m: 12000,
-      height_semantics: 'msl',
     };
     updateMission({
       restricted_zones: [...mission.restricted_zones, zone],
@@ -448,18 +445,6 @@ export function ControlPanel({
                 onChange={(e) =>
                   updateVehicleAt(idx, {
                     start_pose: { ...v.start_pose, alt_m: +e.target.value },
-                  })
-                }
-              />
-            </div>
-            <div>
-              <label>航向 (°)</label>
-              <input
-                type="number"
-                value={v.start_pose.heading_deg ?? 45}
-                onChange={(e) =>
-                  updateVehicleAt(idx, {
-                    start_pose: { ...v.start_pose, heading_deg: +e.target.value },
                   })
                 }
               />
@@ -917,21 +902,6 @@ export function ControlPanel({
                   updateRadar(r.id, { radius_km: +e.target.value })
                 }
               />
-            </div>
-            <div>
-              <label>类型</label>
-              <select
-                value={r.radar_type}
-                onChange={(e) =>
-                  updateRadar(r.id, {
-                    radar_type: e.target.value as Radar['radar_type'],
-                  })
-                }
-              >
-                <option value="early_warning">预警</option>
-                <option value="tracking">跟踪</option>
-                <option value="fire_control">火控</option>
-              </select>
             </div>
           </div>
         </div>
