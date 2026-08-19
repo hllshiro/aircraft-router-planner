@@ -28,6 +28,8 @@ pub enum InputInvalidReason {
     TerrainHolesRemain,
     /// 车辆参数不自洽（如多机速度/半径/场景互相矛盾）
     VehicleParamsInconsistent,
+    /// 飞行器数组为空（逐机显式契约下无任务可规划）
+    MissingAircraft,
 }
 
 impl std::fmt::Display for InputInvalidReason {
@@ -42,6 +44,7 @@ impl std::fmt::Display for InputInvalidReason {
             Self::RadarOverlapNoFly => "radar_overlap_no_fly",
             Self::TerrainHolesRemain => "terrain_holes_remain",
             Self::VehicleParamsInconsistent => "vehicle_params_inconsistent",
+            Self::MissingAircraft => "missing_aircraft",
         };
         write!(f, "{s}")
     }

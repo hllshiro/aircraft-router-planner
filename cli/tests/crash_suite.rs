@@ -142,18 +142,16 @@ fn legacy_zone_type_key_rejected() {
     assert!(Input::from_json_str(s).is_err(), "zone_type 键应被拒");
 }
 
-// `InputInvalidReason::MissingAircraft` 尚不存在（Task 2 引入），`#[ignore]` 只跳过运行仍会编译失败，
-// 故本测试整体注释（含 #[ignore]），Task 2 移除 MissingAircraft 后取消注释。
-// #[ignore]
-// #[test]
-// fn aircraft_empty_rejected() {
-//     let s = r#"{"aircraft":[]}"#;
-//     let i = Input::from_json_str(s).unwrap();
-//     match config::validate(&i) {
-//         Err(AppError::InputInvalid(InputInvalidReason::MissingAircraft)) => {}
-//         other => panic!("expected missing_aircraft, got {other:?}"),
-//     }
-// }
+// `InputInvalidReason::MissingAircraft` 已由 Task 2 引入，恢复本护栏测试。
+#[test]
+fn aircraft_empty_rejected() {
+    let s = r#"{"aircraft":[]}"#;
+    let i = Input::from_json_str(s).unwrap();
+    match config::validate(&i) {
+        Err(AppError::InputInvalid(InputInvalidReason::MissingAircraft)) => {}
+        other => panic!("expected missing_aircraft, got {other:?}"),
+    }
+}
 
 // ==================== coord ====================
 

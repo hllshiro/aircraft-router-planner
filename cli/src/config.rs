@@ -1,10 +1,11 @@
-//! 输入/输出 JSON 契约（技术方案 4.2.1 / 4.5 + Phase 1）。
+//! 输入/输出 JSON 契约（技术方案 4.2.1 / 4.5 + Phase 1；v0.21 契约统一与飞行器化）。
 //!
-//! - 输入：`mission`（起终点、多机、红方雷达、三区、地形、武器、参数覆盖）；
-//! - 输出：`status` 四态 + 错误体 + 车辆结果 + 统计；
+//! - 输入：顶层 `aircraft[]`（逐机显式 start/target/profile/weapon，mission 包裹层已拍平）+ 红方雷达、三区、地形、参数覆盖；
+//! - 输出：`status` 四态 + 错误体 + 飞行器结果 + 统计；
 //! - `InputValidator`：畸形/退化输入在解析层即拦截 → `input_invalid` + 原因码。
 //!
-//! 严格契约：`deny_unknown_fields`（未知字段 = 畸形，属 MalformedJson）。
+//! 严格契约：`deny_unknown_fields`（未知字段 = 畸形，属 MalformedJson）；
+//! `zone_type` 不由 JSON 提供，由解析层按所属数组注入（三数组是类型唯一标记）。
 
 use crate::coord::Geo;
 use crate::error::{AppError, InputInvalidReason};
@@ -17,17 +18,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Input {
-    pub mission: Mission,
-}
-
-/// 任务（mission）—— A/B 起终点为显式顶层字段（四轮共识）。
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct Mission {
-    pub start: Waypoint,
-    pub target: Waypoint,
-    #[serde(default)]
-    pub vehicles: Vec<VehicleInput>,
+    /// 飞行器数组（必填非空；空数组 → missing_aircraft）
+    pub aircraft: Vec<AircraftInput>,
     #[serde(default)]
     pub red_forces: RedForces,
     #[serde(default)]
@@ -39,9 +31,28 @@ pub struct Mission {
     #[serde(default)]
     pub terrain: TerrainConfig,
     #[serde(default)]
-    pub weapons: Vec<WeaponEntry>,
-    #[serde(default)]
     pub parameters: ParamsOverride,
+}
+
+/// 飞行器（固定翼 / 旋翼；十三轮共识多机契约）：profile + 起点 + 目标 + 任务场景。
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AircraftInput {
+    pub id: String,
+    /// 机型性能参数（整段省略 → 缺省固定翼占位）
+    #[serde(default)]
+    pub profile: AircraftProfile,
+    /// 起点（必填）
+    pub start: Waypoint,
+    /// 目标点（必填）
+    pub target: Waypoint,
+    /// 中途必经点（Phase 4 M5 每机独立序列）：start → mid[0..] → target。
+    /// 分段 FMM（共享代价场）→ 拼接 → 整路径平滑复验。alt_m 为垂直剖面分段锚点（起→必经点→终点按段内比例插值）。
+    #[serde(default)]
+    pub mid_waypoints: Vec<Waypoint>,
+    /// 武器（出现即启用；缺省 = 点目标语义）
+    #[serde(default)]
+    pub weapon: Option<Weapon>,
 }
 
 /// 航路点（经纬度 + 高程，米；高程 = MSL 或椭球高，随 crs.vertical）。
@@ -60,26 +71,10 @@ impl Waypoint {
     }
 }
 
-/// 车辆输入（十三轮共识多机契约）：profile + 起点 pose + 目标引用 + 任务场景。
+/// 飞行器性能参数集（八轮共识：输入显式提供，缺省落默认参数表占位，缺参 fail-fast）。
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct VehicleInput {
-    pub id: String,
-    pub profile: VehicleProfile,
-    pub start_pose: VehiclePose,
-    /// 目标引用（缺省 = mission.target）
-    #[serde(default)]
-    pub target_ref: Option<String>,
-    /// 中途必经点（Phase 4 M5 每机独立序列）：start → mid[0..] → target。
-    /// 分段 FMM（共享代价场）→ 拼接 → 整路径平滑复验。alt_m 为垂直剖面分段锚点（起→必经点→终点按段内比例插值）。
-    #[serde(default)]
-    pub mid_waypoints: Vec<Waypoint>,
-}
-
-/// 车辆性能参数集（八轮共识：输入显式提供，缺省落默认参数表占位，缺参 fail-fast）。
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct VehicleProfile {
+pub struct AircraftProfile {
     pub aircraft_type: AircraftType,
     /// 巡航速度 m/s（或 speed_range 二选一）
     #[serde(default)]
@@ -108,7 +103,7 @@ pub enum AircraftType {
     Rotorcraft,
 }
 
-impl Default for VehicleProfile {
+impl Default for AircraftProfile {
     /// 缺省机型配置（固定翼 + 全占位 None；solver 单机兜底构造）。
     fn default() -> Self {
         Self {
@@ -121,15 +116,6 @@ impl Default for VehicleProfile {
             ceiling_m: None,
         }
     }
-}
-
-/// 起点位姿（多机时每机独立起点；单机时与 mission.start 一致）。
-#[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct VehiclePose {
-    pub lon: f64,
-    pub lat: f64,
-    pub alt_m: f64,
 }
 
 /// 红方部署。
@@ -168,6 +154,9 @@ fn default_antenna_m() -> f64 {
 #[serde(deny_unknown_fields)]
 pub struct Zone {
     pub id: String,
+    /// 区域类型。**不由 JSON 提供**（`deny_unknown_fields` 会拒绝 zone_type 键）；
+    /// 由 `Input::from_json_str` 按所属数组注入（no_fly_zones→NoFly / restricted_zones→Restricted / obstacles→Obstacle）。
+    #[serde(skip)]
     pub zone_type: ZoneType,
     #[serde(flatten)]
     pub shape: ZoneShape,
@@ -181,9 +170,10 @@ pub struct Zone {
     pub alt_max_m: Option<f64>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ZoneType {
+    #[default]
     NoFly,
     Restricted,
     Obstacle,
@@ -232,7 +222,8 @@ pub enum TerrainSourceType {
     Path,
 }
 
-/// 武器类型（2026-08-12 主管定案：空空导弹 / 空地导弹 / 航空炸弹；**默认不启用**）。
+/// 武器类型（2026-08-12 主管定案：空空导弹 / 空地导弹 / 航空炸弹；2026-08-19 起
+/// weapon 出现即启用、weapon_type 必填）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum WeaponType {
@@ -256,30 +247,25 @@ impl WeaponType {
     }
 }
 
-/// 武器映射条目（2026-08-12 主管定案：语义 = 武器类型 + 武器射程；默认不启用）。
+/// 武器（2026-08-12 主管定案语义不变：类型 + 射程 + 发射包线；2026-08-19 移入飞行器）。
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct WeaponEntry {
-    pub weapon_id: String,
-    /// 武器类型（aam / agm / bomb）。**缺省 = 该武器默认不启用**
-    ///（不参与规划计算，与既往“仅解析不消费”一致；启用与否由后续威胁建模消费）。
-    #[serde(default)]
-    pub weapon_type: Option<WeaponType>,
-    /// 射程 [Rmin, Rmax] km。**缺省 = 按 weapon_type 对应默认射程**
-    ///（aam [5,40] / agm [3,120] / bomb [1,15]；weapon_type 也缺省 → 不启用）。
+pub struct Weapon {
+    /// 武器类型（aam / agm / bomb）。出现即启用，类型必填。
+    pub weapon_type: WeaponType,
+    /// 射程 [Rmin, Rmax] km。缺省 = 按 weapon_type 对应默认射程
+    ///（aam [5,40] / agm [3,120] / bomb [1,15]）。
     #[serde(default)]
     pub range_km: Option<[f64; 2]>,
-    /// 发射包线（航向/高度/速度窗，P7 起消费：heading/alt 硬校验、speed 软校验）。
+    /// 发射包线（航向/高度/速度窗；heading/alt 硬校验、speed 软校验）。
     #[serde(default)]
     pub envelope: Option<LaunchEnvelope>,
 }
 
-impl WeaponEntry {
-    /// 有效射程：**weapon_type 缺省 → None（该武器不启用）**；启用时射程 =
-    /// 显式 range_km 优先，否则按类型默认。
+impl Weapon {
+    /// 有效射程：显式 range_km 优先，否则按类型默认。
     pub fn effective_range_km(&self) -> Option<[f64; 2]> {
-        self.weapon_type
-            .map(|t| self.range_km.unwrap_or_else(|| t.default_range_km()))
+        Some(self.range_km.unwrap_or_else(|| self.weapon_type.default_range_km()))
     }
 }
 
@@ -451,7 +437,7 @@ pub struct Output {
     pub error: Option<crate::error::ErrorBody>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub elapsed_ms: Option<u64>,
-    pub vehicles: Vec<VehicleOutput>,
+    pub aircraft: Vec<AircraftOutput>,
     pub stats: Stats,
 }
 
@@ -461,7 +447,7 @@ impl Output {
             status: "success".into(),
             error: None,
             elapsed_ms: Some(elapsed_ms),
-            vehicles: Vec::new(),
+            aircraft: Vec::new(),
             stats: Stats::default(),
         }
     }
@@ -471,7 +457,7 @@ impl Output {
             status: status.into(),
             error: Some(error),
             elapsed_ms: Some(elapsed_ms),
-            vehicles: Vec::new(),
+            aircraft: Vec::new(),
             stats: Stats::default(),
         }
     }
@@ -479,7 +465,7 @@ impl Output {
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
-pub struct VehicleOutput {
+pub struct AircraftOutput {
     pub id: String,
     /// planned / no_solution / degraded
     pub status: String,
@@ -511,94 +497,62 @@ pub struct Stats {
 
 impl Input {
     /// 从 JSON 字符串解析（畸形 JSON → input_invalid: malformed_json）。
+    /// 解析后按所属数组注入 zone_type（三数组是类型唯一标记）。
     pub fn from_json_str(s: &str) -> Result<Self, AppError> {
-        serde_json::from_str(s).map_err(|e| AppError::Json(e))
-    }
-}
-
-/// 解析每机目标引用（Demo 每机独立终点，主管 2026-08-10；P5 移到校验层单源）：
-/// 缺省 / "mission.target" → mission.target；"lon,lat[,alt]" → 自定义坐标
-/// （alt 解析但当前仅水平语义，与 mid_waypoints 高度一致）；其他 → 未识别
-/// 引用硬拒（InputInvalid）。
-pub(crate) fn resolve_target_ref(r: Option<&str>, mission_target: &Geo) -> Result<Geo, AppError> {
-    let Some(s) = r.map(str::trim).filter(|s| !s.is_empty()) else {
-        return Ok(*mission_target);
-    };
-    if s == "mission.target" {
-        return Ok(*mission_target);
-    }
-    let parts: Vec<&str> = s.split(',').map(str::trim).collect();
-    if parts.len() == 2 || parts.len() == 3 {
-        if let (Ok(lon), Ok(lat)) = (parts[0].parse::<f64>(), parts[1].parse::<f64>()) {
-            return Geo::new(lon, lat)
-                .map_err(|_| AppError::InputInvalid(InputInvalidReason::IllegalCoordinate));
+        let mut input: Self = serde_json::from_str(s).map_err(AppError::Json)?;
+        for z in &mut input.no_fly_zones {
+            z.zone_type = ZoneType::NoFly;
         }
-    }
-    Err(AppError::InputInvalid(
-        InputInvalidReason::IllegalCoordinate,
-    ))
-}
-
-/// 解析每机目标高度（与 resolve_target_ref 同一输入源；2026-08-12 垂直剖面用）：
-/// 缺省 / "mission.target" / 未提供第 3 段 → mission_target_alt；否则第 3 段解析。
-pub(crate) fn resolve_target_alt(r: Option<&str>, mission_target_alt: f64) -> f64 {
-    let Some(s) = r.map(str::trim).filter(|s| !s.is_empty()) else {
-        return mission_target_alt;
-    };
-    if s == "mission.target" {
-        return mission_target_alt;
-    }
-    let parts: Vec<&str> = s.split(',').map(str::trim).collect();
-    if parts.len() == 3 {
-        if let Ok(a) = parts[2].parse::<f64>() {
-            if a.is_finite() {
-                return a;
-            }
+        for z in &mut input.restricted_zones {
+            z.zone_type = ZoneType::Restricted;
         }
+        for z in &mut input.obstacles {
+            z.zone_type = ZoneType::Obstacle;
+        }
+        Ok(input)
     }
-    mission_target_alt
 }
 
 /// InputValidator 前置模块：解析后立即校验，退化输入不进入算法。
 pub fn validate(input: &Input) -> Result<(), AppError> {
-    // A/B 起终点
-    let start = input.mission.start.to_geo()?;
-    let target = input.mission.target.to_geo()?;
-    if start.distance_m(&target) < 100.0 {
+    // 逐机显式契约：aircraft 必填非空（空数组 → missing_aircraft）。
+    if input.aircraft.is_empty() {
         return Err(AppError::InputInvalid(
-            InputInvalidReason::DegenerateStartEqualsTarget,
+            InputInvalidReason::MissingAircraft,
         ));
     }
-    // 多机
     let mut ids = std::collections::HashSet::new();
-    for v in &input.mission.vehicles {
-        if !ids.insert(v.id.clone()) {
+    for a in &input.aircraft {
+        if !ids.insert(a.id.clone()) {
             return Err(AppError::InputInvalid(
                 InputInvalidReason::VehicleParamsInconsistent,
             ));
         }
-        validate_vehicle(v)?;
-        let pose = Geo::new(v.start_pose.lon, v.start_pose.lat)
-            .map_err(|_| AppError::InputInvalid(InputInvalidReason::IllegalCoordinate))?;
+        validate_aircraft(a)?;
+        // 逐机：start/target 合法坐标 + 间距 ≥ 100m
+        let start = a.start.to_geo()?;
+        let target = a.target.to_geo()?;
+        if start.distance_m(&target) < 100.0 {
+            return Err(AppError::InputInvalid(
+                InputInvalidReason::DegenerateStartEqualsTarget,
+            ));
+        }
         // 起点在禁飞区
-        for z in &input.mission.no_fly_zones {
-            if zone_contains(z, &pose) {
+        for z in &input.no_fly_zones {
+            if zone_contains(z, &start) {
                 return Err(AppError::InputInvalid(InputInvalidReason::TargetInNoFly));
             }
         }
-        // 每机目标在禁飞区（P5：target_ref 覆盖 mission.target——校验 resolve 后的
-        // 实际规划目标，而非被覆盖的 mission.target；2026-08-12 主管案例误报修复）。
-        let resolved = resolve_target_ref(v.target_ref.as_deref(), &target)?;
-        for z in &input.mission.no_fly_zones {
-            if zone_contains(z, &resolved) {
+        // 目标在禁飞区
+        for z in &input.no_fly_zones {
+            if zone_contains(z, &target) {
                 return Err(AppError::InputInvalid(InputInvalidReason::TargetInNoFly));
             }
         }
         // 必经点在禁飞区（P5：必经点不可绕行 → fail-fast，禁飞区绝对禁入语义）。
-        for wp in &v.mid_waypoints {
-            let g = Geo::new(wp.lon, wp.lat)
-                .map_err(|_| AppError::InputInvalid(InputInvalidReason::IllegalCoordinate))?;
-            for z in &input.mission.no_fly_zones {
+        for wp in &a.mid_waypoints {
+            let g = wp.to_geo()?;
+            for z in &input.no_fly_zones {
                 if zone_contains(z, &g) {
                     return Err(AppError::InputInvalid(
                         InputInvalidReason::MidWaypointInNoFly,
@@ -607,19 +561,11 @@ pub fn validate(input: &Input) -> Result<(), AppError> {
             }
         }
     }
-    // 无多机声明时，任务目标 = mission.target（缺省单机语义，保持原校验）。
-    if input.mission.vehicles.is_empty() {
-        for z in &input.mission.no_fly_zones {
-            if zone_contains(z, &target) {
-                return Err(AppError::InputInvalid(InputInvalidReason::TargetInNoFly));
-            }
-        }
-    }
     // 雷达 ∩ 禁飞区重叠（雷达位置在禁飞多边形内）
-    for r in &input.mission.red_forces.radars {
+    for r in &input.red_forces.radars {
         let g = Geo::new(r.lon, r.lat)
             .map_err(|_| AppError::InputInvalid(InputInvalidReason::IllegalCoordinate))?;
-        for z in &input.mission.no_fly_zones {
+        for z in &input.no_fly_zones {
             if zone_contains(z, &g) {
                 return Err(AppError::InputInvalid(
                     InputInvalidReason::RadarOverlapNoFly,
@@ -636,23 +582,12 @@ pub fn validate(input: &Input) -> Result<(), AppError> {
     // [alt_min, alt_max]（alt_min < alt_max，有限值）；禁飞/障碍全高度禁入，
     // 不要求 alt（可省略）。
     for z in input
-        .mission
         .no_fly_zones
         .iter()
-        .chain(&input.mission.restricted_zones)
-        .chain(&input.mission.obstacles)
+        .chain(&input.restricted_zones)
+        .chain(&input.obstacles)
     {
         validate_zone(z)?;
-    }
-    // 武器射程（2026-08-12 主管定案：类型 + 射程，默认不启用）：
-    // 显式 range_km 提供时校验有限且 lo < hi（倒置/非有限 → out_of_bounds）；
-    // weapon_type 与 range_km 都缺省 → 该武器不启用（不报错）。
-    for w in &input.mission.weapons {
-        if let Some([lo, hi]) = w.range_km {
-            if !(lo.is_finite() && hi.is_finite() && lo < hi) {
-                return Err(AppError::InputInvalid(InputInvalidReason::OutOfBounds));
-            }
-        }
     }
     Ok(())
 }
@@ -673,8 +608,8 @@ fn validate_zone(z: &Zone) -> Result<(), AppError> {
     Ok(())
 }
 
-fn validate_vehicle(v: &VehicleInput) -> Result<(), AppError> {
-    let p = &v.profile;
+fn validate_aircraft(a: &AircraftInput) -> Result<(), AppError> {
+    let p = &a.profile;
     let speed = p
         .cruise_speed_mps
         .or_else(|| p.speed_range_mps.map(|r| r[0]));
@@ -700,6 +635,15 @@ fn validate_vehicle(v: &VehicleInput) -> Result<(), AppError> {
             return Err(AppError::InputInvalid(
                 InputInvalidReason::VehicleParamsInconsistent,
             ));
+        }
+    }
+    // 武器射程（2026-08-12 主管定案：类型 + 射程；W2-P3 逐机化——校验移至本函数）：
+    // 显式 range_km 提供时校验有限且 lo < hi（倒置/非有限 → out_of_bounds）。
+    if let Some(w) = &a.weapon {
+        if let Some([lo, hi]) = w.range_km {
+            if !(lo.is_finite() && hi.is_finite() && lo < hi) {
+                return Err(AppError::InputInvalid(InputInvalidReason::OutOfBounds));
+            }
         }
     }
     Ok(())
@@ -974,25 +918,37 @@ mod tests {
     use super::*;
 
     const MIN_JSON: &str = r#"{
-        "mission": {
-            "start": {"lon": 116.30, "lat": 39.90, "alt_m": 500},
-            "target": {"lon": 117.10, "lat": 40.20, "alt_m": 1000}
-        }
+        "aircraft": [
+            {"id": "a1",
+             "start": {"lon": 116.30, "lat": 39.90, "alt_m": 500},
+             "target": {"lon": 117.10, "lat": 40.20, "alt_m": 1000}}
+        ]
     }"#;
 
     #[test]
     fn parse_minimal_input() {
         let input = Input::from_json_str(MIN_JSON).unwrap();
-        assert_eq!(input.mission.start.lon, 116.30);
-        assert!(input.mission.vehicles.is_empty());
+        assert_eq!(input.aircraft.len(), 1);
+        assert_eq!(input.aircraft[0].start.lon, 116.30);
         assert!(validate(&input).is_ok());
     }
 
     #[test]
     fn unknown_field_is_malformed() {
-        let s = r#"{"mission":{"start":{"lon":1,"lat":2,"alt_m":0},"target":{"lon":3,"lat":4,"alt_m":0}},"bogus":1}"#;
+        let s = r#"{"aircraft":[{"id":"a1","start":{"lon":1,"lat":2,"alt_m":0},"target":{"lon":3,"lat":4,"alt_m":0}}],"bogus":1}"#;
         let err = Input::from_json_str(s).unwrap_err();
         assert!(matches!(err, AppError::Json(_)));
+    }
+
+    #[test]
+    fn aircraft_empty_missing() {
+        // W2-P1：aircraft 空数组 → missing_aircraft（逐机显式契约下无任务可规划）。
+        let s = r#"{"aircraft":[]}"#;
+        let input = Input::from_json_str(s).unwrap();
+        match validate(&input) {
+            Err(AppError::InputInvalid(InputInvalidReason::MissingAircraft)) => {}
+            other => panic!("expected missing_aircraft, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1031,7 +987,7 @@ mod tests {
 
     #[test]
     fn degenerate_a_equals_b_rejected() {
-        let s = r#"{"mission":{"start":{"lon":116.0,"lat":39.0,"alt_m":0},"target":{"lon":116.0,"lat":39.0,"alt_m":0}}}"#;
+        let s = r#"{"aircraft":[{"id":"a1","start":{"lon":116.0,"lat":39.0,"alt_m":0},"target":{"lon":116.0,"lat":39.0,"alt_m":0}}]}"#;
         let input = Input::from_json_str(s).unwrap();
         match validate(&input) {
             Err(AppError::InputInvalid(InputInvalidReason::DegenerateStartEqualsTarget)) => {}
@@ -1042,13 +998,14 @@ mod tests {
     #[test]
     fn target_in_no_fly_rejected() {
         let s = r#"{
-            "mission":{
-                "start":{"lon":115.0,"lat":39.0,"alt_m":0},
-                "target":{"lon":116.5,"lat":39.9,"alt_m":0},
-                "no_fly_zones":[{"id":"nf1","zone_type":"no_fly",
-                    "shape":"circle","geometry":{"center":[116.5,39.9],"radius_km":10},
-                    "alt_min_m":0,"alt_max_m":10000}]
-            }
+            "aircraft":[
+                {"id":"a1",
+                 "start":{"lon":115.0,"lat":39.0,"alt_m":0},
+                 "target":{"lon":116.5,"lat":39.9,"alt_m":0}}
+            ],
+            "no_fly_zones":[{"id":"nf1",
+                "shape":"circle","geometry":{"center":[116.5,39.9],"radius_km":10},
+                "alt_min_m":0,"alt_max_m":10000}]
         }"#;
         let input = Input::from_json_str(s).unwrap();
         match validate(&input) {
@@ -1060,14 +1017,15 @@ mod tests {
     #[test]
     fn radar_overlap_no_fly_rejected() {
         let s = r#"{
-            "mission":{
-                "start":{"lon":115.0,"lat":39.0,"alt_m":0},
-                "target":{"lon":117.0,"lat":40.0,"alt_m":0},
-                "no_fly_zones":[{"id":"nf1","zone_type":"no_fly",
-                    "shape":"polygon","geometry":{"vertices":[[116.0,39.5],[116.5,39.5],[116.5,40.0],[116.0,40.0]]},
-                    "alt_min_m":0,"alt_max_m":10000}],
-                "red_forces":{"radars":[{"id":"r1","lon":116.25,"lat":39.75,"radius_km":100}]}
-            }
+            "aircraft":[
+                {"id":"a1",
+                 "start":{"lon":115.0,"lat":39.0,"alt_m":0},
+                 "target":{"lon":117.0,"lat":40.0,"alt_m":0}}
+            ],
+            "no_fly_zones":[{"id":"nf1",
+                "shape":"polygon","geometry":{"vertices":[[116.0,39.5],[116.5,39.5],[116.5,40.0],[116.0,40.0]]},
+                "alt_min_m":0,"alt_max_m":10000}],
+            "red_forces":{"radars":[{"id":"r1","lon":116.25,"lat":39.75,"radius_km":100}]}
         }"#;
         let input = Input::from_json_str(s).unwrap();
         match validate(&input) {
@@ -1077,36 +1035,33 @@ mod tests {
     }
 
     #[test]
-    fn target_ref_overrides_mission_target_no_fly_check() {
-        // P5-M1（主管 2026-08-12 案例）：mission.target 在禁飞圆内（49.37km < 50km），
-        // 但 vehicle.target_ref 覆盖为圆外目标 → validate 必须通过（校验 resolve 后的
-        // 实际规划目标，而非被覆盖的 mission.target）。
+    fn aircraft_target_outside_no_fly_ok() {
+        // P5-M1（主管 2026-08-12 案例）逐机化：aircraft.target 显式给出圆外目标
+        // → validate 通过；对照：target 在圆内（49.37km < 50km）→ target_in_no_fly。
         let s = r#"{
-            "mission":{
-                "start":{"lon":115.9,"lat":39.8,"alt_m":3000},
-                "target":{"lon":116.8,"lat":40.3,"alt_m":3000},
-                "vehicles":[{"id":"v1","profile":{"aircraft_type":"FIXED_WING"},
-                    "start_pose":{"lon":117.5,"lat":39.0,"alt_m":3000},
-                    "mid_waypoints":[],
-                    "target_ref":"114.26335909078654,41.99101176729852,3000"}],
-                "no_fly_zones":[{"id":"nf1","zone_type":"no_fly",
-                    "shape":"circle","geometry":{"center":[116.54581607527983,39.90085583451849],"radius_km":50},
-                    "alt_min_m":0,"alt_max_m":12000}]
-            }
+            "aircraft":[
+                {"id":"a1",
+                 "start":{"lon":115.9,"lat":39.8,"alt_m":3000},
+                 "target":{"lon":114.26335909078654,"lat":41.99101176729852,"alt_m":3000}}
+            ],
+            "no_fly_zones":[{"id":"nf1",
+                "shape":"circle","geometry":{"center":[116.54581607527983,39.90085583451849],"radius_km":50},
+                "alt_min_m":0,"alt_max_m":12000}]
         }"#;
         let input = Input::from_json_str(s).unwrap();
         if let Err(e) = validate(&input) {
-            panic!("expected ok (target_ref overrides mission.target), got {e:?}");
+            panic!("expected ok (target outside no-fly), got {e:?}");
         }
-        // 对照：无 target_ref 覆盖时 mission.target（圆内）仍被拒
+        // 对照：target（圆内）被拒
         let s2 = r#"{
-            "mission":{
-                "start":{"lon":115.9,"lat":39.8,"alt_m":3000},
-                "target":{"lon":116.8,"lat":40.3,"alt_m":3000},
-                "no_fly_zones":[{"id":"nf1","zone_type":"no_fly",
-                    "shape":"circle","geometry":{"center":[116.54581607527983,39.90085583451849],"radius_km":50},
-                    "alt_min_m":0,"alt_max_m":12000}]
-            }
+            "aircraft":[
+                {"id":"a1",
+                 "start":{"lon":115.9,"lat":39.8,"alt_m":3000},
+                 "target":{"lon":116.8,"lat":40.3,"alt_m":3000}}
+            ],
+            "no_fly_zones":[{"id":"nf1",
+                "shape":"circle","geometry":{"center":[116.54581607527983,39.90085583451849],"radius_km":50},
+                "alt_min_m":0,"alt_max_m":12000}]
         }"#;
         let input2 = Input::from_json_str(s2).unwrap();
         match validate(&input2) {
@@ -1119,16 +1074,15 @@ mod tests {
     fn mid_waypoint_in_no_fly_rejected() {
         // P5-M2：必经点在禁飞区 → fail-fast（必经点不可绕行）
         let s = r#"{
-            "mission":{
-                "start":{"lon":115.0,"lat":39.0,"alt_m":0},
-                "target":{"lon":117.0,"lat":40.0,"alt_m":0},
-                "vehicles":[{"id":"v1","profile":{"aircraft_type":"FIXED_WING"},
-                    "start_pose":{"lon":115.0,"lat":39.0,"alt_m":0},
-                    "mid_waypoints":[{"lon":116.5,"lat":39.9,"alt_m":0}]}],
-                "no_fly_zones":[{"id":"nf1","zone_type":"no_fly",
-                    "shape":"circle","geometry":{"center":[116.5,39.9],"radius_km":10},
-                    "alt_min_m":0,"alt_max_m":10000}]
-            }
+            "aircraft":[
+                {"id":"a1",
+                 "start":{"lon":115.0,"lat":39.0,"alt_m":0},
+                 "target":{"lon":117.0,"lat":40.0,"alt_m":0},
+                 "mid_waypoints":[{"lon":116.5,"lat":39.9,"alt_m":0}]}
+            ],
+            "no_fly_zones":[{"id":"nf1",
+                "shape":"circle","geometry":{"center":[116.5,39.9],"radius_km":10},
+                "alt_min_m":0,"alt_max_m":10000}]
         }"#;
         let input = Input::from_json_str(s).unwrap();
         match validate(&input) {
@@ -1148,16 +1102,18 @@ mod tests {
         // 2026-08-12 主管：禁飞区本身不允许进入、没有高度范围——NoFly 可省略
         // alt_min/alt_max（全高度禁入），解析与校验都必须通过。
         let s = r#"{
-            "mission":{
-                "start":{"lon":115.0,"lat":39.0,"alt_m":0},
-                "target":{"lon":117.0,"lat":40.0,"alt_m":0},
-                "no_fly_zones":[{"id":"nf1","zone_type":"no_fly",
-                    "shape":"circle","geometry":{"center":[116.5,39.9],"radius_km":10}}]
-            }
+            "aircraft":[
+                {"id":"a1",
+                 "start":{"lon":115.0,"lat":39.0,"alt_m":0},
+                 "target":{"lon":117.0,"lat":40.0,"alt_m":0}}
+            ],
+            "no_fly_zones":[{"id":"nf1",
+                "shape":"circle","geometry":{"center":[116.5,39.9],"radius_km":10}}]
         }"#;
         let input = Input::from_json_str(s).unwrap();
-        assert!(input.mission.no_fly_zones[0].alt_min_m.is_none());
-        assert!(input.mission.no_fly_zones[0].alt_max_m.is_none());
+        assert_eq!(input.no_fly_zones[0].zone_type, ZoneType::NoFly);
+        assert!(input.no_fly_zones[0].alt_min_m.is_none());
+        assert!(input.no_fly_zones[0].alt_max_m.is_none());
         if let Err(e) = validate(&input) {
             panic!("expected ok (no_fly without alt), got {e:?}");
         }
@@ -1167,12 +1123,13 @@ mod tests {
     fn restricted_zone_requires_alt_range() {
         // 限飞区必须有 [alt_min, alt_max]；缺失 → out_of_bounds 拒绝。
         let s = r#"{
-            "mission":{
-                "start":{"lon":115.0,"lat":39.0,"alt_m":0},
-                "target":{"lon":117.0,"lat":40.0,"alt_m":0},
-                "restricted_zones":[{"id":"rz1","zone_type":"restricted",
-                    "shape":"circle","geometry":{"center":[116.5,39.9],"radius_km":10}}]
-            }
+            "aircraft":[
+                {"id":"a1",
+                 "start":{"lon":115.0,"lat":39.0,"alt_m":0},
+                 "target":{"lon":117.0,"lat":40.0,"alt_m":0}}
+            ],
+            "restricted_zones":[{"id":"rz1",
+                "shape":"circle","geometry":{"center":[116.5,39.9],"radius_km":10}}]
         }"#;
         let input = Input::from_json_str(s).unwrap();
         match validate(&input) {
@@ -1182,35 +1139,123 @@ mod tests {
     }
 
     #[test]
-    fn weapon_semantics_type_and_default_range() {
-        // 2026-08-12 主管定案：武器语义 = 类型 + 射程；类型缺省 = 不启用；
-        // 射程缺省 = 按类型默认值（aam [5,40] / agm [3,120] / bomb [1,15]）。
+    fn zone_injection_by_array() {
+        // 三数组各解析一条 → 按所属数组注入 zone_type（三数组是类型唯一标记）。
         let s = r#"{
-            "mission":{
-                "start":{"lon":115.0,"lat":39.0,"alt_m":0},
-                "target":{"lon":117.0,"lat":40.0,"alt_m":0},
-                "weapons":[
-                    {"weapon_id":"w_aam","weapon_type":"aam"},
-                    {"weapon_id":"w_agm","weapon_type":"agm","range_km":[2.0,80.0]},
-                    {"weapon_id":"w_bomb","weapon_type":"bomb"},
-                    {"weapon_id":"w_disabled","range_km":[1.0,10.0]}
-                ]
-            }
+            "aircraft":[
+                {"id":"a1",
+                 "start":{"lon":115.0,"lat":39.0,"alt_m":0},
+                 "target":{"lon":117.0,"lat":40.0,"alt_m":0}}
+            ],
+            "no_fly_zones":[{"id":"nf1",
+                "shape":"circle","geometry":{"center":[116.5,39.9],"radius_km":10}}],
+            "restricted_zones":[{"id":"rz1",
+                "shape":"circle","geometry":{"center":[116.5,39.9],"radius_km":10},
+                "alt_min_m":0,"alt_max_m":5000}],
+            "obstacles":[{"id":"ob1",
+                "shape":"circle","geometry":{"center":[116.5,39.9],"radius_km":10}}]
         }"#;
         let input = Input::from_json_str(s).unwrap();
-        let ws = &input.mission.weapons;
-        assert_eq!(ws.len(), 4);
+        assert_eq!(input.no_fly_zones[0].zone_type, ZoneType::NoFly);
+        assert_eq!(input.restricted_zones[0].zone_type, ZoneType::Restricted);
+        assert_eq!(input.obstacles[0].zone_type, ZoneType::Obstacle);
+    }
+
+    #[test]
+    fn zone_type_key_rejected() {
+        // zone_type 键不再属于 JSON 契约（由解析层按数组注入）→ 畸形。
+        let s = r#"{
+            "aircraft":[
+                {"id":"a1",
+                 "start":{"lon":115.0,"lat":39.0,"alt_m":0},
+                 "target":{"lon":117.0,"lat":40.0,"alt_m":0}}
+            ],
+            "no_fly_zones":[{"id":"nf1","zone_type":"no_fly",
+                "shape":"circle","geometry":{"center":[116.5,39.9],"radius_km":10}}]
+        }"#;
+        let err = Input::from_json_str(s).unwrap_err();
+        assert!(matches!(err, AppError::Json(_)));
+    }
+
+    #[test]
+    fn profile_omitted_defaults() {
+        // 无 profile → AircraftProfile::default()（缺省固定翼占位）。
+        let input = Input::from_json_str(MIN_JSON).unwrap();
+        assert_eq!(input.aircraft[0].profile.aircraft_type, AircraftType::FixedWing);
+        assert!(input.aircraft[0].profile.cruise_speed_mps.is_none());
+        assert!(input.aircraft[0].mid_waypoints.is_empty());
+        assert!(input.aircraft[0].weapon.is_none());
+    }
+
+    #[test]
+    fn weapon_in_aircraft_parsed() {
+        // 武器移入飞行器：weapon 出现即启用、weapon_type 必填；缺 weapon_type → 畸形。
+        let s = r#"{
+            "aircraft":[
+                {"id":"a1",
+                 "start":{"lon":116.30,"lat":39.90,"alt_m":500},
+                 "target":{"lon":117.10,"lat":40.20,"alt_m":1000},
+                 "weapon":{"weapon_type":"agm","range_km":[2.0,80.0],
+                           "envelope":{"heading_deg":[0,360],"alt_m":[0,5000],"speed_mps":[50,300]}}}
+            ]
+        }"#;
+        let input = Input::from_json_str(s).unwrap();
+        let w = input.aircraft[0].weapon.as_ref().expect("weapon 应解析");
+        assert_eq!(w.weapon_type, WeaponType::Agm);
+        assert_eq!(w.effective_range_km(), Some([2.0, 80.0]));
+        assert!(w.envelope.is_some());
+        if let Err(e) = validate(&input) {
+            panic!("expected ok, got {e:?}");
+        }
+        // 缺 weapon_type → malformed_json（weapon 出现即要求类型必填）
+        let bad = r#"{
+            "aircraft":[
+                {"id":"a1",
+                 "start":{"lon":116.30,"lat":39.90,"alt_m":500},
+                 "target":{"lon":117.10,"lat":40.20,"alt_m":1000},
+                 "weapon":{"range_km":[2.0,80.0]}}
+            ]
+        }"#;
+        let err = Input::from_json_str(bad).unwrap_err();
+        assert!(matches!(err, AppError::Json(_)));
+    }
+
+    #[test]
+    fn weapon_semantics_type_and_default_range() {
+        // 2026-08-12 主管定案：武器语义 = 类型 + 射程；weapon_type 必填（出现即启用）；
+        // 射程缺省 = 按类型默认值（aam [5,40] / agm [3,120] / bomb [1,15]）。
+        let s = r#"{
+            "aircraft":[
+                {"id":"a_aam",
+                 "start":{"lon":115.0,"lat":39.0,"alt_m":0},
+                 "target":{"lon":117.0,"lat":40.0,"alt_m":0},
+                 "weapon":{"weapon_type":"aam"}},
+                {"id":"a_agm",
+                 "start":{"lon":115.0,"lat":39.0,"alt_m":0},
+                 "target":{"lon":117.0,"lat":40.0,"alt_m":0},
+                 "weapon":{"weapon_type":"agm","range_km":[2.0,80.0]}},
+                {"id":"a_bomb",
+                 "start":{"lon":115.0,"lat":39.0,"alt_m":0},
+                 "target":{"lon":117.0,"lat":40.0,"alt_m":0},
+                 "weapon":{"weapon_type":"bomb"}}
+            ]
+        }"#;
+        let input = Input::from_json_str(s).unwrap();
+        let ws: Vec<&Weapon> = input
+            .aircraft
+            .iter()
+            .filter_map(|a| a.weapon.as_ref())
+            .collect();
+        assert_eq!(ws.len(), 3);
         // 缺省射程按类型
         assert_eq!(ws[0].effective_range_km(), Some([5.0, 40.0]));
         // 显式射程优先
         assert_eq!(ws[1].effective_range_km(), Some([2.0, 80.0]));
         assert_eq!(ws[2].effective_range_km(), Some([1.0, 15.0]));
-        // 无类型无射程 → 不启用
-        assert!(ws[3].effective_range_km().is_none());
         if let Err(e) = validate(&input) {
             panic!("expected ok, got {e:?}");
         }
-        // 倒置射程 → out_of_bounds
+        // 倒置射程 → out_of_bounds（W2-P3：逐机 validate_aircraft 校验）
         let bad = s.replace("[2.0,80.0]", "[80.0,2.0]");
         let input2 = Input::from_json_str(&bad).unwrap();
         match validate(&input2) {
@@ -1220,38 +1265,36 @@ mod tests {
     }
 
     #[test]
-    fn vehicles_multi_input() {
+    fn aircraft_multi_input() {
         let s = r#"{
-            "mission":{
-                "start":{"lon":116.30,"lat":39.90,"alt_m":500},
-                "target":{"lon":117.10,"lat":40.20,"alt_m":1000},
-                "vehicles":[
-                    {"id":"v1",
-                     "profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":250,
-                                "min_turn_radius_m":12000,"max_bank_deg":30},
-                     "start_pose":{"lon":116.30,"lat":39.90,"alt_m":500}},
-                    {"id":"v2",
-                     "profile":{"aircraft_type":"ROTORCRAFT","cruise_speed_mps":100},
-                     "start_pose":{"lon":116.40,"lat":39.80,"alt_m":300}}
-                ]
-            }
+            "aircraft":[
+                {"id":"a1",
+                 "profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":250,
+                            "min_turn_radius_m":12000,"max_bank_deg":30},
+                 "start":{"lon":116.30,"lat":39.90,"alt_m":500},
+                 "target":{"lon":117.10,"lat":40.20,"alt_m":1000}},
+                {"id":"a2",
+                 "profile":{"aircraft_type":"ROTORCRAFT","cruise_speed_mps":100},
+                 "start":{"lon":116.40,"lat":39.80,"alt_m":300},
+                 "target":{"lon":117.10,"lat":40.20,"alt_m":1000}}
+            ]
         }"#;
         let input = Input::from_json_str(s).unwrap();
-        assert_eq!(input.mission.vehicles.len(), 2);
+        assert_eq!(input.aircraft.len(), 2);
         assert!(validate(&input).is_ok());
     }
 
     #[test]
-    fn duplicate_vehicle_id_rejected() {
+    fn duplicate_aircraft_id_rejected() {
         let s = r#"{
-            "mission":{
-                "start":{"lon":116.30,"lat":39.90,"alt_m":500},
-                "target":{"lon":117.10,"lat":40.20,"alt_m":1000},
-                "vehicles":[
-                    {"id":"v1","profile":{"aircraft_type":"FIXED_WING"},"start_pose":{"lon":116.3,"lat":39.9,"alt_m":500}},
-                    {"id":"v1","profile":{"aircraft_type":"FIXED_WING"},"start_pose":{"lon":116.4,"lat":39.8,"alt_m":500}}
-                ]
-            }
+            "aircraft":[
+                {"id":"a1","profile":{"aircraft_type":"FIXED_WING"},
+                 "start":{"lon":116.3,"lat":39.9,"alt_m":500},
+                 "target":{"lon":117.1,"lat":40.2,"alt_m":1000}},
+                {"id":"a1","profile":{"aircraft_type":"FIXED_WING"},
+                 "start":{"lon":116.4,"lat":39.8,"alt_m":500},
+                 "target":{"lon":117.1,"lat":40.2,"alt_m":1000}}
+            ]
         }"#;
         let input = Input::from_json_str(s).unwrap();
         match validate(&input) {
@@ -1267,30 +1310,24 @@ mod tests {
         let r_min = DefaultParams::physical_turn_radius_m(250.0, 30.0);
         assert!((r_min - 11_045.0).abs() < 10.0, "r_min={r_min}");
         let s = r#"{
-            "mission":{
-                "start":{"lon":116.30,"lat":39.90,"alt_m":500},
-                "target":{"lon":117.10,"lat":40.20,"alt_m":1000},
-                "vehicles":[
-                    {"id":"v1","profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":250,
-                                "max_bank_deg":30,"min_turn_radius_m":5000},
-                     "start_pose":{"lon":116.3,"lat":39.9,"alt_m":500}}
-                ]
-            }
+            "aircraft":[
+                {"id":"a1","profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":250,
+                            "max_bank_deg":30,"min_turn_radius_m":5000},
+                 "start":{"lon":116.3,"lat":39.9,"alt_m":500},
+                 "target":{"lon":117.1,"lat":40.2,"alt_m":1000}}
+            ]
         }"#;
         let input = Input::from_json_str(s).unwrap();
         validate(&input).expect("A6 放宽：显式半径信任，不再拒绝");
 
         // 正数防线仍生效：固定翼 r=0（<1m）拒绝；旋翼机 r→0 合法（悬停原地转向）
         let bad = r#"{
-            "mission":{
-                "start":{"lon":116.30,"lat":39.90,"alt_m":500},
-                "target":{"lon":117.10,"lat":40.20,"alt_m":1000},
-                "vehicles":[
-                    {"id":"v1","profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":250,
-                                "max_bank_deg":30,"min_turn_radius_m":0},
-                     "start_pose":{"lon":116.3,"lat":39.9,"alt_m":500}}
-                ]
-            }
+            "aircraft":[
+                {"id":"a1","profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":250,
+                            "max_bank_deg":30,"min_turn_radius_m":0},
+                 "start":{"lon":116.3,"lat":39.9,"alt_m":500},
+                 "target":{"lon":117.1,"lat":40.2,"alt_m":1000}}
+            ]
         }"#;
         let bad_input = Input::from_json_str(bad).unwrap();
         match validate(&bad_input) {
@@ -1298,15 +1335,12 @@ mod tests {
             other => panic!("expected reject for fixed-wing r<=0, got {other:?}"),
         }
         let ok_rotor = r#"{
-            "mission":{
-                "start":{"lon":116.30,"lat":39.90,"alt_m":500},
-                "target":{"lon":117.10,"lat":40.20,"alt_m":1000},
-                "vehicles":[
-                    {"id":"v1","profile":{"aircraft_type":"ROTORCRAFT","cruise_speed_mps":60,
-                                "max_bank_deg":30,"min_turn_radius_m":0},
-                     "start_pose":{"lon":116.3,"lat":39.9,"alt_m":500}}
-                ]
-            }
+            "aircraft":[
+                {"id":"a1","profile":{"aircraft_type":"ROTORCRAFT","cruise_speed_mps":60,
+                            "max_bank_deg":30,"min_turn_radius_m":0},
+                 "start":{"lon":116.3,"lat":39.9,"alt_m":500},
+                 "target":{"lon":117.1,"lat":40.2,"alt_m":1000}}
+            ]
         }"#;
         let rotor_input = Input::from_json_str(ok_rotor).unwrap();
         validate(&rotor_input).expect("旋翼机 r=0 合法（悬停原地转向）");
