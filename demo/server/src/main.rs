@@ -104,6 +104,7 @@ fn cli_bin() -> PathBuf {
 
 fn run_cli(input_json: &str) -> Result<Value, String> {
     let mut child = Command::new(cli_bin())
+        .arg("plan")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
