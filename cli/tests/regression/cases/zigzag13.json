@@ -1,1 +1,148 @@
-{"mission":{"start":{"lon":120.89416622430879,"lat":36.06108136002149,"alt_m":3000},"target":{"lon":113.11587911292588,"lat":53.0036047562528,"alt_m":3000},"vehicles":[{"id":"v1","profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":250,"min_turn_radius_m":442,"max_climb_angle_deg":15},"start_pose":{"lon":120.89416622430879,"lat":36.06108136002149,"alt_m":3000},"mid_waypoints":[]}],"red_forces":{"radars":[{"id":"radar_1786084974943","lon":117.68313778526823,"lat":41.801691516373744,"radius_km":100,"alt_m":10},{"id":"radar_1786084983655","lon":118.97335920198671,"lat":43.63678640156638,"radius_km":100,"alt_m":10},{"id":"radar_1786092230788","lon":115.09225233170542,"lat":49.6476179350467,"radius_km":100,"alt_m":10}]},"no_fly_zones":[{"id":"zone_1786085018815","zone_type":"no_fly","shape":"polygon","geometry":{"vertices":[[121.95053904064767,44.96951996217126],[120.61658766324808,44.018367237550706],[119.75131440669436,44.50790979915125]]},"alt_min_m":0,"alt_max_m":12000},{"id":"zone_1786085130848","zone_type":"no_fly","shape":"circle","geometry":{"center":[119.8886173748286,42.18473728903125],"radius_km":50},"alt_min_m":0,"alt_max_m":12000},{"id":"zone_1786085305023","zone_type":"no_fly","shape":"circle","geometry":{"center":[116.45092635980224,45.41790442309064],"radius_km":100},"alt_min_m":0,"alt_max_m":12000}],"restricted_zones":[{"id":"rz_1786085042839","zone_type":"restricted","shape":"circle","geometry":{"center":[119.07492851345984,42.011178980387626],"radius_km":50},"alt_min_m":0,"alt_max_m":4000},{"id":"rz_1786085088583","zone_type":"restricted","shape":"circle","geometry":{"center":[119.81093606103249,38.784857453935764],"radius_km":50},"alt_min_m":5000,"alt_max_m":10000},{"id":"rz_1786085668919","zone_type":"restricted","shape":"circle","geometry":{"center":[117.77727308452576,48.96593673816363],"radius_km":100},"alt_min_m":5000,"alt_max_m":8000}],"obstacles":[],"terrain":{"source":"path","path":"data/east_asia_7p5as.arpack"},"parameters":{"p_cross":0.9}}}
+{
+  "aircraft": [
+    {
+      "id": "v1",
+      "profile": {
+        "aircraft_type": "FIXED_WING",
+        "cruise_speed_mps": 250,
+        "min_turn_radius_m": 442,
+        "max_climb_angle_deg": 15
+      },
+      "mid_waypoints": [],
+      "start": {
+        "lon": 120.89416622430879,
+        "lat": 36.06108136002149,
+        "alt_m": 3000
+      },
+      "target": {
+        "lon": 113.11587911292588,
+        "lat": 53.0036047562528,
+        "alt_m": 3000
+      }
+    }
+  ],
+  "red_forces": {
+    "radars": [
+      {
+        "id": "radar_1786084974943",
+        "lon": 117.68313778526823,
+        "lat": 41.801691516373744,
+        "radius_km": 100,
+        "alt_m": 10
+      },
+      {
+        "id": "radar_1786084983655",
+        "lon": 118.97335920198671,
+        "lat": 43.63678640156638,
+        "radius_km": 100,
+        "alt_m": 10
+      },
+      {
+        "id": "radar_1786092230788",
+        "lon": 115.09225233170542,
+        "lat": 49.6476179350467,
+        "radius_km": 100,
+        "alt_m": 10
+      }
+    ]
+  },
+  "no_fly_zones": [
+    {
+      "id": "zone_1786085018815",
+      "shape": "polygon",
+      "geometry": {
+        "vertices": [
+          [
+            121.95053904064767,
+            44.96951996217126
+          ],
+          [
+            120.61658766324808,
+            44.018367237550706
+          ],
+          [
+            119.75131440669436,
+            44.50790979915125
+          ]
+        ]
+      },
+      "alt_min_m": 0,
+      "alt_max_m": 12000
+    },
+    {
+      "id": "zone_1786085130848",
+      "shape": "circle",
+      "geometry": {
+        "center": [
+          119.8886173748286,
+          42.18473728903125
+        ],
+        "radius_km": 50
+      },
+      "alt_min_m": 0,
+      "alt_max_m": 12000
+    },
+    {
+      "id": "zone_1786085305023",
+      "shape": "circle",
+      "geometry": {
+        "center": [
+          116.45092635980224,
+          45.41790442309064
+        ],
+        "radius_km": 100
+      },
+      "alt_min_m": 0,
+      "alt_max_m": 12000
+    }
+  ],
+  "restricted_zones": [
+    {
+      "id": "rz_1786085042839",
+      "shape": "circle",
+      "geometry": {
+        "center": [
+          119.07492851345984,
+          42.011178980387626
+        ],
+        "radius_km": 50
+      },
+      "alt_min_m": 0,
+      "alt_max_m": 4000
+    },
+    {
+      "id": "rz_1786085088583",
+      "shape": "circle",
+      "geometry": {
+        "center": [
+          119.81093606103249,
+          38.784857453935764
+        ],
+        "radius_km": 50
+      },
+      "alt_min_m": 5000,
+      "alt_max_m": 10000
+    },
+    {
+      "id": "rz_1786085668919",
+      "shape": "circle",
+      "geometry": {
+        "center": [
+          117.77727308452576,
+          48.96593673816363
+        ],
+        "radius_km": 100
+      },
+      "alt_min_m": 5000,
+      "alt_max_m": 8000
+    }
+  ],
+  "obstacles": [],
+  "terrain": {
+    "source": "path",
+    "path": "data/east_asia_7p5as.arpack"
+  },
+  "parameters": {
+    "p_cross": 0.9
+  }
+}

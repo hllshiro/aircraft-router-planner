@@ -32,20 +32,20 @@ fn null_json_is_malformed() {
 
 #[test]
 fn wrong_types_are_malformed() {
-    // mission 应为对象
-    let s = r#"{"mission": 123}"#;
+    // aircraft 应为数组
+    let s = r#"{"aircraft": 123}"#;
     assert!(Input::from_json_str(s).is_err());
 }
 
 #[test]
 fn missing_required_fields_are_malformed() {
-    let s = r#"{}"#; // 缺 mission
+    let s = r#"{}"#; // 缺 aircraft
     assert!(Input::from_json_str(s).is_err());
 }
 
 #[test]
 fn nan_coordinates_rejected() {
-    let s = r#"{"mission":{"start":{"lon":NaN,"lat":39.0,"alt_m":0},"target":{"lon":3,"lat":4,"alt_m":0}}}"#;
+    let s = r#"{"aircraft":[{"id":"a1","start":{"lon":NaN,"lat":39.0,"alt_m":0},"target":{"lon":3,"lat":4,"alt_m":0}}]}"#;
     // serde 对 NaN 默认拒绝（非有限数不合法 JSON number 语义？serde_json 允许 NaN）
     // 无论 parse 或 validate 层拦截，最终都应 input_invalid
     match Input::from_json_str(&s) {
@@ -59,7 +59,8 @@ fn nan_coordinates_rejected() {
 
 #[test]
 fn huge_lat_rejected() {
-    let s = r#"{"mission":{"start":{"lon":116.0,"lat":91.0,"alt_m":0},"target":{"lon":3,"lat":4,"alt_m":0}}}"#;
+    // MIN_AIRCRAFT 风格：单机显式 start/target，start.lat=91 越界
+    let s = r#"{"aircraft":[{"id":"a1","start":{"lon":116.0,"lat":91.0,"alt_m":0},"target":{"lon":117.10,"lat":40.20,"alt_m":1000}}]}"#;
     let i = Input::from_json_str(&s).unwrap();
     match config::validate(&i) {
         Err(AppError::InputInvalid(InputInvalidReason::IllegalCoordinate)) => {}
@@ -69,7 +70,11 @@ fn huge_lat_rejected() {
 
 #[test]
 fn negative_radar_radius_rejected() {
-    let s = r#"{"mission":{"start":{"lon":115.0,"lat":39.0,"alt_m":0},"target":{"lon":117.0,"lat":40.0,"alt_m":0},"red_forces":{"radars":[{"id":"r1","lon":116.0,"lat":39.5,"radius_km":-5}]}}}"#;
+    // MIN_AIRCRAFT 合法骨架 + 负半径雷达 → out_of_bounds
+    let s = format!(
+        r#"{{"aircraft":[{ac}],"red_forces":{{"radars":[{{"id":"r1","lon":116.0,"lat":39.5,"radius_km":-5}}]}}}}"#,
+        ac = MIN_AIRCRAFT
+    );
     let i = Input::from_json_str(&s).unwrap();
     match config::validate(&i) {
         Err(AppError::InputInvalid(InputInvalidReason::OutOfBounds)) => {}
@@ -103,9 +108,9 @@ fn legacy_contract_fields_rejected() {
     }
 }
 
-/// v0.21 第二波护栏：mission 包裹层、旧 start/target/vehicles/weapons/zone_type 键 → malformed_json。
-#[allow(dead_code)] // 供 aircraft_empty_rejected 使用；该测试在 MissingAircraft 引入前被注释
-const MIN_AIRCRAFT: &str = r#"{"aircraft":[{"id":"a1","start":{"lon":116.30,"lat":39.90,"alt_m":500},"target":{"lon":117.10,"lat":40.20,"alt_m":1000}}]}"#;
+/// v0.21 最小合法 aircraft 数组元素骨架（id a1 + 合法 start/target；
+/// 供坐标/雷达退化用例按新契约组合输入）。
+const MIN_AIRCRAFT: &str = r#"{"id":"a1","start":{"lon":116.30,"lat":39.90,"alt_m":500},"target":{"lon":117.10,"lat":40.20,"alt_m":1000}}"#;
 
 #[test]
 fn legacy_mission_wrapper_rejected() {
@@ -421,7 +426,7 @@ fn fmm_backtrack_unreachable_no_panic() {
 
 #[test]
 fn output_serialize_with_extremes_no_panic() {
-    use aircraft_router_planner_cli::config::{Output, Stats, VehicleOutput};
+    use aircraft_router_planner_cli::config::{AircraftOutput, Output, Stats};
     use aircraft_router_planner_cli::error::ErrorBody;
     let out = Output::failure(
         "input_invalid",
@@ -434,7 +439,7 @@ fn output_serialize_with_extremes_no_panic() {
         status: "success".into(),
         error: None,
         elapsed_ms: Some(0),
-        vehicles: vec![VehicleOutput {
+        aircraft: vec![AircraftOutput {
             id: "v1".into(),
             status: "planned".into(),
             path: vec![],
@@ -589,15 +594,14 @@ fn smooth_chain_degenerate_no_panic() {
 fn invalid_radar_params_recorded_as_degradations() {
     // 无外部参数或参数无效 → 使用默认值，且回落事实记入 stats.degradations。
     let s = r#"{
-        "mission":{
-            "start":{"lon":115.0,"lat":39.0,"alt_m":3000},
-            "target":{"lon":116.5,"lat":39.9,"alt_m":3000},
-            "parameters":{
-                "radar_inflation":-1.0,
-                "p_cross":5.0,
-                "suppression_delta":9.0,
-                "detection_curve":"weird"
-            }
+        "aircraft":[
+            {"id":"a1","start":{"lon":115.0,"lat":39.0,"alt_m":3000},"target":{"lon":116.5,"lat":39.9,"alt_m":3000}}
+        ],
+        "parameters":{
+            "radar_inflation":-1.0,
+            "p_cross":5.0,
+            "suppression_delta":9.0,
+            "detection_curve":"weird"
         }
     }"#;
     let input = Input::from_json_str(s).unwrap();

@@ -1,31 +1,58 @@
 {
-  "mission": {
-    "start": {"lon": 115.9, "lat": 39.8, "alt_m": 3000},
-    "target": {"lon": 116.8, "lat": 40.3, "alt_m": 3000},
-    "vehicles": [
-      {
-        "id": "v1",
-        "profile": {"aircraft_type": "FIXED_WING", "cruise_speed_mps": 250, "min_turn_radius_m": 442, "max_climb_angle_deg": 15},
-        "start_pose": {"lon": 117.56974928980722, "lat": 38.96700579180885, "alt_m": 3000},
-        "mid_waypoints": [],
-        "target_ref": "115.19698590497482,41.05590945168885,3000"
+  "aircraft": [
+    {
+      "id": "v1",
+      "profile": {
+        "aircraft_type": "FIXED_WING",
+        "cruise_speed_mps": 250,
+        "min_turn_radius_m": 442,
+        "max_climb_angle_deg": 15
+      },
+      "mid_waypoints": [],
+      "start": {
+        "lon": 117.56974928980722,
+        "lat": 38.96700579180885,
+        "alt_m": 3000
+      },
+      "target": {
+        "lon": 115.19698590497482,
+        "lat": 41.05590945168885,
+        "alt_m": 3000.0
       }
-    ],
-    "red_forces": {"radars": []},
-    "no_fly_zones": [],
-    "restricted_zones": [
-      {
-        "id": "rz_1786526741843",
-        "zone_type": "restricted",
-        "shape": "polygon",
-        "geometry": {"vertices": [[116.94130038320912,42.02725845139573],[114.69129297282345,40.62499250619912],[115.96645909625764,41.049906704209235]]},
-        "alt_min_m": 2000,
-        "alt_max_m": 6000
-      }
-    ],
-    "obstacles": [],
-    "weapons": [],
-    "terrain": {"source": "path", "path": "data/east_asia_7p5as.arpack"},
-    "parameters": {}
-  }
+    }
+  ],
+  "red_forces": {
+    "radars": []
+  },
+  "no_fly_zones": [],
+  "restricted_zones": [
+    {
+      "id": "rz_1786526741843",
+      "shape": "polygon",
+      "geometry": {
+        "vertices": [
+          [
+            116.94130038320912,
+            42.02725845139573
+          ],
+          [
+            114.69129297282345,
+            40.62499250619912
+          ],
+          [
+            115.96645909625764,
+            41.049906704209235
+          ]
+        ]
+      },
+      "alt_min_m": 2000,
+      "alt_max_m": 6000
+    }
+  ],
+  "obstacles": [],
+  "terrain": {
+    "source": "path",
+    "path": "data/east_asia_7p5as.arpack"
+  },
+  "parameters": {}
 }

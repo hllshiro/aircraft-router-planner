@@ -1,29 +1,119 @@
 {
-  "mission": {
-    "start": {"lon": 124.08488491093874, "lat": 34.66470606380233, "alt_m": 1000},
-    "target": {"lon": 111.25990351543102, "lat": 43.82628474871892, "alt_m": 3000},
-    "vehicles": [{
+  "aircraft": [
+    {
       "id": "v1",
-      "profile": {"aircraft_type": "FIXED_WING", "cruise_speed_mps": 250, "min_turn_radius_m": 442, "max_climb_angle_deg": 15},
-      "start_pose": {"lon": 124.08488491093874, "lat": 34.66470606380233, "alt_m": 3000},
-      "mid_waypoints": []
-    }],
-    "red_forces": {
-      "radars": [
-        {"id": "radar_1786063356956", "lon": 120.63824374996959, "lat": 36.44028294976176, "radius_km": 100, "alt_m": 10},
-        {"id": "radar_1786063384876", "lon": 114.26344749106278, "lat": 41.19603011614479, "radius_km": 100, "alt_m": 10}
-      ]
+      "profile": {
+        "aircraft_type": "FIXED_WING",
+        "cruise_speed_mps": 250,
+        "min_turn_radius_m": 442,
+        "max_climb_angle_deg": 15
+      },
+      "mid_waypoints": [],
+      "start": {
+        "lon": 124.08488491093874,
+        "lat": 34.66470606380233,
+        "alt_m": 3000
+      },
+      "target": {
+        "lon": 111.25990351543102,
+        "lat": 43.82628474871892,
+        "alt_m": 3000
+      }
+    }
+  ],
+  "red_forces": {
+    "radars": [
+      {
+        "id": "radar_1786063356956",
+        "lon": 120.63824374996959,
+        "lat": 36.44028294976176,
+        "radius_km": 100,
+        "alt_m": 10
+      },
+      {
+        "id": "radar_1786063384876",
+        "lon": 114.26344749106278,
+        "lat": 41.19603011614479,
+        "radius_km": 100,
+        "alt_m": 10
+      }
+    ]
+  },
+  "no_fly_zones": [
+    {
+      "id": "zone_1786063133308",
+      "shape": "polygon",
+      "geometry": {
+        "vertices": [
+          [
+            118.47911717630092,
+            37.928192020486954
+          ],
+          [
+            117.70301416696901,
+            36.9086277136175
+          ],
+          [
+            118.27698798112372,
+            35.944500407040714
+          ],
+          [
+            118.75935490377323,
+            37.24009953187024
+          ]
+        ]
+      },
+      "alt_min_m": 0,
+      "alt_max_m": 12000
     },
-    "no_fly_zones": [
-      {"id": "zone_1786063133308", "zone_type": "no_fly", "shape": "polygon", "geometry": {"vertices": [[118.47911717630092,37.928192020486954],[117.70301416696901,36.9086277136175],[118.27698798112372,35.944500407040714],[118.75935490377323,37.24009953187024]]}, "alt_min_m": 0, "alt_max_m": 12000},
-      {"id": "zone_1786063230260", "zone_type": "no_fly", "shape": "circle", "geometry": {"center": [114.85843709745943,41.54674648739867], "radius_km": 50}, "alt_min_m": 0, "alt_max_m": 12000}
-    ],
-    "restricted_zones": [
-      {"id": "rz_1786063218180", "zone_type": "restricted", "shape": "circle", "geometry": {"center": [120.29800331610701,37.12685669255434], "radius_km": 50}, "alt_min_m": 0, "alt_max_m": 5000},
-      {"id": "rz_1786063238380", "zone_type": "restricted", "shape": "circle", "geometry": {"center": [121.26755763007444,36.45205419617851], "radius_km": 50}, "alt_min_m": 6000, "alt_max_m": 12000}
-    ],
-    "obstacles": [],
-    "terrain": {"source": "path", "path": "data/east_asia_7p5as.arpack"},
-    "parameters": {"p_cross": 0.9}
+    {
+      "id": "zone_1786063230260",
+      "shape": "circle",
+      "geometry": {
+        "center": [
+          114.85843709745943,
+          41.54674648739867
+        ],
+        "radius_km": 50
+      },
+      "alt_min_m": 0,
+      "alt_max_m": 12000
+    }
+  ],
+  "restricted_zones": [
+    {
+      "id": "rz_1786063218180",
+      "shape": "circle",
+      "geometry": {
+        "center": [
+          120.29800331610701,
+          37.12685669255434
+        ],
+        "radius_km": 50
+      },
+      "alt_min_m": 0,
+      "alt_max_m": 5000
+    },
+    {
+      "id": "rz_1786063238380",
+      "shape": "circle",
+      "geometry": {
+        "center": [
+          121.26755763007444,
+          36.45205419617851
+        ],
+        "radius_km": 50
+      },
+      "alt_min_m": 6000,
+      "alt_max_m": 12000
+    }
+  ],
+  "obstacles": [],
+  "terrain": {
+    "source": "path",
+    "path": "data/east_asia_7p5as.arpack"
+  },
+  "parameters": {
+    "p_cross": 0.9
   }
 }

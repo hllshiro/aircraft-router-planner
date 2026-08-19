@@ -9,22 +9,28 @@ use aircraft_router_planner_cli::config::Input;
 use aircraft_router_planner_cli::solver::{self, SolveParams};
 
 const INPUT_NO_TERRAIN: &str = r#"{
-  "mission": {
-    "start": {"lon": 115.0, "lat": 39.0, "alt_m": 3000},
-    "target": {"lon": 116.5, "lat": 39.9, "alt_m": 3000}
-  }
+  "aircraft": [
+    {
+      "id": "a1",
+      "start": {"lon": 115.0, "lat": 39.0, "alt_m": 3000},
+      "target": {"lon": 116.5, "lat": 39.9, "alt_m": 3000}
+    }
+  ]
 }"#;
 
 const INPUT_ZONE_NO_TERRAIN: &str = r#"{
-  "mission": {
-    "start": {"lon": 115.0, "lat": 39.0, "alt_m": 3000},
-    "target": {"lon": 116.5, "lat": 39.9, "alt_m": 3000},
-    "no_fly_zones": [
-      {"id": "mid", "zone_type": "no_fly", "shape": "circle",
-       "geometry": {"center": [115.75, 39.45], "radius_km": 15},
-       "alt_min_m": 0, "alt_max_m": 10000}
-    ]
-  }
+  "aircraft": [
+    {
+      "id": "a1",
+      "start": {"lon": 115.0, "lat": 39.0, "alt_m": 3000},
+      "target": {"lon": 116.5, "lat": 39.9, "alt_m": 3000}
+    }
+  ],
+  "no_fly_zones": [
+    {"id": "mid", "shape": "circle",
+     "geometry": {"center": [115.75, 39.45], "radius_km": 15},
+     "alt_min_m": 0, "alt_max_m": 10000}
+  ]
 }"#;
 
 /// 逐字节门禁：JSON 输出除运行时时间戳（elapsed_ms / stats.fmm_ms 天然受缓存

@@ -1,7 +1,7 @@
 //! Phase 0 反馈错误输入回归套件（主管拍板 2026-08-06：落点 A + 地形依赖检测降级）。
 //!
 //! 背景：phase0_out/ 是 Phase 0 调试产物目录（已 gitignore）。其中 18 个**输入型**
-//! mission JSON 是历史上主管反馈 bug 的原始输入（锯齿/直穿 restricted/禁飞区陷阱/
+//! 任务 JSON 是历史上主管反馈 bug 的原始输入（锯齿/直穿 restricted/禁飞区陷阱/
 //! restricted 高度层剖面判据等）。本套件把它们复制为正式回归用例，防止错误复现。
 //!
 //! 回归语义（核心断言）：
@@ -44,16 +44,16 @@ fn load_case(name: &str) -> Input {
         std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("{name}: read case failed: {e}"));
     let mut input: Input =
         Input::from_json_str(&raw).unwrap_or_else(|e| panic!("{name}: parse failed: {e}"));
-    if input.mission.terrain.source == config::TerrainSourceType::None {
+    if input.terrain.source == config::TerrainSourceType::None {
         return input;
     }
     match real_terrain_path() {
         Some(abs) => {
-            input.mission.terrain.path = Some(abs.to_string_lossy().into_owned());
+            input.terrain.path = Some(abs.to_string_lossy().into_owned());
         }
         None => {
-            input.mission.terrain.source = config::TerrainSourceType::None;
-            input.mission.terrain.path = None;
+            input.terrain.source = config::TerrainSourceType::None;
+            input.terrain.path = None;
         }
     }
     input
@@ -105,13 +105,13 @@ fn point_violates(z: &Zone, p: &Geo, alt_m: f64) -> bool {
 
 /// 核心断言：输出路径逐点不穿任何 zone。
 fn assert_path_clear(input: &Input, out: &config::Output, name: &str) {
-    let mut zones = input.mission.no_fly_zones.clone();
-    zones.extend(input.mission.restricted_zones.clone());
-    zones.extend(input.mission.obstacles.clone());
+    let mut zones = input.no_fly_zones.clone();
+    zones.extend(input.restricted_zones.clone());
+    zones.extend(input.obstacles.clone());
     if zones.is_empty() {
         return;
     }
-    for v in &out.vehicles {
+    for v in &out.aircraft {
         for (i, pt) in v.path.iter().enumerate() {
             let geo = match Geo::new(pt.x, pt.y) {
                 Ok(g) => g,
@@ -163,8 +163,8 @@ fn phase0_feedback_inputs_regression() {
         config::validate(&input).unwrap_or_else(|e| panic!("{name}: validate failed: {e:?}"));
 
         let mut params = SolveParams::default();
-        if input.mission.terrain.source != config::TerrainSourceType::None {
-            if let Some(p) = &input.mission.terrain.path {
+        if input.terrain.source != config::TerrainSourceType::None {
+            if let Some(p) = &input.terrain.path {
                 params.terrain_path = Some(PathBuf::from(p));
             }
         }
@@ -186,7 +186,7 @@ fn phase0_feedback_inputs_regression() {
         // 入口航向约束 Theta* 首跳（seg3 out→climb 与 seg4 climb→A 夹角 61.94°>
         // 60°→ 拼接后终检拒→全链回退）→ 10 点平滑交付。强断言防锯齿复发。
         if name == "zigzag11.json" {
-            let v = &out.vehicles[0];
+            let v = &out.aircraft[0];
             assert!(
                 v.path.len() < 30,
                 "{name}: still staircase dense ({} pts), entry_heading regression",
@@ -206,7 +206,7 @@ fn phase0_feedback_inputs_regression() {
         // 直线（desc_in/out_climb）做硬墙净距检查 → need_wall → 画墙水平绕行兜底 →
         // 6 点平滑交付。强断言防锯齿复发。
         if name == "zigzag12.json" {
-            let v = &out.vehicles[0];
+            let v = &out.aircraft[0];
             assert!(
                 v.path.len() < 30,
                 "{name}: still staircase dense ({} pts), profile-through-wall regression",
@@ -226,7 +226,7 @@ fn phase0_feedback_inputs_regression() {
         // 切角 1.34km = 4.33km < 5.52km）→ 平滑链全失败。修复：span>2.5° 时膨胀距离
         // 补 0.71×cell（3→4 格）→ 3 点平滑交付。强断言防锯齿复发。
         if name == "zigzag13.json" {
-            let v = &out.vehicles[0];
+            let v = &out.aircraft[0];
             assert!(
                 v.path.len() < 30,
                 "{name}: still staircase dense ({} pts), inflation corner-cut regression",
@@ -250,7 +250,7 @@ fn phase0_feedback_inputs_regression() {
         // 0.71×cell 切角补偿（ceil((2000+0.71×1953)/1953)=2 格）不够 → verify 拒 →
         // 平滑链全失败。修复：span>2.5° 时膨胀格数再 +1 兜底尖角偏差 → 11 点平滑交付。
         if name == "zigzag17.json" {
-            let v = &out.vehicles[0];
+            let v = &out.aircraft[0];
             assert!(
                 v.path.len() < 30,
                 "{name}: still staircase dense ({} pts), polygon corner clearance regression",
@@ -271,7 +271,7 @@ fn phase0_feedback_inputs_regression() {
         // 鼓包 170° 折返；② 圆心应在 S 对侧（S−r·(sinφ0,cosφ0)），原 S+r 同侧致
         // t=0 弧点偏移 2r）→ 8 点 theta 全过 → 12 点平滑交付。强断言防锯齿复发。
         if name == "zigzag18.json" {
-            let v = &out.vehicles[0];
+            let v = &out.aircraft[0];
             assert!(
                 v.path.len() < 30,
                 "{name}: still staircase dense ({} pts), theta fallback arc regression",
@@ -284,9 +284,9 @@ fn phase0_feedback_inputs_regression() {
         }
 
         eprintln!(
-            "[regress] {name}: status={} vehicles={}",
+            "[regress] {name}: status={} aircraft={}",
             out.status,
-            out.vehicles.len()
+            out.aircraft.len()
         );
     }
 }
