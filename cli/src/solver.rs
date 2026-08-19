@@ -475,7 +475,6 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                 )],
             });
             return Ok(Output {
-                schema_version: crate::config::SCHEMA_VERSION.into(),
                 status: "degraded_timeout".into(),
                 error: Some(crate::error::ErrorBody {
                     code: "degraded_timeout".into(),
@@ -597,7 +596,6 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                     )],
                 });
                 return Ok(Output {
-                    schema_version: crate::config::SCHEMA_VERSION.into(),
                     status: "degraded_timeout".into(),
                     error: Some(crate::error::ErrorBody {
                         code: "degraded_timeout".into(),
@@ -2056,7 +2054,6 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
     detect_multi_vehicle_crossings(&mut out_vehicles);
 
     Ok(Output {
-        schema_version: crate::config::SCHEMA_VERSION.into(),
         status: "success".into(),
         error: None,
         elapsed_ms: Some(elapsed_ms),
@@ -2963,7 +2960,7 @@ fn make_segment_check<'a>(
                         let lat = lat1 + (lat2 - lat1) * t;
                         let alt = alt1 + (alt2 - alt1) * t;
                         if let Ok(g) = Geo::new(lon, lat) {
-                            if zone_contains_at(z, &g, alt, None) {
+                            if zone_contains_at(z, &g, alt) {
                                 return false;
                             }
                         }
@@ -2976,7 +2973,7 @@ fn make_segment_check<'a>(
                     let lat = lat1 + (lat2 - lat1) * t;
                     let alt = alt1 + (alt2 - alt1) * t;
                     if let Ok(g) = Geo::new(lon, lat) {
-                        if zone_contains_at(z, &g, alt, None) {
+                        if zone_contains_at(z, &g, alt) {
                             return false;
                         }
                     }
@@ -2997,7 +2994,7 @@ fn make_segment_check<'a>(
                         let lat = lat1 + (lat2 - lat1) * t;
                         let alt = alt1 + (alt2 - alt1) * t;
                         if let Ok(g) = Geo::new(lon, lat) {
-                            if zone_contains_at(z, &g, alt, None) {
+                            if zone_contains_at(z, &g, alt) {
                                 return false;
                             }
                         }
@@ -3011,7 +3008,7 @@ fn make_segment_check<'a>(
                     let lat = lat1 + (lat2 - lat1) * t;
                     let alt = alt1 + (alt2 - alt1) * t;
                     if let Ok(g) = Geo::new(lon, lat) {
-                        if zone_contains_at(z, &g, alt, None) {
+                        if zone_contains_at(z, &g, alt) {
                             return false;
                         }
                     }
@@ -4436,14 +4433,13 @@ fn apply_inflation_and_band(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{HeightSemantics, Input, ZoneType};
+    use crate::config::{Input, ZoneType};
 
     fn parse(s: &str) -> Input {
         Input::from_json_str(s).unwrap()
     }
 
     const BASE: &str = r#"{
-        "schema_version":"0.20",
         "mission":{
             "start":{"lon":115.0,"lat":39.0,"alt_m":3000},
             "target":{"lon":116.5,"lat":39.9,"alt_m":3000},
@@ -4500,7 +4496,6 @@ mod tests {
             shape: ZoneShape::Polygon { vertices },
             alt_min_m: None,
             alt_max_m: None,
-            height_semantics: HeightSemantics::Msl,
         }
     }
 
@@ -4582,7 +4577,6 @@ mod tests {
             },
             alt_min_m: None,
             alt_max_m: None,
-            height_semantics: HeightSemantics::Msl,
         };
         let p = RouterPoint::new(115.02, 39.0, 500.0); // ~2.2km 距圆心 < 10+5.5
         let out = push_out_of_walls(&[p], &[z], 5.0, 0.5);
@@ -4858,14 +4852,13 @@ mod tests {
         // P8 ③ 集成：目标贴禁飞区墙外侧 → 目标 cell 被膨胀墙覆盖（不可达）
         // → 目标半径放宽到墙外可达 cell（degradation 标注），不静默 no_solution。
         let s = r#"{
-            "schema_version":"0.20",
             "mission":{
                 "start":{"lon":115.0,"lat":39.0,"alt_m":3000},
                 "target":{"lon":116.53,"lat":39.9,"alt_m":3000},
                 "terrain":{"source":"none"},
                 "vehicles":[
                     {"id":"v1","profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":250},
-                     "start_pose":{"lon":115.0,"lat":39.0,"alt_m":3000,"heading_deg":45}}
+                     "start_pose":{"lon":115.0,"lat":39.0,"alt_m":3000}}
                 ],
                 "no_fly_zones":[{"id":"nf1","zone_type":"no_fly",
                     "shape":"circle","geometry":{"center":[116.5,39.9],"radius_km":5},
@@ -4901,7 +4894,6 @@ mod tests {
             },
             alt_min_m: None,
             alt_max_m: None,
-            height_semantics: crate::config::HeightSemantics::Msl,
         };
         let rz = Zone {
             id: "rz".into(),
@@ -4912,7 +4904,6 @@ mod tests {
             },
             alt_min_m: Some(2000.0),
             alt_max_m: Some(6000.0),
-            height_semantics: crate::config::HeightSemantics::Msl,
         };
         // raw 从 rz 南侧绕过（距圆心 > 22km，不穿 rz）；直线 p0→p1 从 rz/nf 内穿过
         let seg = crate::path::Path {
@@ -4984,7 +4975,6 @@ mod tests {
             id: "r1".into(),
             lon: 0.0,
             lat: 0.5,
-            radar_type: crate::config::RadarType::Tracking,
             radius_km: 200.0,
             alt_m: 10.0,
             suppression_post_range_km: None,
@@ -5051,14 +5041,13 @@ mod tests {
         // → 粗层 FMM 无解 → 走廊细分（grid 翻倍重建代价场）重试 → 仍无解 →
         // no_solution + degradation 标注（细分触发可观测；不 panic、不假成功）。
         let s = r#"{
-            "schema_version":"0.20",
             "mission":{
                 "start":{"lon":114.5,"lat":38.5,"alt_m":3000},
                 "target":{"lon":116.5,"lat":39.9,"alt_m":3000},
                 "terrain":{"source":"none"},
                 "vehicles":[
                     {"id":"v1","profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":250},
-                     "start_pose":{"lon":114.5,"lat":38.5,"alt_m":3000,"heading_deg":45}}
+                     "start_pose":{"lon":114.5,"lat":38.5,"alt_m":3000}}
                 ],
                 "no_fly_zones":[
                     {"id":"south","zone_type":"no_fly","shape":"polygon",
@@ -5172,7 +5161,6 @@ mod tests {
     fn m1_no_solution_when_target_blocked() {
         // 目标被巨型禁飞区完全覆盖 → 回溯失败 → no_solution
         let s = r#"{
-            "schema_version":"0.20",
             "mission":{
                 "start":{"lon":115.0,"lat":39.0,"alt_m":3000},
                 "target":{"lon":116.5,"lat":39.9,"alt_m":3000},
@@ -5193,7 +5181,6 @@ mod tests {
         // FMM 贴膨胀墙走 → Theta* 拉直 clearance 差 ~1 格 → 全链失败回退 362 点锯齿。
         // 5c2 过渡带软罚后必须平滑（≤10 点且无 smoothing_failed）。
         let s = r#"{
-            "schema_version":"0.20",
             "mission":{
                 "start":{"lon":116.7188493150615,"lat":40.20313810412108,"alt_m":3000},
                 "target":{"lon":115.44547741980215,"lat":38.63800678240428,"alt_m":3000},
@@ -5243,7 +5230,6 @@ mod tests {
             },
             alt_min_m: Some(2000.0),
             alt_max_m: Some(5000.0),
-            height_semantics: crate::config::HeightSemantics::Msl,
         };
         let start = Geo::new(116.82168446499925, 40.23810827713887).unwrap();
         let target = Geo::new(115.28680713092322, 39.04668499383146).unwrap();
@@ -5287,7 +5273,6 @@ mod tests {
             },
             alt_min_m: Some(2000.0),
             alt_max_m: Some(5000.0),
-            height_semantics: crate::config::HeightSemantics::Msl,
         };
         let start = Geo::new(116.82168446499925, 40.23810827713887).unwrap();
         let target = Geo::new(115.28680713092322, 39.04668499383146).unwrap();
@@ -5342,7 +5327,6 @@ mod tests {
             },
             alt_min_m: Some(0.0),
             alt_max_m: Some(5000.0),
-            height_semantics: crate::config::HeightSemantics::Msl,
         };
         let start = Geo::new(116.82168446499925, 40.23810827713887).unwrap();
         let target = Geo::new(113.93832638409175, 38.5937625849369).unwrap();
@@ -5365,7 +5349,6 @@ mod tests {
             },
             alt_min_m: Some(2000.0),
             alt_max_m: Some(5000.0),
-            height_semantics: crate::config::HeightSemantics::Msl,
         };
         let start_geo = Geo::new(116.82168446499925, 40.23810827713887).unwrap();
         let target_geo = Geo::new(115.28680713092322, 39.04668499383146).unwrap();
@@ -5451,7 +5434,6 @@ mod tests {
         let mk = |alt: f64| {
             format!(
                 r#"{{
-                    "schema_version":"0.20",
                     "mission":{{
                         "start":{{"lon":116.82168446499925,"lat":40.23810827713887,"alt_m":{alt}}},
                         "target":{{"lon":115.28680713092322,"lat":39.04668499383146,"alt_m":{alt}}},
@@ -5641,7 +5623,6 @@ mod tests {
             },
             alt_min_m: Some(2000.0),
             alt_max_m: Some(6000.0),
-            height_semantics: crate::config::HeightSemantics::Msl,
         };
         let s = Geo::new(117.5633, 38.9892).unwrap();
         let t = Geo::new(115.0644, 41.1679).unwrap();
@@ -5659,7 +5640,6 @@ mod tests {
             shape: z.shape.clone(),
             alt_min_m: Some(0.0),
             alt_max_m: Some(6000.0),
-            height_semantics: crate::config::HeightSemantics::Msl,
         };
         let pass0 = restricted_pass_alt(&z0, 2282.0, None, None, &s, &t, 15.0, None);
         assert_eq!(
@@ -5683,7 +5663,6 @@ mod tests {
         // 三角形挡在 start→target 直线上，巡航 3000m 在区间内 → 底部 1500m 剖面直穿
         //（desc→1500 平飞→climb），不水平绕行、不回退密集锯齿。
         let s = r#"{
-            "schema_version":"0.20",
             "mission":{
                 "start":{"lon":117.56330714245705,"lat":38.98919664864976,"alt_m":3000},
                 "target":{"lon":115.0643644570711,"lat":41.16789261835432,"alt_m":3000},
@@ -5728,7 +5707,6 @@ mod tests {
         // 多边形 restricted [0,6000]msl：底部 -500 负高不可行 → 顶部 6500m 绕飞剖面
         //（多边形内部 6500m 平飞，高于区间上界 6000）。
         let s = r#"{
-            "schema_version":"0.20",
             "mission":{
                 "start":{"lon":117.56330714245705,"lat":38.98919664864976,"alt_m":3000},
                 "target":{"lon":115.0643644570711,"lat":41.16789261835432,"alt_m":3000},
@@ -5761,7 +5739,7 @@ mod tests {
     fn segment_check_geometry_catches_diagonal_polygon_crossing() {
         // 梯形禁飞区（主管 2026-08-06 场景）：直线斜切穿内部（16 点采样会漏——
         // 几何判定必须拒绝）；绕行折线（先下后右）必须放行。
-        use crate::config::{HeightSemantics, ZoneShape, ZoneType};
+        use crate::config::{ZoneShape, ZoneType};
         let z = Zone {
             id: "trap".into(),
             zone_type: ZoneType::NoFly,
@@ -5770,7 +5748,6 @@ mod tests {
             },
             alt_min_m: Some(0.0),
             alt_max_m: Some(12000.0),
-            height_semantics: HeightSemantics::Msl,
         };
         let zones = vec![z];
         let check = make_segment_check(&zones, None, 0.0, None, 0.0);
@@ -5798,7 +5775,7 @@ mod tests {
         // 段-圆相交区间仅 ~0.03 宽（t∈[0.592,0.622]），16 点等距采样可能全在圆外
         // → 旧 check（净距 clr≤1e-9 或等距采样）放行 verify 会拒的穿区段。
         // 修复：check 与 verify 同口径（解析二次方程 + [t1,t2] 区间内采样）。
-        use crate::config::{HeightSemantics, ZoneShape, ZoneType};
+        use crate::config::{ZoneShape, ZoneType};
         let z = Zone {
             id: "rz".into(),
             zone_type: ZoneType::Restricted,
@@ -5808,7 +5785,6 @@ mod tests {
             },
             alt_min_m: Some(0.0),
             alt_max_m: Some(5000.0),
-            height_semantics: HeightSemantics::Msl,
         };
         let zones = vec![z];
         let check = make_segment_check(&zones, None, 0.0, None, 0.0);
@@ -5840,7 +5816,6 @@ mod tests {
     fn m1_detours_around_zone() {
         // 挡路禁飞区（圆心在中点）→ 路径绕行（折线长度 > 直线）
         let s = r#"{
-            "schema_version":"0.20",
             "mission":{
                 "start":{"lon":115.0,"lat":39.0,"alt_m":3000},
                 "target":{"lon":116.5,"lat":39.9,"alt_m":3000},
@@ -5862,7 +5837,6 @@ mod tests {
     fn m2_restricted_band_does_not_wall() {
         // Restricted 高度层 [0, 2000]m：巡航 3000m 在区间外 → 可穿越（直达，不绕行）
         let s = r#"{
-            "schema_version":"0.20",
             "mission":{
                 "start":{"lon":115.0,"lat":39.0,"alt_m":3000},
                 "target":{"lon":116.5,"lat":39.9,"alt_m":3000},
@@ -5884,7 +5858,6 @@ mod tests {
     fn m2_nofly_wall_blocks_regardless_of_altitude() {
         // NoFly 同位置：全高度墙 → 绕行（距离显著大于直线）
         let s = r#"{
-            "schema_version":"0.20",
             "mission":{
                 "start":{"lon":115.0,"lat":39.0,"alt_m":3000},
                 "target":{"lon":116.5,"lat":39.9,"alt_m":3000},
@@ -5907,12 +5880,11 @@ mod tests {
         // （中心 ×6）→ FMM 明确绕行躲避（主管 2026-08-05：探测概率应明显影响航路规划）。
         // 绕行后最近点应完全绕出有效半径（48km），累计探测概率应低于阈值。
         let big = r#"{
-            "schema_version":"0.20",
             "mission":{
                 "start":{"lon":115.0,"lat":39.0,"alt_m":3000},
                 "target":{"lon":116.5,"lat":39.9,"alt_m":3000},
                 "terrain":{"source":"none"},
-                "red_forces":{"radars":[{"id":"r1","lon":115.75,"lat":39.45,"radar_type":"tracking","radius_km":40}]}
+                "red_forces":{"radars":[{"id":"r1","lon":115.75,"lat":39.45,"radius_km":40}]}
             }
         }"#;
         let out = solve(&parse(big), &SolveParams::default(), 0).unwrap();
@@ -5944,7 +5916,6 @@ mod tests {
         // P6-B（docs/07 §5 3s 预算硬护栏）：预算=1ms（solve 前场构建即超）→
         // 无候选 → Err(DegradedTimeout) → 顶层 status=degraded_timeout。
         let s = r#"{
-            "schema_version":"0.20",
             "mission":{
                 "start":{"lon":115.0,"lat":39.0,"alt_m":3000},
                 "target":{"lon":116.5,"lat":39.9,"alt_m":3000},
@@ -5974,12 +5945,11 @@ mod tests {
         // 点本身在雷达探测区内，绕不开）→ 允许拉直；雷达软约束由 verify 记录 P_cross。
         // 本用例：target 在 100km 雷达深区内，start 在深区外 → 路径应平滑（无网格伪影）。
         let s = r#"{
-            "schema_version":"0.20",
             "mission":{
                 "start":{"lon":118.0,"lat":42.0,"alt_m":3000},
                 "target":{"lon":111.26,"lat":43.83,"alt_m":3000},
                 "terrain":{"source":"none"},
-                "red_forces":{"radars":[{"id":"r1","lon":111.0,"lat":44.0,"radar_type":"early_warning","radius_km":100}]}
+                "red_forces":{"radars":[{"id":"r1","lon":111.0,"lat":44.0,"radius_km":100}]}
             }
         }"#;
         let out = solve(&parse(s), &SolveParams::default(), 0).unwrap();
@@ -6005,12 +5975,11 @@ mod tests {
         // 场景 B：小雷达（5km）代价极小 → FMM 微绕（≈直线，<170km）或直穿。
         // 微绕时探测概率≈0 可不报告；直穿时必须报告。A2 未标定（见上）。
         let small = r#"{
-            "schema_version":"0.20",
             "mission":{
                 "start":{"lon":115.0,"lat":39.0,"alt_m":3000},
                 "target":{"lon":116.5,"lat":39.9,"alt_m":3000},
                 "terrain":{"source":"none"},
-                "red_forces":{"radars":[{"id":"r1","lon":115.75,"lat":39.45,"radar_type":"tracking","radius_km":5}]}
+                "red_forces":{"radars":[{"id":"r1","lon":115.75,"lat":39.45,"radius_km":5}]}
             }
         }"#;
         let out = solve(&parse(small), &SolveParams::default(), 0).unwrap();
@@ -6036,14 +6005,13 @@ mod tests {
     fn m5_mid_waypoint_passes_through() {
         // 单机 mid_waypoints：路径应经过必经点附近（分段 FMM 拼接 + 段端点保留）
         let s = r#"{
-            "schema_version":"0.20",
             "mission":{
                 "start":{"lon":115.0,"lat":39.0,"alt_m":3000},
                 "target":{"lon":116.5,"lat":39.9,"alt_m":3000},
                 "terrain":{"source":"none"},
                 "vehicles":[
                     {"id":"uav1","profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":250},
-                     "start_pose":{"lon":115.0,"lat":39.0,"alt_m":3000,"heading_deg":45},
+                     "start_pose":{"lon":115.0,"lat":39.0,"alt_m":3000},
                      "mid_waypoints":[{"lon":115.3,"lat":39.8,"alt_m":3000}]}
                 ]
             }
@@ -6078,17 +6046,16 @@ mod tests {
     fn m5_per_vehicle_independent_waypoints() {
         // 多机各自 mid_waypoints（主管拍板：每机独立序列）
         let s = r#"{
-            "schema_version":"0.20",
             "mission":{
                 "start":{"lon":115.0,"lat":39.0,"alt_m":3000},
                 "target":{"lon":116.5,"lat":39.9,"alt_m":3000},
                 "terrain":{"source":"none"},
                 "vehicles":[
                     {"id":"uav1","profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":250},
-                     "start_pose":{"lon":115.0,"lat":39.0,"alt_m":3000,"heading_deg":45},
+                     "start_pose":{"lon":115.0,"lat":39.0,"alt_m":3000},
                      "mid_waypoints":[{"lon":115.3,"lat":39.8,"alt_m":3000}]},
                     {"id":"uav2","profile":{"aircraft_type":"ROTORCRAFT","cruise_speed_mps":60},
-                     "start_pose":{"lon":115.2,"lat":39.1,"alt_m":2000,"heading_deg":90},
+                     "start_pose":{"lon":115.2,"lat":39.1,"alt_m":2000},
                      "mid_waypoints":[{"lon":116.1,"lat":39.2,"alt_m":2000}]}
                 ]
             }
@@ -6124,14 +6091,13 @@ mod tests {
     fn m5_multiple_mid_waypoints_sequence() {
         // 多个必经点顺序经过（三段时间拼接）
         let s = r#"{
-            "schema_version":"0.20",
             "mission":{
                 "start":{"lon":115.0,"lat":39.0,"alt_m":3000},
                 "target":{"lon":116.5,"lat":39.9,"alt_m":3000},
                 "terrain":{"source":"none"},
                 "vehicles":[
                     {"id":"uav1","profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":250},
-                     "start_pose":{"lon":115.0,"lat":39.0,"alt_m":3000,"heading_deg":45},
+                     "start_pose":{"lon":115.0,"lat":39.0,"alt_m":3000},
                      "mid_waypoints":[
                         {"lon":115.3,"lat":39.8,"alt_m":3000},
                         {"lon":116.0,"lat":39.7,"alt_m":3000}
@@ -6160,16 +6126,15 @@ mod tests {
     #[test]
     fn m1_multi_vehicle() {
         let s = r#"{
-            "schema_version":"0.20",
             "mission":{
                 "start":{"lon":115.0,"lat":39.0,"alt_m":3000},
                 "target":{"lon":116.5,"lat":39.9,"alt_m":3000},
                 "terrain":{"source":"none"},
                 "vehicles":[
                     {"id":"uav1","profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":100},
-                     "start_pose":{"lon":115.0,"lat":39.0,"alt_m":3000,"heading_deg":45}},
+                     "start_pose":{"lon":115.0,"lat":39.0,"alt_m":3000}},
                     {"id":"uav2","profile":{"aircraft_type":"ROTORCRAFT","cruise_speed_mps":50},
-                     "start_pose":{"lon":115.5,"lat":39.2,"alt_m":2000,"heading_deg":90}}
+                     "start_pose":{"lon":115.5,"lat":39.2,"alt_m":2000}}
                 ]
             }
         }"#;
@@ -6200,17 +6165,16 @@ mod tests {
         // 坐标 → 每机路径终点 = 各自 target；缺省 / "mission.target" → mission.target；
         // 未识别引用 → InputInvalid。
         let s = r#"{
-            "schema_version":"0.20",
             "mission":{
                 "start":{"lon":115.0,"lat":39.0,"alt_m":3000},
                 "target":{"lon":116.5,"lat":39.9,"alt_m":3000},
                 "terrain":{"source":"none"},
                 "vehicles":[
                     {"id":"v1","profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":100},
-                     "start_pose":{"lon":115.0,"lat":39.0,"alt_m":3000,"heading_deg":45},
+                     "start_pose":{"lon":115.0,"lat":39.0,"alt_m":3000},
                      "target_ref":"117.0,40.2,3000"},
                     {"id":"v2","profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":100},
-                     "start_pose":{"lon":115.5,"lat":39.5,"alt_m":3000,"heading_deg":45},
+                     "start_pose":{"lon":115.5,"lat":39.5,"alt_m":3000},
                      "target_ref":"mission.target"}
                 ]
             }
@@ -6265,26 +6229,25 @@ mod tests {
             return;
         }
         let s = r#"{
-            "schema_version":"0.20",
             "mission":{
                 "start":{"lon":126.56263413053458,"lat":30.32884201287228,"alt_m":3000},
                 "target":{"lon":106.37660123285819,"lat":51.14912421163358,"alt_m":3000},
                 "vehicles":[{"id":"v1","profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":250,
                     "min_turn_radius_m":442,"max_climb_angle_deg":15},
-                    "start_pose":{"lon":126.56263413053458,"lat":30.32884201287228,"alt_m":3000,"heading_deg":45},
+                    "start_pose":{"lon":126.56263413053458,"lat":30.32884201287228,"alt_m":3000},
                     "mid_waypoints":[]}],
                 "red_forces":{"radars":[
-                    {"id":"radar_1786151025411","lon":113.98758157631866,"lat":40.493383922561435,"radar_type":"early_warning","radius_km":100,"alt_m":10},
-                    {"id":"radar_1786151487443","lon":109.16900472287948,"lat":46.82742249911229,"radar_type":"tracking","radius_km":100,"alt_m":10}]},
+                    {"id":"radar_1786151025411","lon":113.98758157631866,"lat":40.493383922561435,"radius_km":100,"alt_m":10},
+                    {"id":"radar_1786151487443","lon":109.16900472287948,"lat":46.82742249911229,"radius_km":100,"alt_m":10}]},
                 "no_fly_zones":[
-                    {"id":"zone_1786150842284","zone_type":"no_fly","shape":"polygon","geometry":{"vertices":[[114.40468979438141,42.65722021983792],[110.62088557896168,38.988188308928834],[112.81262578575785,39.7164462210201]]},"alt_min_m":0,"alt_max_m":12000,"height_semantics":"msl"},
-                    {"id":"zone_1786150865059","zone_type":"no_fly","shape":"polygon","geometry":{"vertices":[[118.0683305776591,44.76739249108195],[114.57960742739121,41.61506064153377],[117.27464739502655,42.648718862161275]]},"alt_min_m":0,"alt_max_m":12000,"height_semantics":"msl"},
-                    {"id":"zone_1786150891051","zone_type":"no_fly","shape":"polygon","geometry":{"vertices":[[117.0676237684419,46.341013239879814],[113.7376472130683,43.26605614623792],[116.16387600630392,43.34838640726238]]},"alt_min_m":0,"alt_max_m":12000,"height_semantics":"msl"},
-                    {"id":"zone_1786151204171","zone_type":"no_fly","shape":"circle","geometry":{"center":[111.525601573293,45.97116185501782],"radius_km":50},"alt_min_m":0,"alt_max_m":12000,"height_semantics":"msl"},
-                    {"id":"zone_1786151327667","zone_type":"no_fly","shape":"circle","geometry":{"center":[107.23020272260999,49.498587971424286],"radius_km":100},"alt_min_m":0,"alt_max_m":12000,"height_semantics":"msl"}],
+                    {"id":"zone_1786150842284","zone_type":"no_fly","shape":"polygon","geometry":{"vertices":[[114.40468979438141,42.65722021983792],[110.62088557896168,38.988188308928834],[112.81262578575785,39.7164462210201]]},"alt_min_m":0,"alt_max_m":12000},
+                    {"id":"zone_1786150865059","zone_type":"no_fly","shape":"polygon","geometry":{"vertices":[[118.0683305776591,44.76739249108195],[114.57960742739121,41.61506064153377],[117.27464739502655,42.648718862161275]]},"alt_min_m":0,"alt_max_m":12000},
+                    {"id":"zone_1786150891051","zone_type":"no_fly","shape":"polygon","geometry":{"vertices":[[117.0676237684419,46.341013239879814],[113.7376472130683,43.26605614623792],[116.16387600630392,43.34838640726238]]},"alt_min_m":0,"alt_max_m":12000},
+                    {"id":"zone_1786151204171","zone_type":"no_fly","shape":"circle","geometry":{"center":[111.525601573293,45.97116185501782],"radius_km":50},"alt_min_m":0,"alt_max_m":12000},
+                    {"id":"zone_1786151327667","zone_type":"no_fly","shape":"circle","geometry":{"center":[107.23020272260999,49.498587971424286],"radius_km":100},"alt_min_m":0,"alt_max_m":12000}],
                 "restricted_zones":[
-                    {"id":"rz_1786150991459","zone_type":"restricted","shape":"circle","geometry":{"center":[115.86408593793746,40.956574434371106],"radius_km":100},"alt_min_m":0,"alt_max_m":6000,"height_semantics":"msl"},
-                    {"id":"rz_1786151584275","zone_type":"restricted","shape":"circle","geometry":{"center":[113.31470106587476,42.70043214171731],"radius_km":100},"alt_min_m":2000,"alt_max_m":8000,"height_semantics":"msl"}],
+                    {"id":"rz_1786150991459","zone_type":"restricted","shape":"circle","geometry":{"center":[115.86408593793746,40.956574434371106],"radius_km":100},"alt_min_m":0,"alt_max_m":6000},
+                    {"id":"rz_1786151584275","zone_type":"restricted","shape":"circle","geometry":{"center":[113.31470106587476,42.70043214171731],"radius_km":100},"alt_min_m":2000,"alt_max_m":8000}],
                 "obstacles":[],
                 "terrain":{"source":"path","path":"__P__"},
                 "parameters":{"p_cross":0.9}
@@ -6338,24 +6301,23 @@ mod tests {
             return;
         }
         let s = r#"{
-            "schema_version":"0.20",
             "mission":{
                 "start":{"lon":122.9207839850354,"lat":34.08860812240517,"alt_m":3000},
                 "target":{"lon":112.42397536890363,"lat":44.77935701405758,"alt_m":3000},
                 "vehicles":[{"id":"v1","profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":250,
                     "min_turn_radius_m":442,"max_climb_angle_deg":15},
-                    "start_pose":{"lon":122.9207839850354,"lat":34.08860812240517,"alt_m":3000,"heading_deg":45},
+                    "start_pose":{"lon":122.9207839850354,"lat":34.08860812240517,"alt_m":3000},
                     "mid_waypoints":[]}],
                 "red_forces":{"radars":[
-                    {"id":"radar_1786161064845","lon":112.831513368294,"lat":43.96813072477223,"radar_type":"early_warning","radius_km":50,"alt_m":10},
-                    {"id":"radar_1786161114205","lon":113.3041431982615,"lat":41.11010411517771,"radar_type":"tracking","radius_km":50,"alt_m":10}]},
+                    {"id":"radar_1786161064845","lon":112.831513368294,"lat":43.96813072477223,"radius_km":50,"alt_m":10},
+                    {"id":"radar_1786161114205","lon":113.3041431982615,"lat":41.11010411517771,"radius_km":50,"alt_m":10}]},
                 "no_fly_zones":[
-                    {"id":"zone_1786160882933","zone_type":"no_fly","shape":"polygon","geometry":{"vertices":[[115.8706565717089,39.78344941000123],[114.7159667887149,38.93519569445941],[115.2867088987491,39.07797084088842]]},"alt_min_m":0,"alt_max_m":12000,"height_semantics":"msl"},
-                    {"id":"zone_1786160896845","zone_type":"no_fly","shape":"polygon","geometry":{"vertices":[[118.18296859187262,39.84855590795146],[116.61186105129381,38.74876499516125],[117.56074185629024,38.71484400273334]]},"alt_min_m":0,"alt_max_m":12000,"height_semantics":"msl"},
-                    {"id":"zone_1786160926653","zone_type":"no_fly","shape":"polygon","geometry":{"vertices":[[115.2637148745787,42.16339247467029],[113.72404261848064,41.18665997544362],[114.42958291361323,41.129943488801175],[115.10906620487548,41.58646379784794]]},"alt_min_m":0,"alt_max_m":12000,"height_semantics":"msl"}],
+                    {"id":"zone_1786160882933","zone_type":"no_fly","shape":"polygon","geometry":{"vertices":[[115.8706565717089,39.78344941000123],[114.7159667887149,38.93519569445941],[115.2867088987491,39.07797084088842]]},"alt_min_m":0,"alt_max_m":12000},
+                    {"id":"zone_1786160896845","zone_type":"no_fly","shape":"polygon","geometry":{"vertices":[[118.18296859187262,39.84855590795146],[116.61186105129381,38.74876499516125],[117.56074185629024,38.71484400273334]]},"alt_min_m":0,"alt_max_m":12000},
+                    {"id":"zone_1786160926653","zone_type":"no_fly","shape":"polygon","geometry":{"vertices":[[115.2637148745787,42.16339247467029],[113.72404261848064,41.18665997544362],[114.42958291361323,41.129943488801175],[115.10906620487548,41.58646379784794]]},"alt_min_m":0,"alt_max_m":12000}],
                 "restricted_zones":[
-                    {"id":"rz_1786160994133","zone_type":"restricted","shape":"circle","geometry":{"center":[115.55242377844469,39.53680791293585],"radius_km":50},"alt_min_m":1000,"alt_max_m":4000,"height_semantics":"msl"},
-                    {"id":"rz_1786161169725","zone_type":"restricted","shape":"circle","geometry":{"center":[116.3037514968375,38.447119717716134],"radius_km":100},"alt_min_m":500,"alt_max_m":4500,"height_semantics":"msl"}],
+                    {"id":"rz_1786160994133","zone_type":"restricted","shape":"circle","geometry":{"center":[115.55242377844469,39.53680791293585],"radius_km":50},"alt_min_m":1000,"alt_max_m":4000},
+                    {"id":"rz_1786161169725","zone_type":"restricted","shape":"circle","geometry":{"center":[116.3037514968375,38.447119717716134],"radius_km":100},"alt_min_m":500,"alt_max_m":4500}],
                 "obstacles":[],
                 "terrain":{"source":"path","path":"__P__"},
                 "parameters":{"p_cross":0.9}
@@ -6428,24 +6390,23 @@ mod tests {
             return;
         }
         let s = r#"{
-            "schema_version":"0.20",
             "mission":{
                 "start":{"lon":122.9207839850354,"lat":34.08860812240517,"alt_m":3000},
                 "target":{"lon":112.42397536890363,"lat":44.77935701405758,"alt_m":3000},
                 "vehicles":[{"id":"v1","profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":250,
                     "min_turn_radius_m":442,"max_climb_angle_deg":15},
-                    "start_pose":{"lon":122.9207839850354,"lat":34.08860812240517,"alt_m":3000,"heading_deg":45},
+                    "start_pose":{"lon":122.9207839850354,"lat":34.08860812240517,"alt_m":3000},
                     "mid_waypoints":[]}],
                 "red_forces":{"radars":[
-                    {"id":"radar_1786161064845","lon":112.831513368294,"lat":43.96813072477223,"radar_type":"early_warning","radius_km":50,"alt_m":10},
-                    {"id":"radar_1786161114205","lon":113.3041431982615,"lat":41.11010411517771,"radar_type":"tracking","radius_km":50,"alt_m":10}]},
+                    {"id":"radar_1786161064845","lon":112.831513368294,"lat":43.96813072477223,"radius_km":50,"alt_m":10},
+                    {"id":"radar_1786161114205","lon":113.3041431982615,"lat":41.11010411517771,"radius_km":50,"alt_m":10}]},
                 "no_fly_zones":[
-                    {"id":"zone_1786160882933","zone_type":"no_fly","shape":"polygon","geometry":{"vertices":[[115.8706565717089,39.78344941000123],[114.7159667887149,38.93519569445941],[115.2867088987491,39.07797084088842]]},"alt_min_m":0,"alt_max_m":12000,"height_semantics":"msl"},
-                    {"id":"zone_1786160896845","zone_type":"no_fly","shape":"polygon","geometry":{"vertices":[[118.18296859187262,39.84855590795146],[116.61186105129381,38.74876499516125],[117.56074185629024,38.71484400273334]]},"alt_min_m":0,"alt_max_m":12000,"height_semantics":"msl"},
-                    {"id":"zone_1786160926653","zone_type":"no_fly","shape":"polygon","geometry":{"vertices":[[115.2637148745787,42.16339247467029],[113.72404261848064,41.18665997544362],[114.42958291361323,41.129943488801175],[115.10906620487548,41.58646379784794]]},"alt_min_m":0,"alt_max_m":12000,"height_semantics":"msl"}],
+                    {"id":"zone_1786160882933","zone_type":"no_fly","shape":"polygon","geometry":{"vertices":[[115.8706565717089,39.78344941000123],[114.7159667887149,38.93519569445941],[115.2867088987491,39.07797084088842]]},"alt_min_m":0,"alt_max_m":12000},
+                    {"id":"zone_1786160896845","zone_type":"no_fly","shape":"polygon","geometry":{"vertices":[[118.18296859187262,39.84855590795146],[116.61186105129381,38.74876499516125],[117.56074185629024,38.71484400273334]]},"alt_min_m":0,"alt_max_m":12000},
+                    {"id":"zone_1786160926653","zone_type":"no_fly","shape":"polygon","geometry":{"vertices":[[115.2637148745787,42.16339247467029],[113.72404261848064,41.18665997544362],[114.42958291361323,41.129943488801175],[115.10906620487548,41.58646379784794]]},"alt_min_m":0,"alt_max_m":12000}],
                 "restricted_zones":[
-                    {"id":"rz_1786160994133","zone_type":"restricted","shape":"circle","geometry":{"center":[115.55242377844469,39.53680791293585],"radius_km":50},"alt_min_m":1000,"alt_max_m":4000,"height_semantics":"msl"},
-                    {"id":"rz_1786161169725","zone_type":"restricted","shape":"circle","geometry":{"center":[116.04433455541918,38.19552566014898],"radius_km":100},"alt_min_m":500,"alt_max_m":4500,"height_semantics":"msl"}],
+                    {"id":"rz_1786160994133","zone_type":"restricted","shape":"circle","geometry":{"center":[115.55242377844469,39.53680791293585],"radius_km":50},"alt_min_m":1000,"alt_max_m":4000},
+                    {"id":"rz_1786161169725","zone_type":"restricted","shape":"circle","geometry":{"center":[116.04433455541918,38.19552566014898],"radius_km":100},"alt_min_m":500,"alt_max_m":4500}],
                 "obstacles":[],
                 "terrain":{"source":"path","path":"__P__"},
                 "parameters":{"p_cross":0.9}
@@ -6516,22 +6477,21 @@ mod tests {
             return;
         }
         let s = r#"{
-            "schema_version":"0.20",
             "mission":{
                 "start":{"lon":115.9,"lat":39.8,"alt_m":3000},
                 "target":{"lon":116.8,"lat":40.3,"alt_m":3000},
                 "vehicles":[
                     {"id":"v1","profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":250,"min_turn_radius_m":442,"max_climb_angle_deg":15},
-                     "start_pose":{"lon":117.5708068837583,"lat":38.97929027731468,"alt_m":3000,"heading_deg":45},
+                     "start_pose":{"lon":117.5708068837583,"lat":38.97929027731468,"alt_m":3000},
                      "mid_waypoints":[],"target_ref":"114.62855523087296,41.481418330201244,3000"},
                     {"id":"v2","profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":250,"min_turn_radius_m":442,"max_climb_angle_deg":15},
-                     "start_pose":{"lon":116.55201554900877,"lat":38.54836682471938,"alt_m":1000,"heading_deg":45},
+                     "start_pose":{"lon":116.55201554900877,"lat":38.54836682471938,"alt_m":1000},
                      "mid_waypoints":[],"target_ref":"116.06634800292873,42.00165253451988,1500"}],
                 "red_forces":{"radars":[]},
                 "no_fly_zones":[
-                    {"id":"zone_1786326750206","zone_type":"no_fly","shape":"polygon","geometry":{"vertices":[[116.29703178143244,40.659872167707796],[115.20946822222263,39.507896098494335],[115.73653221684515,39.54513536978776]]},"alt_min_m":0,"alt_max_m":12000,"height_semantics":"msl"}],
+                    {"id":"zone_1786326750206","zone_type":"no_fly","shape":"polygon","geometry":{"vertices":[[116.29703178143244,40.659872167707796],[115.20946822222263,39.507896098494335],[115.73653221684515,39.54513536978776]]},"alt_min_m":0,"alt_max_m":12000}],
                 "restricted_zones":[
-                    {"id":"rz_1786326782863","zone_type":"restricted","shape":"circle","geometry":{"center":[116.60669517425168,39.793491838843366],"radius_km":40},"alt_min_m":2000,"alt_max_m":6000,"height_semantics":"msl"}],
+                    {"id":"rz_1786326782863","zone_type":"restricted","shape":"circle","geometry":{"center":[116.60669517425168,39.793491838843366],"radius_km":40},"alt_min_m":2000,"alt_max_m":6000}],
                 "obstacles":[],
                 "terrain":{"source":"path","path":"__P__"},
                 "parameters":{}
@@ -6602,13 +6562,12 @@ mod tests {
             return;
         }
         let s = r#"{
-            "schema_version":"0.20",
             "mission":{
                 "start":{"lon":115.9,"lat":39.8,"alt_m":3000},
                 "target":{"lon":116.8,"lat":40.3,"alt_m":3000},
                 "vehicles":[
                     {"id":"v1","profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":250,"min_turn_radius_m":442,"max_climb_angle_deg":15},
-                     "start_pose":{"lon":117.57051750925365,"lat":38.9816070217835,"alt_m":500,"heading_deg":45},
+                     "start_pose":{"lon":117.57051750925365,"lat":38.9816070217835,"alt_m":500},
                      "mid_waypoints":[],"target_ref":"115.46093981532285,40.8762471499978,2000"}],
                 "red_forces":{"radars":[]},
                 "no_fly_zones":[],"restricted_zones":[],"obstacles":[],
@@ -6704,13 +6663,12 @@ mod tests {
             return;
         }
         let s = r#"{
-            "schema_version":"0.20",
             "mission":{
                 "start":{"lon":115.9,"lat":39.8,"alt_m":3000},
                 "target":{"lon":116.8,"lat":40.3,"alt_m":3000},
                 "vehicles":[
                     {"id":"v1","profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":250,"min_turn_radius_m":442,"max_climb_angle_deg":15},
-                     "start_pose":{"lon":108.80355022508975,"lat":34.36335179705683,"alt_m":500,"heading_deg":45},
+                     "start_pose":{"lon":108.80355022508975,"lat":34.36335179705683,"alt_m":500},
                      "mid_waypoints":[],"target_ref":"114.60616311030468,35.47949267040714,500"}],
                 "red_forces":{"radars":[]},
                 "no_fly_zones":[],"restricted_zones":[],"obstacles":[],
@@ -6798,13 +6756,12 @@ mod tests {
             return;
         }
         let s = r#"{
-            "schema_version":"0.20",
             "mission":{
                 "start":{"lon":115.9,"lat":39.8,"alt_m":3000},
                 "target":{"lon":116.8,"lat":40.3,"alt_m":3000},
                 "vehicles":[
                     {"id":"v1","profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":250,"min_turn_radius_m":442,"max_climb_angle_deg":15},
-                     "start_pose":{"lon":108.5977738058285,"lat":34.41492692430844,"alt_m":509.46948220662387,"heading_deg":45},
+                     "start_pose":{"lon":108.5977738058285,"lat":34.41492692430844,"alt_m":509.46948220662387},
                      "mid_waypoints":[{"lon":110.81014859597492,"lat":34.6052448050566,"alt_m":600}],
                      "target_ref":"114.60995162291289,35.076567074698545,500"}],
                 "red_forces":{"radars":[]},
@@ -6958,21 +6915,20 @@ mod tests {
             return;
         }
         let s = r#"{
-            "schema_version":"0.20",
             "mission":{
                 "start":{"lon":115.9,"lat":39.8,"alt_m":3000},
                 "target":{"lon":116.8,"lat":40.3,"alt_m":3000},
                 "vehicles":[
                     {"id":"v1","profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":250,"min_turn_radius_m":442,"max_climb_angle_deg":15},
-                     "start_pose":{"lon":116.92977366719182,"lat":40.4410563361943,"alt_m":300,"heading_deg":45},
+                     "start_pose":{"lon":116.92977366719182,"lat":40.4410563361943,"alt_m":300},
                      "mid_waypoints":[{"lon":116.5031580680477,"lat":39.61768508544036,"alt_m":300}],
                      "target_ref":"115.49957776796042,39.577093261324855,3000"},
                     {"id":"v2","profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":250,"min_turn_radius_m":442,"max_climb_angle_deg":15},
-                     "start_pose":{"lon":116.63273135458661,"lat":40.66380307890914,"alt_m":300,"heading_deg":45},
+                     "start_pose":{"lon":116.63273135458661,"lat":40.66380307890914,"alt_m":300},
                      "mid_waypoints":[{"lon":116.44919168873186,"lat":39.56474547305474,"alt_m":300}],
                      "target_ref":"115.49957776796042,39.577093261324855,3000"}],
                 "red_forces":{"radars":[
-                    {"id":"radar_1786332337392","lon":116.76131203011676,"lat":39.93279959421326,"radar_type":"tracking","radius_km":50,"alt_m":10}]},
+                    {"id":"radar_1786332337392","lon":116.76131203011676,"lat":39.93279959421326,"radius_km":50,"alt_m":10}]},
                 "no_fly_zones":[],
                 "restricted_zones":[],
                 "obstacles":[],
@@ -7030,13 +6986,12 @@ mod tests {
             return;
         }
         let s = r#"{
-            "schema_version":"0.20",
             "mission":{
                 "start":{"lon":115.9,"lat":39.8,"alt_m":3000},
                 "target":{"lon":116.8,"lat":40.3,"alt_m":3000},
                 "vehicles":[
                     {"id":"v1","profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":250,"min_turn_radius_m":442,"max_climb_angle_deg":15},
-                     "start_pose":{"lon":117.57051750925365,"lat":38.9816070217835,"alt_m":500,"heading_deg":45},
+                     "start_pose":{"lon":117.57051750925365,"lat":38.9816070217835,"alt_m":500},
                      "mid_waypoints":[
                         {"lon":117.38220298919144,"lat":39.522437439199145,"alt_m":500},
                         {"lon":116.97334657489195,"lat":39.26884298384281,"alt_m":500},
@@ -7107,13 +7062,12 @@ mod tests {
             return;
         }
         let s = r#"{
-            "schema_version":"0.20",
             "mission":{
                 "start":{"lon":115.9,"lat":39.8,"alt_m":3000},
                 "target":{"lon":116.8,"lat":40.3,"alt_m":3000},
                 "vehicles":[
                     {"id":"v1","profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":250,"min_turn_radius_m":442,"max_climb_angle_deg":15},
-                     "start_pose":{"lon":117.57051750925365,"lat":38.9816070217835,"alt_m":500,"heading_deg":45},
+                     "start_pose":{"lon":117.57051750925365,"lat":38.9816070217835,"alt_m":500},
                      "mid_waypoints":[
                         {"lon":117.5310926755737,"lat":39.36711249439876,"alt_m":500},
                         {"lon":117.27112137218157,"lat":39.56318138239763,"alt_m":500},
@@ -7198,13 +7152,12 @@ mod tests {
             return;
         }
         let s = r#"{
-            "schema_version":"0.20",
             "mission":{
                 "start":{"lon":115.9,"lat":39.8,"alt_m":3000},
                 "target":{"lon":116.8,"lat":40.3,"alt_m":3000},
                 "vehicles":[
                     {"id":"v1","profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":250,"min_turn_radius_m":442,"max_climb_angle_deg":15},
-                     "start_pose":{"lon":117.57051750925365,"lat":38.9816070217835,"alt_m":500,"heading_deg":45},
+                     "start_pose":{"lon":117.57051750925365,"lat":38.9816070217835,"alt_m":500},
                      "mid_waypoints":[
                         {"lon":117.11783474006214,"lat":39.46984164454213,"alt_m":500},
                         {"lon":117.47656872164231,"lat":39.05202611607821,"alt_m":500},
@@ -7314,35 +7267,34 @@ mod tests {
             return;
         }
         let s = r#"{
-            "schema_version":"0.20",
             "mission":{
                 "start":{"lon":115.9,"lat":39.8,"alt_m":3000},
                 "target":{"lon":116.8,"lat":40.3,"alt_m":3000},
                 "vehicles":[
                     {"id":"v1","profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":250,"min_turn_radius_m":442,"max_climb_angle_deg":15},
-                     "start_pose":{"lon":121.32158437921957,"lat":35.345605078916044,"alt_m":1000,"heading_deg":45},
+                     "start_pose":{"lon":121.32158437921957,"lat":35.345605078916044,"alt_m":1000},
                      "mid_waypoints":[
                         {"lon":122.3852641802933,"lat":37.91301080822844,"alt_m":1000},
                         {"lon":118.45106783248693,"lat":36.09407976700374,"alt_m":1000},
                         {"lon":119.64410040053079,"lat":38.42608749463845,"alt_m":1000}],
                      "target_ref":"106.6800083196283,49.891931490296315,3000"},
                     {"id":"v2","profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":500,"min_turn_radius_m":800,"max_climb_angle_deg":15},
-                     "start_pose":{"lon":103.80007749527002,"lat":32.492118851168414,"alt_m":5000,"heading_deg":45},
+                     "start_pose":{"lon":103.80007749527002,"lat":32.492118851168414,"alt_m":5000},
                      "mid_waypoints":[],
                      "target_ref":"124.7360092361736,53.31522760700038,3000"}],
                 "red_forces":{"radars":[
-                    {"id":"radar_1786409721004","lon":113.00786729664442,"lat":46.21627287139257,"radar_type":"early_warning","radius_km":200,"alt_m":10}]},
+                    {"id":"radar_1786409721004","lon":113.00786729664442,"lat":46.21627287139257,"radius_km":200,"alt_m":10}]},
                 "no_fly_zones":[
                     {"id":"zone_1786409515324","zone_type":"no_fly","shape":"polygon",
                      "geometry":{"vertices":[[112.56383008070333,44.4855055439424],[117.93020756431244,40.51747800244875],[110.16677625965431,42.442633787371435]]},
-                     "alt_min_m":0,"alt_max_m":12000,"height_semantics":"msl"}],
+                     "alt_min_m":0,"alt_max_m":12000}],
                 "restricted_zones":[
                     {"id":"rz_1786409547965","zone_type":"restricted","shape":"circle",
                      "geometry":{"center":[106.7843768348038,36.24901461339551],"radius_km":100},
-                     "alt_min_m":3000,"alt_max_m":6000,"height_semantics":"msl"},
+                     "alt_min_m":3000,"alt_max_m":6000},
                     {"id":"rz_1786409606028","zone_type":"restricted","shape":"circle",
                      "geometry":{"center":[112.99788589051144,45.6335833104839],"radius_km":100},
-                     "alt_min_m":2000,"alt_max_m":6000,"height_semantics":"msl"}],
+                     "alt_min_m":2000,"alt_max_m":6000}],
                 "obstacles":[],
                 "terrain":{"source":"path","path":"__P__"},
                 "parameters":{"p_cross":0.9}
@@ -7413,20 +7365,19 @@ mod tests {
             return;
         }
         let s = r#"{
-            "schema_version":"0.20",
             "mission":{
                 "start":{"lon":115.9,"lat":39.8,"alt_m":3000},
                 "target":{"lon":116.8,"lat":40.3,"alt_m":3000},
                 "vehicles":[
                     {"id":"v1","profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":250,"min_turn_radius_m":442,"max_climb_angle_deg":15},
-                     "start_pose":{"lon":121.32158437921957,"lat":35.345605078916044,"alt_m":1000,"heading_deg":45},
+                     "start_pose":{"lon":121.32158437921957,"lat":35.345605078916044,"alt_m":1000},
                      "mid_waypoints":[
                         {"lon":122.3852641802933,"lat":37.91301080822844,"alt_m":1000},
                         {"lon":118.45106783248693,"lat":36.09407976700374,"alt_m":1000},
                         {"lon":119.64410040053079,"lat":38.42608749463845,"alt_m":1000}],
                      "target_ref":"106.6800083196283,49.891931490296315,3000"},
                     {"id":"v2","profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":500,"min_turn_radius_m":800,"max_climb_angle_deg":15},
-                     "start_pose":{"lon":103.80007749527002,"lat":32.492118851168414,"alt_m":5000,"heading_deg":45},
+                     "start_pose":{"lon":103.80007749527002,"lat":32.492118851168414,"alt_m":5000},
                      "mid_waypoints":[
                         {"lon":109.97496463623962,"lat":40.89240709612281,"alt_m":5000},
                         {"lon":105.05176607466912,"lat":45.12560078345386,"alt_m":5000},
@@ -7443,18 +7394,18 @@ mod tests {
                         {"lon":118.23811461480165,"lat":44.09728961713801,"alt_m":5000}],
                      "target_ref":"124.7360092361736,53.31522760700038,3000"}],
                 "red_forces":{"radars":[
-                    {"id":"radar_1786409721004","lon":113.00786729664442,"lat":46.21627287139257,"radar_type":"early_warning","radius_km":200,"alt_m":10}]},
+                    {"id":"radar_1786409721004","lon":113.00786729664442,"lat":46.21627287139257,"radius_km":200,"alt_m":10}]},
                 "no_fly_zones":[
                     {"id":"zone_1786409515324","zone_type":"no_fly","shape":"polygon",
                      "geometry":{"vertices":[[118.17769472280284,40.45820431372051],[107.63203137395895,44.11758744295661],[112.15118325335442,40.40008219131184]]},
-                     "alt_min_m":0,"alt_max_m":12000,"height_semantics":"msl"}],
+                     "alt_min_m":0,"alt_max_m":12000}],
                 "restricted_zones":[
                     {"id":"rz_1786409547965","zone_type":"restricted","shape":"circle",
                      "geometry":{"center":[106.78464665022119,36.00663895579695],"radius_km":100},
-                     "alt_min_m":3000,"alt_max_m":6000,"height_semantics":"msl"},
+                     "alt_min_m":3000,"alt_max_m":6000},
                     {"id":"rz_1786409606028","zone_type":"restricted","shape":"circle",
                      "geometry":{"center":[112.99788589051144,45.6335833104839],"radius_km":100},
-                     "alt_min_m":2000,"alt_max_m":6000,"height_semantics":"msl"}],
+                     "alt_min_m":2000,"alt_max_m":6000}],
                 "obstacles":[],
                 "terrain":{"source":"path","path":"__P__"},
                 "parameters":{"p_cross":0.9}
@@ -7535,24 +7486,23 @@ mod tests {
             return;
         }
         let s = r#"{
-            "schema_version":"0.20",
             "mission":{
                 "start":{"lon":115.9,"lat":39.8,"alt_m":3000},
                 "target":{"lon":116.8,"lat":40.3,"alt_m":3000},
                 "vehicles":[
                     {"id":"v1","profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":250,"min_turn_radius_m":442,"max_climb_angle_deg":15},
-                     "start_pose":{"lon":117.49643196710215,"lat":39.45217964261854,"alt_m":3000,"heading_deg":45},
+                     "start_pose":{"lon":117.49643196710215,"lat":39.45217964261854,"alt_m":3000},
                      "mid_waypoints":[{"lon":116.92011401843381,"lat":40.280864859008126,"alt_m":3000}],
                      "target_ref":"115.41519624070744,41.063105449335495,3000"}],
                 "red_forces":{"radars":[]},
                 "no_fly_zones":[
                     {"id":"zone_1786418099258","zone_type":"no_fly","shape":"polygon",
                      "geometry":{"vertices":[[116.74744508792169,40.54250033772123],[116.04051071102833,39.87068759296977],[116.58825219982235,40.13334649202884]]},
-                     "alt_min_m":0,"alt_max_m":12000,"height_semantics":"msl"}],
+                     "alt_min_m":0,"alt_max_m":12000}],
                 "restricted_zones":[
                     {"id":"rz_1786418172746","zone_type":"restricted","shape":"circle",
                      "geometry":{"center":[116.86855354211916,40.0244769648816],"radius_km":20},
-                     "alt_min_m":1000,"alt_max_m":6000,"height_semantics":"msl"}],
+                     "alt_min_m":1000,"alt_max_m":6000}],
                 "obstacles":[],
                 "terrain":{"source":"path","path":"__P__"},
                 "parameters":{}
@@ -7603,24 +7553,23 @@ mod tests {
             return;
         }
         let s = r#"{
-            "schema_version":"0.20",
             "mission":{
                 "start":{"lon":115.9,"lat":39.8,"alt_m":3000},
                 "target":{"lon":116.8,"lat":40.3,"alt_m":3000},
                 "vehicles":[
                     {"id":"v1","profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":250,"min_turn_radius_m":442,"max_climb_angle_deg":15},
-                     "start_pose":{"lon":117.49643196710215,"lat":39.45217964261854,"alt_m":3000,"heading_deg":45},
+                     "start_pose":{"lon":117.49643196710215,"lat":39.45217964261854,"alt_m":3000},
                      "mid_waypoints":[{"lon":116.04302827980699,"lat":40.30245861424856,"alt_m":3000},{"lon":116.87502139486968,"lat":40.43880896740148,"alt_m":3000}],
                      "target_ref":"115.41519624070744,41.063105449335495,3000"}],
                 "red_forces":{"radars":[]},
                 "no_fly_zones":[
                     {"id":"zone_1786418099258","zone_type":"no_fly","shape":"polygon",
                      "geometry":{"vertices":[[116.74744508792169,40.54250033772123],[116.04051071102833,39.87068759296977],[116.58825219982235,40.13334649202884]]},
-                     "alt_min_m":0,"alt_max_m":12000,"height_semantics":"msl"}],
+                     "alt_min_m":0,"alt_max_m":12000}],
                 "restricted_zones":[
                     {"id":"rz_1786418172746","zone_type":"restricted","shape":"circle",
                      "geometry":{"center":[116.87035584365995,40.01756770083293],"radius_km":20},
-                     "alt_min_m":1000,"alt_max_m":6000,"height_semantics":"msl"}],
+                     "alt_min_m":1000,"alt_max_m":6000}],
                 "obstacles":[],
                 "terrain":{"source":"path","path":"__P__"},
                 "parameters":{}
@@ -7674,26 +7623,25 @@ mod tests {
             return;
         }
         let s = r#"{
-            "schema_version":"0.20",
             "mission":{
                 "start":{"lon":115.9,"lat":39.8,"alt_m":3000},
                 "target":{"lon":116.8,"lat":40.3,"alt_m":3000},
                 "vehicles":[
                     {"id":"v1","profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":250,"min_turn_radius_m":442,"max_climb_angle_deg":15},
-                     "start_pose":{"lon":117.49643196710215,"lat":39.45217964261854,"alt_m":3000,"heading_deg":45},
+                     "start_pose":{"lon":117.49643196710215,"lat":39.45217964261854,"alt_m":3000},
                      "mid_waypoints":[{"lon":116.30222159303027,"lat":40.52501663038863,"alt_m":3000},{"lon":116.5195046089279,"lat":40.00372676035467,"alt_m":3000}],
                      "target_ref":"115.41519624070744,41.063105449335495,3000"}],
                 "red_forces":{"radars":[
-                    {"id":"radar_1786430183478","lon":116.10054207161798,"lat":39.893963015168175,"radar_type":"early_warning","radius_km":50,"alt_m":10}
+                    {"id":"radar_1786430183478","lon":116.10054207161798,"lat":39.893963015168175,"radius_km":50,"alt_m":10}
                 ]},
                 "no_fly_zones":[
                     {"id":"zone_1786418099258","zone_type":"no_fly","shape":"polygon",
                      "geometry":{"vertices":[[116.13619653711649,40.07186918292957],[116.91994987492495,40.58747146826297],[116.5682729278144,40.19722929127514]]},
-                     "alt_min_m":0,"alt_max_m":12000,"height_semantics":"msl"}],
+                     "alt_min_m":0,"alt_max_m":12000}],
                 "restricted_zones":[
                     {"id":"rz_1786418172746","zone_type":"restricted","shape":"circle",
                      "geometry":{"center":[116.87035584365995,40.01756770083293],"radius_km":20},
-                     "alt_min_m":1000,"alt_max_m":6000,"height_semantics":"msl"}],
+                     "alt_min_m":1000,"alt_max_m":6000}],
                 "obstacles":[],
                 "terrain":{"source":"path","path":"__P__"},
                 "parameters":{"p_cross":0.9}
@@ -7743,7 +7691,6 @@ mod tests {
             return;
         }
         let s = r#"{
-            "schema_version":"0.20",
             "mission":{
                 "start":{"lon":152.0,"lat":35.0,"alt_m":3000},
                 "target":{"lon":116.5,"lat":39.8,"alt_m":3000},
@@ -7780,13 +7727,12 @@ mod tests {
         // 替代穿禁飞方块被拒 → 不得再回退 raw 交付（旧行为 status=planned +
         // 密集网格楼梯），必须明确 no_solution + 保留失败原因。
         let s = r#"{
-            "schema_version":"0.20",
             "mission":{
                 "start":{"lon":115.9,"lat":39.8,"alt_m":3000},
                 "target":{"lon":116.8,"lat":40.3,"alt_m":3000},
                 "vehicles":[
                     {"id":"v1","profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":250,"min_turn_radius_m":100000,"max_climb_angle_deg":15},
-                     "start_pose":{"lon":115.0,"lat":39.0,"alt_m":3000,"heading_deg":90},
+                     "start_pose":{"lon":115.0,"lat":39.0,"alt_m":3000},
                      "mid_waypoints":[
                         {"lon":116.0,"lat":39.0,"alt_m":3000},
                         {"lon":116.0,"lat":39.5,"alt_m":3000},
@@ -7797,7 +7743,7 @@ mod tests {
                 "no_fly_zones":[
                     {"id":"wall","zone_type":"no_fly","shape":"polygon",
                      "geometry":{"vertices":[[116.2,39.25],[116.8,39.25],[116.8,39.75],[116.2,39.75]]},
-                     "alt_min_m":0,"alt_max_m":12000,"height_semantics":"msl"}],
+                     "alt_min_m":0,"alt_max_m":12000}],
                 "restricted_zones":[],"obstacles":[],
                 "terrain":{"source":"none"}
             }
@@ -7827,13 +7773,12 @@ mod tests {
         // JSON 由 emit_classified 输出）。该场景 patch 不适用（3 必经点 +
         // turn_radius 100km）→ 默认 fitting_defect。
         let s = r#"{
-            "schema_version":"0.20",
             "mission":{
                 "start":{"lon":115.9,"lat":39.8,"alt_m":3000},
                 "target":{"lon":116.8,"lat":40.3,"alt_m":3000},
                 "vehicles":[
                     {"id":"v1","profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":250,"min_turn_radius_m":100000,"max_climb_angle_deg":15},
-                     "start_pose":{"lon":115.0,"lat":39.0,"alt_m":3000,"heading_deg":90},
+                     "start_pose":{"lon":115.0,"lat":39.0,"alt_m":3000},
                      "mid_waypoints":[
                         {"lon":116.0,"lat":39.0,"alt_m":3000},
                         {"lon":116.0,"lat":39.5,"alt_m":3000},
@@ -7844,7 +7789,7 @@ mod tests {
                 "no_fly_zones":[
                     {"id":"wall","zone_type":"no_fly","shape":"polygon",
                      "geometry":{"vertices":[[116.2,39.25],[116.8,39.25],[116.8,39.75],[116.2,39.75]]},
-                     "alt_min_m":0,"alt_max_m":12000,"height_semantics":"msl"}],
+                     "alt_min_m":0,"alt_max_m":12000}],
                 "restricted_zones":[],"obstacles":[],
                 "terrain":{"source":"none"}
             }
@@ -7867,19 +7812,18 @@ mod tests {
     fn classified_on_coarse_no_path() {
         // P3 验收 1：coarse FMM 真无通道 → geometrically_impossible 分类汇总。
         let s = r#"{
-            "schema_version":"0.20",
             "mission":{
                 "start":{"lon":115.0,"lat":39.0,"alt_m":3000},
                 "target":{"lon":116.5,"lat":39.9,"alt_m":3000},
                 "vehicles":[
                     {"id":"v1","profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":250,"min_turn_radius_m":442,"max_climb_angle_deg":15},
-                     "start_pose":{"lon":115.0,"lat":39.0,"alt_m":3000,"heading_deg":90}}
+                     "start_pose":{"lon":115.0,"lat":39.0,"alt_m":3000}}
                 ],
                 "red_forces":{"radars":[]},
                 "no_fly_zones":[
                     {"id":"wall","zone_type":"no_fly","shape":"polygon",
                      "geometry":{"vertices":[[115.2,39.0],[117.0,39.0],[117.0,40.5],[115.2,40.5]]},
-                     "alt_min_m":0,"alt_max_m":10000,"height_semantics":"msl"}],
+                     "alt_min_m":0,"alt_max_m":10000}],
                 "restricted_zones":[],"obstacles":[],
                 "terrain":{"source":"none"}
             }
@@ -7938,21 +7882,20 @@ mod tests {
             return;
         }
         let s = r#"{
-            "schema_version":"0.20",
             "mission":{
                 "start":{"lon":115.9,"lat":39.8,"alt_m":3000},
                 "target":{"lon":116.8,"lat":40.3,"alt_m":3000},
                 "vehicles":[
                     {"id":"v1","profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":250,"min_turn_radius_m":442,"max_climb_angle_deg":15},
-                     "start_pose":{"lon":117.560718576047,"lat":38.96247381822325,"alt_m":3000,"heading_deg":45},
+                     "start_pose":{"lon":117.560718576047,"lat":38.96247381822325,"alt_m":3000},
                      "mid_waypoints":[],
                      "target_ref":"115.51277784181079,40.72094100704186,3000"}],
                 "red_forces":{"radars":[
-                    {"id":"radar_1786439379325","lon":115.9099176949948,"lat":40.11567473682985,"radar_type":"tracking","radius_km":50,"alt_m":10}]},
+                    {"id":"radar_1786439379325","lon":115.9099176949948,"lat":40.11567473682985,"radius_km":50,"alt_m":10}]},
                 "no_fly_zones":[
                     {"id":"zone_1786439400716","zone_type":"no_fly","shape":"polygon",
                      "geometry":{"vertices":[[116.45960372107142,39.54130857882594],[117.72747798452006,39.878961668275586],[117.2682607976188,39.54988915269062]]},
-                     "alt_min_m":0,"alt_max_m":12000,"height_semantics":"msl"}],
+                     "alt_min_m":0,"alt_max_m":12000}],
                 "restricted_zones":[],"obstacles":[],
                 "terrain":{"source":"path","path":"__P__"},
                 "parameters":{}
@@ -8013,19 +7956,18 @@ mod tests {
             return;
         }
         let s = r#"{
-            "schema_version":"0.20",
             "mission":{
                 "start":{"lon":115.8,"lat":39.8,"alt_m":3000},
                 "target":{"lon":117.2,"lat":40.2,"alt_m":3000},
                 "vehicles":[
                     {"id":"v1","profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":250,"min_turn_radius_m":442,"max_climb_angle_deg":15},
-                     "start_pose":{"lon":115.8,"lat":39.8,"alt_m":3000,"heading_deg":0},
+                     "start_pose":{"lon":115.8,"lat":39.8,"alt_m":3000},
                      "mid_waypoints":[]}],
                 "red_forces":{"radars":[]},
                 "no_fly_zones":[
                     {"id":"zone_block2","zone_type":"no_fly","shape":"polygon",
                      "geometry":{"vertices":[[115.9,39.65],[117.1,39.65],[117.1,41.6],[115.9,41.6]]},
-                     "alt_min_m":0,"alt_max_m":12000,"height_semantics":"msl"}],
+                     "alt_min_m":0,"alt_max_m":12000}],
                 "restricted_zones":[],"obstacles":[],
                 "terrain":{"source":"path","path":"__P__"},
                 "parameters":{}
@@ -8084,7 +8026,6 @@ mod tests {
         // **进入环带处（Rmax 外边界）**（T 最小 = 距源最近 = 刚进入发射阵位，
         // docs/技术方案 §4.2"传播到环带即停"），而非目标点本身（Rmin 内不得停留）。
         let s = r#"{
-            "schema_version":"0.20",
             "mission":{
                 "start":{"lon":115.0,"lat":39.0,"alt_m":3000},
                 "target":{"lon":116.5,"lat":39.9,"alt_m":3000},
@@ -8113,7 +8054,6 @@ mod tests {
         // agm 显式 [60,120]：终点距目标必须 ∈ [60,120]（Rmin 大 → 不得进入
         // 60km 内）；路径停在 Rmax 外边界（进入发射阵位即停）。
         let s = r#"{
-            "schema_version":"0.20",
             "mission":{
                 "start":{"lon":115.0,"lat":39.0,"alt_m":3000},
                 "target":{"lon":116.5,"lat":39.9,"alt_m":3000},
@@ -8153,7 +8093,6 @@ mod tests {
     fn p7_rmin_zero_warns_degradation() {
         // Rmin 未定（0）→ 显式告警（docs/技术方案 §4.2：不静默当无下限处理）。
         let s = r#"{
-            "schema_version":"0.20",
             "mission":{
                 "start":{"lon":115.0,"lat":39.0,"alt_m":3000},
                 "target":{"lon":116.5,"lat":39.9,"alt_m":3000},
@@ -8180,7 +8119,6 @@ mod tests {
         // 环带 [10,120] 被两同心 no_fly 圆（100km / 130km）围死 → 环带内无可达
         // cell → 点目标回退被 Rmin 挡住（dist=0 < 10）→ no_solution + 标注。
         let s = r#"{
-            "schema_version":"0.20",
             "mission":{
                 "start":{"lon":115.0,"lat":39.0,"alt_m":3000},
                 "target":{"lon":116.5,"lat":39.9,"alt_m":3000},
@@ -8223,7 +8161,6 @@ mod tests {
         // [1000,2000] → 终点高度 clamp 到 2000（垂直剖面目标高度取窗口上界），
         // 硬校验通过 → planned。
         let s = r#"{
-            "schema_version":"0.20",
             "mission":{
                 "start":{"lon":115.0,"lat":39.0,"alt_m":3000},
                 "target":{"lon":116.5,"lat":39.9,"alt_m":3000},
@@ -8249,7 +8186,6 @@ mod tests {
         // speed 是常量输入（规划不可调）→ 软校验：巡航 250 m/s 不在窗口 [50,80]
         // → degradation 告警，但路径正常交付（不误伤可用性）。
         let s = r#"{
-            "schema_version":"0.20",
             "mission":{
                 "start":{"lon":115.0,"lat":39.0,"alt_m":3000},
                 "target":{"lon":116.5,"lat":39.9,"alt_m":3000},
@@ -8280,7 +8216,6 @@ mod tests {
         // 发射包线 heading 下放平滑级：窗口 [20,50]（自然末段方向 ≈ 34° 东北），
         // 终端 heading = 窗口中心 35° 进 Dubins → 交付路径末段航向 ∈ 窗口。
         let s = r#"{
-            "schema_version":"0.20",
             "mission":{
                 "start":{"lon":115.0,"lat":39.0,"alt_m":3000},
                 "target":{"lon":116.5,"lat":39.9,"alt_m":3000},
