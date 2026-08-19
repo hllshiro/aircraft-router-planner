@@ -1,19 +1,15 @@
 //! 输入/输出 JSON 契约（技术方案 4.2.1 / 4.5 + Phase 1）。
 //!
-//! - 输入：`crs` 坐标系声明、A/B 起终点顶层字段、`vehicles` 多机数组、
-//!   红方雷达、禁飞/限飞区、武器映射表、地形配置、默认参数表覆盖；
-//! - 输出：`schema_version` + `status` 四态 + 错误体 + 车辆结果 + 统计；
+//! - 输入：`mission`（起终点、多机、红方雷达、三区、地形、武器、参数覆盖）；
+//! - 输出：`status` 四态 + 错误体 + 车辆结果 + 统计；
 //! - `InputValidator`：畸形/退化输入在解析层即拦截 → `input_invalid` + 原因码。
 //!
 //! 严格契约：`deny_unknown_fields`（未知字段 = 畸形，属 MalformedJson）。
 
-use crate::coord::{Datum, Geo, VerticalDatum};
+use crate::coord::Geo;
 use crate::error::{AppError, InputInvalidReason};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-
-/// 当前 schema 版本（与方案 v0.20 对齐）。
-pub const SCHEMA_VERSION: &str = "0.20";
 
 // ==================== 输入契约 ====================
 
@@ -21,80 +17,7 @@ pub const SCHEMA_VERSION: &str = "0.20";
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Input {
-    pub schema_version: String,
-    #[serde(default)]
-    pub crs: CrsConfig,
-    #[serde(default)]
-    pub output_crs: OutputCrsConfig,
     pub mission: Mission,
-}
-
-#[derive(Debug, Clone, Deserialize, Default, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct CrsConfig {
-    /// WGS84 / CGCS2000 / GRS80（默认 WGS84；其余 datum fail-fast，见 4.2.3）
-    #[serde(default)]
-    pub datum: DatumName,
-    /// MSL（默认，输入高程基准；内部统一椭球高见垂直基准层）
-    #[serde(default)]
-    pub vertical: VerticalName,
-    /// lonlat / utm / gk3（输入本身是投影坐标时，默认 lonlat）
-    #[serde(default)]
-    pub input_projection: InputProjection,
-}
-
-#[derive(Debug, Clone, Deserialize, Default, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct OutputCrsConfig {
-    /// lonlat / utm / gk3 / web_mercator / custom_tm
-    #[serde(default)]
-    pub projection: OutputProjectionName,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default, JsonSchema)]
-#[serde(rename_all = "UPPERCASE")]
-pub enum DatumName {
-    #[default]
-    Wgs84,
-    Cgcs2000,
-    Grs80,
-}
-
-impl DatumName {
-    pub fn to_datum(&self) -> Result<Datum, AppError> {
-        match self {
-            DatumName::Wgs84 | DatumName::Grs80 => Ok(Datum::Wgs84),
-            DatumName::Cgcs2000 => Ok(Datum::Cgcs2000),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default, JsonSchema)]
-#[serde(rename_all = "UPPERCASE")]
-pub enum VerticalName {
-    #[default]
-    Msl,
-    /// 椭球高（显式声明时输入高度为椭球高）
-    Ellipsoid,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum InputProjection {
-    #[default]
-    Lonlat,
-    Utm(u8),
-    Gk3(u8),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum OutputProjectionName {
-    #[default]
-    Lonlat,
-    Utm(u8),
-    Gk3(u8),
-    WebMercator,
 }
 
 /// 任务（mission）—— A/B 起终点为显式顶层字段（四轮共识）。
@@ -148,8 +71,7 @@ pub struct VehicleInput {
     #[serde(default)]
     pub target_ref: Option<String>,
     /// 中途必经点（Phase 4 M5 每机独立序列）：start → mid[0..] → target。
-    /// 分段 FMM（共享代价场）→ 拼接 → 整路径平滑复验。高度字段当前仅解析，
-    /// 垂直剖面统一取 start_pose.alt_m（水平必经点拼接为本里程碑范围）。
+    /// 分段 FMM（共享代价场）→ 拼接 → 整路径平滑复验。alt_m 为垂直剖面分段锚点（起→必经点→终点按段内比例插值）。
     #[serde(default)]
     pub mid_waypoints: Vec<Waypoint>,
 }
@@ -177,9 +99,6 @@ pub struct VehicleProfile {
     pub max_bank_deg: Option<f64>,
     #[serde(default)]
     pub ceiling_m: Option<f64>,
-    /// 飞机探测概率参数（隐蔽突防折算项，0..=1）
-    #[serde(default)]
-    pub detection_probability: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
@@ -200,7 +119,6 @@ impl Default for VehicleProfile {
             max_climb_angle_deg: None,
             max_bank_deg: None,
             ceiling_m: None,
-            detection_probability: None,
         }
     }
 }
@@ -211,9 +129,6 @@ impl Default for VehicleProfile {
 pub struct VehiclePose {
     pub lon: f64,
     pub lat: f64,
-    /// 初始航向 °（真北，0-360）
-    #[serde(default)]
-    pub heading_deg: f64,
     pub alt_m: f64,
 }
 
@@ -223,8 +138,6 @@ pub struct VehiclePose {
 pub struct RedForces {
     #[serde(default)]
     pub radars: Vec<Radar>,
-    #[serde(default)]
-    pub sams: Vec<Sam>,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -233,8 +146,6 @@ pub struct Radar {
     pub id: String,
     pub lon: f64,
     pub lat: f64,
-    /// early_warning / tracking / fire_control
-    pub radar_type: RadarType,
     /// 探测距离（km，球体模型基础半径）
     pub radius_km: f64,
     /// 天线高度 m（默认 10）
@@ -252,24 +163,6 @@ fn default_antenna_m() -> f64 {
     10.0
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum RadarType {
-    EarlyWarning,
-    Tracking,
-    FireControl,
-}
-
-/// 红方地空导弹（Phase 2 威胁建模占位；Phase 1 仅解析）。
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct Sam {
-    pub id: String,
-    pub lon: f64,
-    pub lat: f64,
-    pub radius_km: f64,
-}
-
 /// 禁飞/限飞/非地形障碍物（几何语义同禁飞区硬阈值，4.2.1/4.5）。
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -278,7 +171,7 @@ pub struct Zone {
     pub zone_type: ZoneType,
     #[serde(flatten)]
     pub shape: ZoneShape,
-    /// 高度区间下界（MSL；AGL 语义由 height_semantics 声明，解析层换算）。
+    /// 高度区间下界（MSL）。
     /// 仅 Restricted（限飞区）使用——NoFly/Obstacle 全高度禁入，**不需要高度范围**，
     /// 可省略（省略 = 全高度；2026-08-12 主管：禁飞区无高度范围）。
     #[serde(default)]
@@ -286,8 +179,6 @@ pub struct Zone {
     /// 高度区间上界（同 alt_min_m：仅 Restricted 使用，NoFly/Obstacle 可省略）。
     #[serde(default)]
     pub alt_max_m: Option<f64>,
-    #[serde(default)]
-    pub height_semantics: HeightSemantics,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
@@ -318,14 +209,6 @@ pub enum ZoneShape {
     Polygon { vertices: Vec<[f64; 2]> },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum HeightSemantics {
-    #[default]
-    Msl,
-    Agl,
-}
-
 /// 地形配置（4.2.4 默认场景 / 4.2.5 内置契约）。
 #[derive(Debug, Clone, Deserialize, Default, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -338,10 +221,6 @@ pub struct TerrainConfig {
     /// 海岸掩膜文件（GSHHG 3 态；None 时自动探测默认掩膜）
     #[serde(default)]
     pub mask_path: Option<String>,
-    #[serde(default)]
-    pub resolution_m: Option<f64>,
-    #[serde(default)]
-    pub vertical_datum: Option<VerticalDatumName>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default, JsonSchema)]
@@ -351,22 +230,6 @@ pub enum TerrainSourceType {
     None,
     Builtin,
     Path,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum VerticalDatumName {
-    Ellipsoid,
-    Egm96,
-}
-
-impl VerticalDatumName {
-    pub fn to_datum(&self) -> VerticalDatum {
-        match self {
-            VerticalDatumName::Ellipsoid => VerticalDatum::Ellipsoid,
-            VerticalDatumName::Egm96 => VerticalDatum::Egm96,
-        }
-    }
 }
 
 /// 武器类型（2026-08-12 主管定案：空空导弹 / 空地导弹 / 航空炸弹；**默认不启用**）。
@@ -406,15 +269,9 @@ pub struct WeaponEntry {
     ///（aam [5,40] / agm [3,120] / bomb [1,15]；weapon_type 也缺省 → 不启用）。
     #[serde(default)]
     pub range_km: Option<[f64; 2]>,
-    /// （保留兼容，仅解析）引信类型。
-    #[serde(default)]
-    pub fuze_type: String,
-    /// （保留兼容，仅解析）发射包线。
+    /// 发射包线（航向/高度/速度窗，P7 起消费：heading/alt 硬校验、speed 软校验）。
     #[serde(default)]
     pub envelope: Option<LaunchEnvelope>,
-    /// （保留兼容，仅解析）打击目标引用（缺省 = mission.target）。
-    #[serde(default)]
-    pub target_ref: Option<String>,
 }
 
 impl WeaponEntry {
@@ -457,20 +314,6 @@ pub struct ParamsOverride {
     pub radar_cost_coef: Option<f64>,
     #[serde(default)]
     pub los_mask_coef: Option<f64>,
-    #[serde(default)]
-    pub main_budget_ms: Option<u64>,
-    #[serde(default)]
-    pub degrade_budget_ms: Option<u64>,
-    #[serde(default)]
-    pub z_resolution_m: Option<f64>,
-    #[serde(default)]
-    pub fine_success_threshold: Option<f64>,
-    #[serde(default)]
-    pub coarse_cell_m: Option<f64>,
-    #[serde(default)]
-    pub default_weapon_radius_km: Option<f64>,
-    #[serde(default)]
-    pub weapon_map: Option<Vec<WeaponEntry>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default, JsonSchema)]
@@ -511,18 +354,6 @@ pub struct DefaultParams {
     pub radar_cost_coef: f64,
     /// LOS mask 系数（默认 0.05–0.1 区间内取 0.08；守保守口径不取 0，十二轮共识）
     pub los_mask_coef: f64,
-    /// 主算法预算（ms，5.1 建议初始分配）
-    pub main_budget_ms: u64,
-    /// 降级链预算（ms）
-    pub degrade_budget_ms: u64,
-    /// 垂直分层固定层高（十三轮定稿，写入数据契约元数据）
-    pub z_resolution_m: f64,
-    /// 细层成功率阈值（建议 90%，十一轮收敛判据）
-    pub fine_success_threshold: f64,
-    /// FMM 粗层格距（m，1-2km 范围）
-    pub coarse_cell_m: f64,
-    /// 表外武器兜底通用值（km，最保守）
-    pub default_weapon_radius_km: f64,
     /// 通用武器默认射程 [Rmin, Rmax] km（未输入时）
     pub default_weapon_range_km: [f64; 2],
     /// 最大爬升角占位（°）
@@ -549,12 +380,6 @@ impl Default for DefaultParams {
             suppression_delta: 0.5,
             radar_cost_coef: 200.0,
             los_mask_coef: 0.08,
-            main_budget_ms: 2_500,
-            degrade_budget_ms: 500,
-            z_resolution_m: 50.0,
-            fine_success_threshold: 0.9,
-            coarse_cell_m: 2_000.0,
-            default_weapon_radius_km: 10.0,
             default_weapon_range_km: [5.0, 40.0],
             default_max_climb_angle_deg: 15.0,
             default_max_bank_deg: 30.0,
@@ -567,36 +392,6 @@ impl Default for DefaultParams {
 }
 
 impl DefaultParams {
-    /// 默认武器映射表（2026-08-12 主管定案：类型 + 按类型默认射程；表外武器走兜底 + 告警）。
-    pub fn default_weapon_map() -> Vec<WeaponEntry> {
-        vec![
-            WeaponEntry {
-                weapon_id: "aam_medium".into(),
-                weapon_type: Some(WeaponType::Aam),
-                range_km: None, // 按类型默认 [5, 40]
-                fuze_type: "proximity".into(),
-                envelope: None,
-                target_ref: None,
-            },
-            WeaponEntry {
-                weapon_id: "asm_air_ground".into(),
-                weapon_type: Some(WeaponType::Agm),
-                range_km: None, // 按类型默认 [3, 120]
-                fuze_type: "impact".into(),
-                envelope: None,
-                target_ref: None,
-            },
-            WeaponEntry {
-                weapon_id: "jdam".into(),
-                weapon_type: Some(WeaponType::Bomb),
-                range_km: None, // 按类型默认 [1, 15]
-                fuze_type: "impact".into(),
-                envelope: None,
-                target_ref: None,
-            },
-        ]
-    }
-
     /// 合并参数覆盖（覆盖优先，未覆盖用默认）。
     /// 数值参数无效（非有限/出域）与无效曲线字符串 → 回落默认（主管决策 2026-08-05：
     /// 无外部参数或参数无效使用默认值；回落由 solver 记入 stats.degradations）。
@@ -636,24 +431,6 @@ impl DefaultParams {
                 _ => {} // 无效 → 默认
             }
         }
-        if let Some(v) = o.main_budget_ms {
-            d.main_budget_ms = v;
-        }
-        if let Some(v) = o.degrade_budget_ms {
-            d.degrade_budget_ms = v;
-        }
-        if let Some(v) = o.z_resolution_m {
-            d.z_resolution_m = v;
-        }
-        if let Some(v) = o.fine_success_threshold {
-            d.fine_success_threshold = v;
-        }
-        if let Some(v) = o.coarse_cell_m {
-            d.coarse_cell_m = v;
-        }
-        if let Some(v) = o.default_weapon_radius_km {
-            d.default_weapon_radius_km = v;
-        }
         d
     }
 
@@ -666,10 +443,9 @@ impl DefaultParams {
 
 // ==================== 输出契约 ====================
 
-/// 输出 JSON（C11：顶层携带 schema_version；status 四态契约）。
+/// 输出 JSON（status 四态契约）。
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct Output {
-    pub schema_version: String,
     pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<crate::error::ErrorBody>,
@@ -682,7 +458,6 @@ pub struct Output {
 impl Output {
     pub fn success(elapsed_ms: u64) -> Self {
         Self {
-            schema_version: SCHEMA_VERSION.into(),
             status: "success".into(),
             error: None,
             elapsed_ms: Some(elapsed_ms),
@@ -693,7 +468,6 @@ impl Output {
 
     pub fn failure(status: &str, error: crate::error::ErrorBody, elapsed_ms: u64) -> Self {
         Self {
-            schema_version: SCHEMA_VERSION.into(),
             status: status.into(),
             error: Some(error),
             elapsed_ms: Some(elapsed_ms),
@@ -787,13 +561,6 @@ pub(crate) fn resolve_target_alt(r: Option<&str>, mission_target_alt: f64) -> f6
 
 /// InputValidator 前置模块：解析后立即校验，退化输入不进入算法。
 pub fn validate(input: &Input) -> Result<(), AppError> {
-    // schema 版本
-    if input.schema_version != SCHEMA_VERSION {
-        return Err(AppError::Data(format!(
-            "schema_version mismatch: input {} vs supported {}",
-            input.schema_version, SCHEMA_VERSION
-        )));
-    }
     // A/B 起终点
     let start = input.mission.start.to_geo()?;
     let target = input.mission.target.to_geo()?;
@@ -933,11 +700,6 @@ fn validate_vehicle(v: &VehicleInput) -> Result<(), AppError> {
             return Err(AppError::InputInvalid(
                 InputInvalidReason::VehicleParamsInconsistent,
             ));
-        }
-    }
-    if let Some(dp) = p.detection_probability {
-        if !(0.0..=1.0).contains(&dp) {
-            return Err(AppError::InputInvalid(InputInvalidReason::OutOfBounds));
         }
     }
     Ok(())
@@ -1197,23 +959,14 @@ fn on_seg2(px: f64, py: f64, ax: f64, ay: f64, bx: f64, by: f64) -> bool {
 
 /// 点是否在 Zone 内且高度落入禁入区间 [alt_min, alt_max]（Phase 4 M2 高度层）。
 /// - NoFly/Obstacle（全高度禁入）或未提供高度区间 → 几何命中即禁入；
-/// - Restricted：MSL 直接比较区间；AGL 地面高度 ground_m 提供时换算 MSL
-///   （alt_min+ground .. alt_max+ground），ground 未知 → 保守视为在区间内
-///   （净空不确定，安全优先）。
-pub(crate) fn zone_contains_at(z: &Zone, p: &Geo, alt_m: f64, ground_m: Option<f64>) -> bool {
+/// - Restricted：高度一律 MSL 直比（v0.21 起无 AGL 语义）。
+pub(crate) fn zone_contains_at(z: &Zone, p: &Geo, alt_m: f64) -> bool {
     if !zone_contains(z, p) {
         return false;
     }
     let Some(min) = z.alt_min_m else { return true };
     let Some(max) = z.alt_max_m else { return true };
-    let (lo, hi) = match z.height_semantics {
-        HeightSemantics::Msl => (min, max),
-        HeightSemantics::Agl => match ground_m {
-            Some(g) => (min + g, max + g),
-            None => return true,
-        },
-    };
-    alt_m >= lo && alt_m <= hi
+    alt_m >= min && alt_m <= max
 }
 
 #[cfg(test)]
@@ -1221,7 +974,6 @@ mod tests {
     use super::*;
 
     const MIN_JSON: &str = r#"{
-        "schema_version": "0.20",
         "mission": {
             "start": {"lon": 116.30, "lat": 39.90, "alt_m": 500},
             "target": {"lon": 117.10, "lat": 40.20, "alt_m": 1000}
@@ -1231,7 +983,6 @@ mod tests {
     #[test]
     fn parse_minimal_input() {
         let input = Input::from_json_str(MIN_JSON).unwrap();
-        assert_eq!(input.schema_version, "0.20");
         assert_eq!(input.mission.start.lon, 116.30);
         assert!(input.mission.vehicles.is_empty());
         assert!(validate(&input).is_ok());
@@ -1239,7 +990,7 @@ mod tests {
 
     #[test]
     fn unknown_field_is_malformed() {
-        let s = r#"{"schema_version":"0.20","mission":{"start":{"lon":1,"lat":2,"alt_m":0},"target":{"lon":3,"lat":4,"alt_m":0}},"bogus":1}"#;
+        let s = r#"{"mission":{"start":{"lon":1,"lat":2,"alt_m":0},"target":{"lon":3,"lat":4,"alt_m":0}},"bogus":1}"#;
         let err = Input::from_json_str(s).unwrap_err();
         assert!(matches!(err, AppError::Json(_)));
     }
@@ -1256,7 +1007,6 @@ mod tests {
             },
             alt_min_m: Some(0.0),
             alt_max_m: Some(10000.0),
-            height_semantics: HeightSemantics::Msl,
         };
         let c = zone_segment_clearance_km(116.2, 39.6, 116.3, 39.9, &poly);
         assert_eq!(c, 0.0, "段穿内部 → 净距 0, got {c}");
@@ -1271,7 +1021,6 @@ mod tests {
             },
             alt_min_m: Some(0.0),
             alt_max_m: Some(10000.0),
-            height_semantics: HeightSemantics::Msl,
         };
         let c = zone_segment_clearance_km(116.25, 39.70, 116.25, 39.80, &circ);
         assert!(c < 0.01, "段过圆心 → 净距 0, got {c}");
@@ -1282,7 +1031,7 @@ mod tests {
 
     #[test]
     fn degenerate_a_equals_b_rejected() {
-        let s = r#"{"schema_version":"0.20","mission":{"start":{"lon":116.0,"lat":39.0,"alt_m":0},"target":{"lon":116.0,"lat":39.0,"alt_m":0}}}"#;
+        let s = r#"{"mission":{"start":{"lon":116.0,"lat":39.0,"alt_m":0},"target":{"lon":116.0,"lat":39.0,"alt_m":0}}}"#;
         let input = Input::from_json_str(s).unwrap();
         match validate(&input) {
             Err(AppError::InputInvalid(InputInvalidReason::DegenerateStartEqualsTarget)) => {}
@@ -1293,7 +1042,6 @@ mod tests {
     #[test]
     fn target_in_no_fly_rejected() {
         let s = r#"{
-            "schema_version":"0.20",
             "mission":{
                 "start":{"lon":115.0,"lat":39.0,"alt_m":0},
                 "target":{"lon":116.5,"lat":39.9,"alt_m":0},
@@ -1312,14 +1060,13 @@ mod tests {
     #[test]
     fn radar_overlap_no_fly_rejected() {
         let s = r#"{
-            "schema_version":"0.20",
             "mission":{
                 "start":{"lon":115.0,"lat":39.0,"alt_m":0},
                 "target":{"lon":117.0,"lat":40.0,"alt_m":0},
                 "no_fly_zones":[{"id":"nf1","zone_type":"no_fly",
                     "shape":"polygon","geometry":{"vertices":[[116.0,39.5],[116.5,39.5],[116.5,40.0],[116.0,40.0]]},
                     "alt_min_m":0,"alt_max_m":10000}],
-                "red_forces":{"radars":[{"id":"r1","lon":116.25,"lat":39.75,"radar_type":"tracking","radius_km":100}]}
+                "red_forces":{"radars":[{"id":"r1","lon":116.25,"lat":39.75,"radius_km":100}]}
             }
         }"#;
         let input = Input::from_json_str(s).unwrap();
@@ -1335,17 +1082,16 @@ mod tests {
         // 但 vehicle.target_ref 覆盖为圆外目标 → validate 必须通过（校验 resolve 后的
         // 实际规划目标，而非被覆盖的 mission.target）。
         let s = r#"{
-            "schema_version":"0.20",
             "mission":{
                 "start":{"lon":115.9,"lat":39.8,"alt_m":3000},
                 "target":{"lon":116.8,"lat":40.3,"alt_m":3000},
                 "vehicles":[{"id":"v1","profile":{"aircraft_type":"FIXED_WING"},
-                    "start_pose":{"lon":117.5,"lat":39.0,"alt_m":3000,"heading_deg":45},
+                    "start_pose":{"lon":117.5,"lat":39.0,"alt_m":3000},
                     "mid_waypoints":[],
                     "target_ref":"114.26335909078654,41.99101176729852,3000"}],
                 "no_fly_zones":[{"id":"nf1","zone_type":"no_fly",
                     "shape":"circle","geometry":{"center":[116.54581607527983,39.90085583451849],"radius_km":50},
-                    "alt_min_m":0,"alt_max_m":12000,"height_semantics":"msl"}]
+                    "alt_min_m":0,"alt_max_m":12000}]
             }
         }"#;
         let input = Input::from_json_str(s).unwrap();
@@ -1354,13 +1100,12 @@ mod tests {
         }
         // 对照：无 target_ref 覆盖时 mission.target（圆内）仍被拒
         let s2 = r#"{
-            "schema_version":"0.20",
             "mission":{
                 "start":{"lon":115.9,"lat":39.8,"alt_m":3000},
                 "target":{"lon":116.8,"lat":40.3,"alt_m":3000},
                 "no_fly_zones":[{"id":"nf1","zone_type":"no_fly",
                     "shape":"circle","geometry":{"center":[116.54581607527983,39.90085583451849],"radius_km":50},
-                    "alt_min_m":0,"alt_max_m":12000,"height_semantics":"msl"}]
+                    "alt_min_m":0,"alt_max_m":12000}]
             }
         }"#;
         let input2 = Input::from_json_str(s2).unwrap();
@@ -1374,12 +1119,11 @@ mod tests {
     fn mid_waypoint_in_no_fly_rejected() {
         // P5-M2：必经点在禁飞区 → fail-fast（必经点不可绕行）
         let s = r#"{
-            "schema_version":"0.20",
             "mission":{
                 "start":{"lon":115.0,"lat":39.0,"alt_m":0},
                 "target":{"lon":117.0,"lat":40.0,"alt_m":0},
                 "vehicles":[{"id":"v1","profile":{"aircraft_type":"FIXED_WING"},
-                    "start_pose":{"lon":115.0,"lat":39.0,"alt_m":0,"heading_deg":45},
+                    "start_pose":{"lon":115.0,"lat":39.0,"alt_m":0},
                     "mid_waypoints":[{"lon":116.5,"lat":39.9,"alt_m":0}]}],
                 "no_fly_zones":[{"id":"nf1","zone_type":"no_fly",
                     "shape":"circle","geometry":{"center":[116.5,39.9],"radius_km":10},
@@ -1404,7 +1148,6 @@ mod tests {
         // 2026-08-12 主管：禁飞区本身不允许进入、没有高度范围——NoFly 可省略
         // alt_min/alt_max（全高度禁入），解析与校验都必须通过。
         let s = r#"{
-            "schema_version":"0.20",
             "mission":{
                 "start":{"lon":115.0,"lat":39.0,"alt_m":0},
                 "target":{"lon":117.0,"lat":40.0,"alt_m":0},
@@ -1424,7 +1167,6 @@ mod tests {
     fn restricted_zone_requires_alt_range() {
         // 限飞区必须有 [alt_min, alt_max]；缺失 → out_of_bounds 拒绝。
         let s = r#"{
-            "schema_version":"0.20",
             "mission":{
                 "start":{"lon":115.0,"lat":39.0,"alt_m":0},
                 "target":{"lon":117.0,"lat":40.0,"alt_m":0},
@@ -1444,7 +1186,6 @@ mod tests {
         // 2026-08-12 主管定案：武器语义 = 类型 + 射程；类型缺省 = 不启用；
         // 射程缺省 = 按类型默认值（aam [5,40] / agm [3,120] / bomb [1,15]）。
         let s = r#"{
-            "schema_version":"0.20",
             "mission":{
                 "start":{"lon":115.0,"lat":39.0,"alt_m":0},
                 "target":{"lon":117.0,"lat":40.0,"alt_m":0},
@@ -1481,7 +1222,6 @@ mod tests {
     #[test]
     fn vehicles_multi_input() {
         let s = r#"{
-            "schema_version":"0.20",
             "mission":{
                 "start":{"lon":116.30,"lat":39.90,"alt_m":500},
                 "target":{"lon":117.10,"lat":40.20,"alt_m":1000},
@@ -1489,10 +1229,10 @@ mod tests {
                     {"id":"v1",
                      "profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":250,
                                 "min_turn_radius_m":12000,"max_bank_deg":30},
-                     "start_pose":{"lon":116.30,"lat":39.90,"heading_deg":90,"alt_m":500}},
+                     "start_pose":{"lon":116.30,"lat":39.90,"alt_m":500}},
                     {"id":"v2",
                      "profile":{"aircraft_type":"ROTORCRAFT","cruise_speed_mps":100},
-                     "start_pose":{"lon":116.40,"lat":39.80,"heading_deg":0,"alt_m":300}}
+                     "start_pose":{"lon":116.40,"lat":39.80,"alt_m":300}}
                 ]
             }
         }"#;
@@ -1504,7 +1244,6 @@ mod tests {
     #[test]
     fn duplicate_vehicle_id_rejected() {
         let s = r#"{
-            "schema_version":"0.20",
             "mission":{
                 "start":{"lon":116.30,"lat":39.90,"alt_m":500},
                 "target":{"lon":117.10,"lat":40.20,"alt_m":1000},
@@ -1528,7 +1267,6 @@ mod tests {
         let r_min = DefaultParams::physical_turn_radius_m(250.0, 30.0);
         assert!((r_min - 11_045.0).abs() < 10.0, "r_min={r_min}");
         let s = r#"{
-            "schema_version":"0.20",
             "mission":{
                 "start":{"lon":116.30,"lat":39.90,"alt_m":500},
                 "target":{"lon":117.10,"lat":40.20,"alt_m":1000},
@@ -1544,7 +1282,6 @@ mod tests {
 
         // 正数防线仍生效：固定翼 r=0（<1m）拒绝；旋翼机 r→0 合法（悬停原地转向）
         let bad = r#"{
-            "schema_version":"0.20",
             "mission":{
                 "start":{"lon":116.30,"lat":39.90,"alt_m":500},
                 "target":{"lon":117.10,"lat":40.20,"alt_m":1000},
@@ -1561,7 +1298,6 @@ mod tests {
             other => panic!("expected reject for fixed-wing r<=0, got {other:?}"),
         }
         let ok_rotor = r#"{
-            "schema_version":"0.20",
             "mission":{
                 "start":{"lon":116.30,"lat":39.90,"alt_m":500},
                 "target":{"lon":117.10,"lat":40.20,"alt_m":1000},
@@ -1587,37 +1323,14 @@ mod tests {
             },
             alt_min_m: Some(0.0),
             alt_max_m: Some(2000.0),
-            height_semantics: HeightSemantics::Msl,
         };
         let p = Geo::new(115.0, 39.0).unwrap();
-        assert!(zone_contains_at(&z, &p, 500.0, None));
-        assert!(zone_contains_at(&z, &p, 2000.0, None));
-        assert!(!zone_contains_at(&z, &p, 3000.0, None));
+        assert!(zone_contains_at(&z, &p, 500.0));
+        assert!(zone_contains_at(&z, &p, 2000.0));
+        assert!(!zone_contains_at(&z, &p, 3000.0));
         // 水平外 → false 不论高度
         let q = Geo::new(116.5, 39.0).unwrap();
-        assert!(!zone_contains_at(&z, &q, 500.0, None));
-    }
-
-    #[test]
-    fn zone_contains_at_agl_conversion() {
-        let z = Zone {
-            id: "z2".into(),
-            zone_type: ZoneType::Restricted,
-            shape: ZoneShape::Circle {
-                center: [115.0, 39.0],
-                radius_km: 10.0,
-            },
-            alt_min_m: Some(0.0),
-            alt_max_m: Some(100.0),
-            height_semantics: HeightSemantics::Agl,
-        };
-        let p = Geo::new(115.0, 39.0).unwrap();
-        // 地面 500m：区间换算 [500, 600]
-        assert!(zone_contains_at(&z, &p, 550.0, Some(500.0)));
-        assert!(!zone_contains_at(&z, &p, 700.0, Some(500.0)));
-        assert!(!zone_contains_at(&z, &p, 400.0, Some(500.0)));
-        // ground 未知 → 保守在区间内
-        assert!(zone_contains_at(&z, &p, 9000.0, None));
+        assert!(!zone_contains_at(&z, &q, 500.0));
     }
 
     #[test]
