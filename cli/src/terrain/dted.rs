@@ -75,7 +75,9 @@ pub fn open_dir(dir: &Path) -> Result<TileDirSource, AppError> {
         if !matches!(ext.as_str(), "dt0" | "dt1" | "dt2") {
             continue;
         }
-        let Ok(meta) = parse_uhl_meta(&p) else { continue };
+        let Ok(meta) = parse_uhl_meta(&p) else {
+            continue;
+        };
         tiles.push(meta);
     }
     let opener: TileOpener = Box::new(|p| Ok(Box::new(DtedSource::open(p)?)));
@@ -106,7 +108,10 @@ fn parse_uhl_meta(path: &Path) -> Result<TileMeta, AppError> {
     let cell_lon_deg = lon_interval_x10 as f64 / 36000.0;
     let cell_lat_deg = lat_interval_x10 as f64 / 36000.0;
     if cell_lon_deg <= 0.0 || cell_lat_deg <= 0.0 {
-        return Err(AppError::Data(format!("{}: degenerate DTED interval", path.display())));
+        return Err(AppError::Data(format!(
+            "{}: degenerate DTED interval",
+            path.display()
+        )));
     }
     Ok(TileMeta {
         path: path.to_path_buf(),
@@ -183,7 +188,11 @@ mod tests {
             buf.extend_from_slice(&121u16.to_be_bytes());
             buf.extend_from_slice(&121u16.to_be_bytes());
             for _ in 0..121 {
-                let x = if val < 0 { 0x8000u16 | (val.unsigned_abs() as u16) } else { val as u16 };
+                let x = if val < 0 {
+                    0x8000u16 | (val.unsigned_abs() as u16)
+                } else {
+                    val as u16
+                };
                 buf.extend_from_slice(&x.to_be_bytes());
             }
             buf.extend_from_slice(&[0u8; 4]); // checksum

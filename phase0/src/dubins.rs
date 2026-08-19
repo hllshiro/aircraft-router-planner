@@ -14,11 +14,7 @@
 fn norm_angle(a: f64) -> f64 {
     let tau = std::f64::consts::TAU;
     let m = a % tau;
-    if m < 0.0 {
-        m + tau
-    } else {
-        m
-    }
+    if m < 0.0 { m + tau } else { m }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -48,9 +44,9 @@ fn arc_angle(from: f64, to: f64, t: Turn) -> f64 {
 pub struct DubinsPath {
     pub t1: Turn,
     pub t2: Turn,
-    pub a1: f64,     // 首弧角（rad）
+    pub a1: f64, // 首弧角（rad）
     pub straight: f64,
-    pub a2: f64,     // 末弧角（rad）
+    pub a2: f64, // 末弧角（rad）
     pub c1: (f64, f64),
     pub c2: (f64, f64),
     pub n1: (f64, f64),
@@ -274,8 +270,14 @@ mod tests {
         let pts = path.sample(200);
         let (sx, sy) = pts[0];
         let (ex, ey) = *pts.last().unwrap();
-        assert!((sx - 0.0).abs() < 1e-6 && (sy - 0.0).abs() < 1e-6, "start {sx},{sy}");
-        assert!((ex - 0.0).abs() < 1e-6 && (ey - 10.0).abs() < 1e-6, "end {ex},{ey}");
+        assert!(
+            (sx - 0.0).abs() < 1e-6 && (sy - 0.0).abs() < 1e-6,
+            "start {sx},{sy}"
+        );
+        assert!(
+            (ex - 0.0).abs() < 1e-6 && (ey - 10.0).abs() < 1e-6,
+            "end {ex},{ey}"
+        );
         // 末航向：末两点方向 ≈ 0（+x）
         let n = pts.len();
         let (x1, y1) = pts[n - 2];

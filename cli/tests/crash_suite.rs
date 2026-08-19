@@ -6,13 +6,15 @@
 
 use aircraft_router_planner_cli::config::{self, Input};
 use aircraft_router_planner_cli::coord::{Ellipsoid, Geo, TransverseMercator, WebMercator};
-use aircraft_router_planner_cli::costfield::{backtrack_path, fmm_propagate, CostField};
+use aircraft_router_planner_cli::costfield::{CostField, backtrack_path, fmm_propagate};
 use aircraft_router_planner_cli::error::{AppError, InputInvalidReason};
 use aircraft_router_planner_cli::solver;
 use aircraft_router_planner_cli::spatial::{CircleIndex, RadarEntry, RadarIndex};
-use aircraft_router_planner_cli::terrain::builtin::{write_pack_raw, BuiltinSource};
+use aircraft_router_planner_cli::terrain::builtin::{BuiltinSource, write_pack_raw};
 use aircraft_router_planner_cli::terrain::mask::{GeoMask, MaskedSource};
-use aircraft_router_planner_cli::terrain::{los_blocked, semantic_degradation_ratios, TerrainSource};
+use aircraft_router_planner_cli::terrain::{
+    TerrainSource, los_blocked, semantic_degradation_ratios,
+};
 
 // ==================== config ====================
 
@@ -144,7 +146,9 @@ fn srtm_bad_filename_no_panic() {
 }
 
 // helper 编译期引用 open_source
-fn crate_terrain_open(p: &std::path::Path) -> Result<Box<dyn aircraft_router_planner_cli::terrain::TerrainSource>, AppError> {
+fn crate_terrain_open(
+    p: &std::path::Path,
+) -> Result<Box<dyn aircraft_router_planner_cli::terrain::TerrainSource>, AppError> {
     aircraft_router_planner_cli::terrain::open_source(p)
 }
 
@@ -204,7 +208,13 @@ fn tiny_mask_bytes() -> Vec<u8> {
     out.extend_from_slice(&1.0f64.to_be_bytes()); // res
     out.extend_from_slice(&[0u8; 8]); // padding
     let seg_base = 64 + (1 + 1) * 8;
-    out.extend_from_slice(&[seg_base as u64, (seg_base + 4 + 9) as u64].iter().flat_map(|o| o.to_be_bytes()).collect::<Vec<_>>().as_slice());
+    out.extend_from_slice(
+        &[seg_base as u64, (seg_base + 4 + 9) as u64]
+            .iter()
+            .flat_map(|o| o.to_be_bytes())
+            .collect::<Vec<_>>()
+            .as_slice(),
+    );
     out.extend_from_slice(&1u32.to_be_bytes()); // nseg
     out.push(1);
     out.extend_from_slice(&1u32.to_be_bytes());
@@ -216,9 +226,17 @@ fn tiny_mask_bytes() -> Vec<u8> {
 fn mask_class_at_extreme_coords_no_panic() {
     let m = GeoMask::parse(&tiny_mask_bytes()).unwrap();
     // 极端/非有限坐标不 panic
-    assert!(m.class_at(f64::NAN, 0.0) == aircraft_router_planner_cli::terrain::mask::MaskClass::Sea);
-    assert!(m.class_at(f64::INFINITY, -90.0) == aircraft_router_planner_cli::terrain::mask::MaskClass::Sea);
-    assert!(m.class_at(-f64::INFINITY, -90.0) == aircraft_router_planner_cli::terrain::mask::MaskClass::Sea);
+    assert!(
+        m.class_at(f64::NAN, 0.0) == aircraft_router_planner_cli::terrain::mask::MaskClass::Sea
+    );
+    assert!(
+        m.class_at(f64::INFINITY, -90.0)
+            == aircraft_router_planner_cli::terrain::mask::MaskClass::Sea
+    );
+    assert!(
+        m.class_at(-f64::INFINITY, -90.0)
+            == aircraft_router_planner_cli::terrain::mask::MaskClass::Sea
+    );
     assert!(m.class_at(0.0, 90.0) == aircraft_router_planner_cli::terrain::mask::MaskClass::Sea);
     assert!(m.class_at(0.0, -90.0) == aircraft_router_planner_cli::terrain::mask::MaskClass::Sea);
     assert!(m.class_at(180.0, 0.0) == aircraft_router_planner_cli::terrain::mask::MaskClass::Sea);
@@ -329,7 +347,11 @@ fn fmm_backtrack_unreachable_no_panic() {
 fn output_serialize_with_extremes_no_panic() {
     use aircraft_router_planner_cli::config::{Output, Stats, VehicleOutput};
     use aircraft_router_planner_cli::error::ErrorBody;
-    let out = Output::failure("input_invalid", ErrorBody::input_invalid(InputInvalidReason::TargetInNoFly, "x"), 1);
+    let out = Output::failure(
+        "input_invalid",
+        ErrorBody::input_invalid(InputInvalidReason::TargetInNoFly, "x"),
+        1,
+    );
     let s = serde_json::to_string(&out).expect("serialize ok");
     assert!(s.contains("input_invalid"));
     let out2 = Output {
@@ -354,8 +376,7 @@ fn output_serialize_with_extremes_no_panic() {
 use aircraft_router_planner_cli::path::{Path, PathPoint};
 use aircraft_router_planner_cli::smooth::{
     SmoothOptions, SmoothResult, Smoother, ThetaStarSmoother, VerifyContext, catmull_rom_spline,
-    chaikin_smooth, dubins_fit, greedy_simplify, smooth_path_chain, theta_star_smooth,
-    verify_path,
+    chaikin_smooth, dubins_fit, greedy_simplify, smooth_path_chain, theta_star_smooth, verify_path,
 };
 
 fn always_true() -> impl Fn(f64, f64, f64, f64, f64, f64) -> bool {
@@ -366,7 +387,10 @@ fn always_true() -> impl Fn(f64, f64, f64, f64, f64, f64) -> bool {
 fn smooth_empty_path_no_panic() {
     let p = Path::new(vec![]);
     let check = always_true();
-    assert_eq!(theta_star_smooth(&p, &check, None, None, 0.0, 95.0).len(), 0);
+    assert_eq!(
+        theta_star_smooth(&p, &check, None, None, 0.0, 95.0).len(),
+        0
+    );
     assert_eq!(greedy_simplify(&p, 100.0).len(), 0);
     assert_eq!(chaikin_smooth(&p, 2).len(), 0);
     assert_eq!(catmull_rom_spline(&p, 4).len(), 0);
@@ -377,7 +401,10 @@ fn smooth_empty_path_no_panic() {
 fn smooth_single_point_no_panic() {
     let p = Path::new(vec![PathPoint::new(0.0, 0.0, 100.0)]);
     let check = always_true();
-    assert_eq!(theta_star_smooth(&p, &check, None, None, 0.0, 95.0).len(), 1);
+    assert_eq!(
+        theta_star_smooth(&p, &check, None, None, 0.0, 95.0).len(),
+        1
+    );
     assert_eq!(greedy_simplify(&p, 100.0).len(), 1);
     assert_eq!(chaikin_smooth(&p, 2).len(), 1);
     assert_eq!(catmull_rom_spline(&p, 4).len(), 1);
@@ -464,7 +491,13 @@ fn smooth_chain_degenerate_no_panic() {
     // NaN 输入走链
     let bad = Path::new(vec![PathPoint::new(f64::NAN, 0.0, 100.0)]);
     let check = always_true();
-    let chain: Vec<Box<dyn Smoother>> = vec![Box::new(ThetaStarSmoother { check: &check, max_turn_deg: None, entry_heading: None, min_r_m: 0.0, entry_max_deg: 95.0 })];
+    let chain: Vec<Box<dyn Smoother>> = vec![Box::new(ThetaStarSmoother {
+        check: &check,
+        max_turn_deg: None,
+        entry_heading: None,
+        min_r_m: 0.0,
+        entry_max_deg: 95.0,
+    })];
     let _ = smooth_path_chain(&bad, &chain, &opts, &ctx, None);
     // 退化的 verify 参数（零采样/负容差）不 panic
     let opts2 = SmoothOptions {
@@ -498,20 +531,23 @@ fn invalid_radar_params_recorded_as_degradations() {
     let out = solver::solve(&input, &solver::SolveParams::default(), 0).unwrap();
     let degs = &out.stats.degradations;
     assert!(
-        degs.iter().any(|d| d.contains("radar_inflation=-1 invalid -> default 1.2")),
+        degs.iter()
+            .any(|d| d.contains("radar_inflation=-1 invalid -> default 1.2")),
         "missing radar_inflation degradation: {degs:?}"
     );
     assert!(
-        degs.iter().any(|d| d.contains("p_cross=5 invalid -> default 0.1")),
+        degs.iter()
+            .any(|d| d.contains("p_cross=5 invalid -> default 0.1")),
         "missing p_cross degradation: {degs:?}"
     );
     assert!(
-        degs.iter().any(|d| d.contains("suppression_delta=9 invalid -> default 0.5")),
+        degs.iter()
+            .any(|d| d.contains("suppression_delta=9 invalid -> default 0.5")),
         "missing suppression_delta degradation: {degs:?}"
     );
     assert!(
-        degs.iter().any(|d| d.contains("detection_curve=weird invalid -> default exponential")),
+        degs.iter()
+            .any(|d| d.contains("detection_curve=weird invalid -> default exponential")),
         "missing detection_curve degradation: {degs:?}"
     );
 }
-

@@ -121,7 +121,10 @@ fn bench_masked(gmted: &str, mask: &str, n_sample: usize, seed: u64) {
         (100.0, 37.0, "Qinghai Lake"),
         (-70.0, -55.0, "S. Ocean"),
     ] {
-        println!("[masked] {name} ({lon},{lat}) = {:?}", msrc.sample_at(lon, lat));
+        println!(
+            "[masked] {name} ({lon},{lat}) = {:?}",
+            msrc.sample_at(lon, lat)
+        );
     }
 }
 
@@ -135,7 +138,14 @@ fn destination(lon0: f64, lat0: f64, bearing_deg: f64, dist_m: f64) -> (f64, f64
 
 /// 真实路径局部采样（模拟路径规划访问模式：沿线每 60m 一点，强局部性）。
 /// 从起点沿大圆方向前进 len_m，每 step_m 采样 height_at；统计单点耗时与缓存命中收益。
-fn bench_path_sampling(src: &BuiltinSource, lon0: f64, lat0: f64, bearing_deg: f64, len_m: f64, step_m: f64) {
+fn bench_path_sampling(
+    src: &BuiltinSource,
+    lon0: f64,
+    lat0: f64,
+    bearing_deg: f64,
+    len_m: f64,
+    step_m: f64,
+) {
     let n = (len_m / step_m) as usize;
     let t0 = Instant::now();
     let mut hits = 0usize;

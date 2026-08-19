@@ -132,7 +132,8 @@ pub struct Waypoint {
 
 impl Waypoint {
     pub fn to_geo(&self) -> Result<Geo, AppError> {
-        Geo::new(self.lon, self.lat).map_err(|_| AppError::InputInvalid(InputInvalidReason::IllegalCoordinate))
+        Geo::new(self.lon, self.lat)
+            .map_err(|_| AppError::InputInvalid(InputInvalidReason::IllegalCoordinate))
     }
 }
 
@@ -306,7 +307,12 @@ impl Zone {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields, tag = "shape", content = "geometry", rename_all = "snake_case")]
+#[serde(
+    deny_unknown_fields,
+    tag = "shape",
+    content = "geometry",
+    rename_all = "snake_case"
+)]
 pub enum ZoneShape {
     Circle { center: [f64; 2], radius_km: f64 },
     Polygon { vertices: Vec<[f64; 2]> },
@@ -601,16 +607,25 @@ impl DefaultParams {
         if let Some(v) = o.radar_inflation.filter(|v| v.is_finite() && *v > 1.0) {
             d.radar_inflation = v;
         }
-        if let Some(v) = o.p_cross.filter(|v| v.is_finite() && *v >= 0.0 && *v <= 1.0) {
+        if let Some(v) = o
+            .p_cross
+            .filter(|v| v.is_finite() && *v >= 0.0 && *v <= 1.0)
+        {
             d.p_cross = v;
         }
-        if let Some(v) = o.suppression_delta.filter(|v| v.is_finite() && *v >= 0.0 && *v < 1.0) {
+        if let Some(v) = o
+            .suppression_delta
+            .filter(|v| v.is_finite() && *v >= 0.0 && *v < 1.0)
+        {
             d.suppression_delta = v;
         }
         if let Some(v) = o.radar_cost_coef.filter(|v| v.is_finite() && *v > 0.0) {
             d.radar_cost_coef = v;
         }
-        if let Some(v) = o.los_mask_coef.filter(|v| v.is_finite() && *v >= 0.0 && *v <= 1.0) {
+        if let Some(v) = o
+            .los_mask_coef
+            .filter(|v| v.is_finite() && *v >= 0.0 && *v <= 1.0)
+        {
             d.los_mask_coef = v;
         }
         if let Some(s) = o.detection_curve.as_deref() {
@@ -745,7 +760,9 @@ pub(crate) fn resolve_target_ref(r: Option<&str>, mission_target: &Geo) -> Resul
                 .map_err(|_| AppError::InputInvalid(InputInvalidReason::IllegalCoordinate));
         }
     }
-    Err(AppError::InputInvalid(InputInvalidReason::IllegalCoordinate))
+    Err(AppError::InputInvalid(
+        InputInvalidReason::IllegalCoordinate,
+    ))
 }
 
 /// 解析每机目标高度（与 resolve_target_ref 同一输入源；2026-08-12 垂直剖面用）：
@@ -781,13 +798,17 @@ pub fn validate(input: &Input) -> Result<(), AppError> {
     let start = input.mission.start.to_geo()?;
     let target = input.mission.target.to_geo()?;
     if start.distance_m(&target) < 100.0 {
-        return Err(AppError::InputInvalid(InputInvalidReason::DegenerateStartEqualsTarget));
+        return Err(AppError::InputInvalid(
+            InputInvalidReason::DegenerateStartEqualsTarget,
+        ));
     }
     // 多机
     let mut ids = std::collections::HashSet::new();
     for v in &input.mission.vehicles {
         if !ids.insert(v.id.clone()) {
-            return Err(AppError::InputInvalid(InputInvalidReason::VehicleParamsInconsistent));
+            return Err(AppError::InputInvalid(
+                InputInvalidReason::VehicleParamsInconsistent,
+            ));
         }
         validate_vehicle(v)?;
         let pose = Geo::new(v.start_pose.lon, v.start_pose.lat)
@@ -812,7 +833,9 @@ pub fn validate(input: &Input) -> Result<(), AppError> {
                 .map_err(|_| AppError::InputInvalid(InputInvalidReason::IllegalCoordinate))?;
             for z in &input.mission.no_fly_zones {
                 if zone_contains(z, &g) {
-                    return Err(AppError::InputInvalid(InputInvalidReason::MidWaypointInNoFly));
+                    return Err(AppError::InputInvalid(
+                        InputInvalidReason::MidWaypointInNoFly,
+                    ));
                 }
             }
         }
@@ -831,7 +854,9 @@ pub fn validate(input: &Input) -> Result<(), AppError> {
             .map_err(|_| AppError::InputInvalid(InputInvalidReason::IllegalCoordinate))?;
         for z in &input.mission.no_fly_zones {
             if zone_contains(z, &g) {
-                return Err(AppError::InputInvalid(InputInvalidReason::RadarOverlapNoFly));
+                return Err(AppError::InputInvalid(
+                    InputInvalidReason::RadarOverlapNoFly,
+                ));
             }
         }
         if r.radius_km <= 0.0 {
@@ -893,7 +918,9 @@ fn validate_vehicle(v: &VehicleInput) -> Result<(), AppError> {
     }
     if let Some([vmin, vmax]) = p.speed_range_mps {
         if vmin <= 0.0 || vmax < vmin {
-            return Err(AppError::InputInvalid(InputInvalidReason::VehicleParamsInconsistent));
+            return Err(AppError::InputInvalid(
+                InputInvalidReason::VehicleParamsInconsistent,
+            ));
         }
     }
     // A6 物理自洽（十二轮共识，2026-08-07 主管放宽）：r_min ≥ v²/(g·tan φ_max)。
@@ -903,7 +930,9 @@ fn validate_vehicle(v: &VehicleInput) -> Result<(), AppError> {
     // 仅保留正数防线：固定翼 r < 1m 无物理意义（旋翼机 r→0 合法，悬停原地转向）。
     if let (Some(_v), Some(_bank), Some(r)) = (speed, p.max_bank_deg, p.min_turn_radius_m) {
         if p.aircraft_type == AircraftType::FixedWing && r < 1.0 {
-            return Err(AppError::InputInvalid(InputInvalidReason::VehicleParamsInconsistent));
+            return Err(AppError::InputInvalid(
+                InputInvalidReason::VehicleParamsInconsistent,
+            ));
         }
     }
     if let Some(dp) = p.detection_probability {
@@ -1023,12 +1052,8 @@ pub(crate) fn zone_segment_clearance_km(
             }
             let p1 = Geo::new(lon1, lat1).ok();
             let p2 = Geo::new(lon2, lat2).ok();
-            if p1
-                .as_ref()
-                .map_or(false, |g| point_in_polygon(g, vertices))
-                || p2
-                    .as_ref()
-                    .map_or(false, |g| point_in_polygon(g, vertices))
+            if p1.as_ref().map_or(false, |g| point_in_polygon(g, vertices))
+                || p2.as_ref().map_or(false, |g| point_in_polygon(g, vertices))
             {
                 return 0.0;
             }
@@ -1054,7 +1079,14 @@ pub(crate) fn zone_segment_clearance_km(
 }
 
 /// 点到线段最近距离（km；经纬度平面近似，经度按 lat0 余弦缩放）。
-pub(crate) fn pt_seg_dist_km(lon1: f64, lat1: f64, lon2: f64, lat2: f64, plon: f64, plat: f64) -> f64 {
+pub(crate) fn pt_seg_dist_km(
+    lon1: f64,
+    lat1: f64,
+    lon2: f64,
+    lat2: f64,
+    plon: f64,
+    plat: f64,
+) -> f64 {
     let lat0 = lat1.to_radians();
     let kx = 111.320 * lat0.cos();
     let ky = 111.0;
@@ -1614,11 +1646,11 @@ mod tests {
         // 主管决策 2026-08-05：无外部参数或参数无效使用默认值。
         let d = DefaultParams::default();
         let o = ParamsOverride {
-            radar_inflation: Some(-3.0),            // 无效：≤1
-            p_cross: Some(5.0),                     // 无效：>1
-            suppression_delta: Some(2.0),           // 无效：≥1
-            detection_curve: Some("weird".into()),  // 无效：非 exponential/linear
-            los_mask_coef: Some(-0.5),              // 无效：<0
+            radar_inflation: Some(-3.0),           // 无效：≤1
+            p_cross: Some(5.0),                    // 无效：>1
+            suppression_delta: Some(2.0),          // 无效：≥1
+            detection_curve: Some("weird".into()), // 无效：非 exponential/linear
+            los_mask_coef: Some(-0.5),             // 无效：<0
             ..Default::default()
         };
         let m = d.merge(&o);

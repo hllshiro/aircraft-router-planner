@@ -68,7 +68,10 @@ impl Terrain {
         let raw = std::fs::read(raw_path)?;
         let mem_mib = raw.len() as f64 / (1024.0 * 1024.0);
         let mut h: Vec<f32> = Vec::with_capacity(rows * cols);
-        h.extend(raw.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])));
+        h.extend(
+            raw.chunks_exact(4)
+                .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])),
+        );
         debug_assert_eq!(h.len(), rows * cols, "raw 大小与 meta 不匹配");
         let t_load = t0.elapsed().as_secs_f64();
         Ok((

@@ -8,7 +8,7 @@
 //!
 //! 场景：100km 立方体（坐标单位 km），雷达半径 8–15km。
 
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 use rand::{RngExt, SeedableRng};
 use rstar::{AABB, Envelope, PointDistance, RTree, RTreeObject};
 use std::hint::black_box;
@@ -29,16 +29,8 @@ impl RTreeObject for Radar {
     fn envelope(&self) -> Self::Envelope {
         let r = self.radius;
         AABB::from_corners(
-            [
-                self.center[0] - r,
-                self.center[1] - r,
-                self.center[2] - r,
-            ],
-            [
-                self.center[0] + r,
-                self.center[1] + r,
-                self.center[2] + r,
-            ],
+            [self.center[0] - r, self.center[1] - r, self.center[2] - r],
+            [self.center[0] + r, self.center[1] + r, self.center[2] + r],
         )
     }
 }
@@ -88,7 +80,11 @@ fn gen_nofly(seed: u64) -> Vec<AabbItem> {
             let y0 = rng.random_range(0.0..SCENE - 20.0);
             AabbItem {
                 lo: [x0, y0, 0.0],
-                hi: [x0 + rng.random_range(5.0..20.0), y0 + rng.random_range(5.0..20.0), 12.0],
+                hi: [
+                    x0 + rng.random_range(5.0..20.0),
+                    y0 + rng.random_range(5.0..20.0),
+                    12.0,
+                ],
             }
         })
         .collect()
@@ -191,11 +187,13 @@ fn criterion_benchmark(c: &mut Criterion) {
         let tree = RTree::bulk_load(radars.clone());
         let mut rng = rand::rngs::StdRng::seed_from_u64(0x54);
         let pts: Vec<[f64; 3]> = (0..N_SEG)
-            .map(|_| [
-                rng.random_range(0.0..SCENE),
-                rng.random_range(0.0..SCENE),
-                rng.random_range(0.0..12.0),
-            ])
+            .map(|_| {
+                [
+                    rng.random_range(0.0..SCENE),
+                    rng.random_range(0.0..SCENE),
+                    rng.random_range(0.0..12.0),
+                ]
+            })
             .collect();
         c.bench_function("b3_rstar/nearest_1000_pts", |b| {
             b.iter(|| {

@@ -171,9 +171,15 @@ mod tests {
         let mut t = flat_grid(8, 8, 115.0, 39.0, 0.05);
         t.h[3 * 8 + 3] = f32::NAN; // 制造空洞
         // 空洞邻域 → None
-        assert!(t.height_at_ll(115.0 + 3.5 * 0.05, 39.0 + 3.5 * 0.05).is_none());
+        assert!(
+            t.height_at_ll(115.0 + 3.5 * 0.05, 39.0 + 3.5 * 0.05)
+                .is_none()
+        );
         // 正常区域可采样
-        assert!(t.height_at_ll(115.0 + 1.5 * 0.05, 39.0 + 1.5 * 0.05).is_some());
+        assert!(
+            t.height_at_ll(115.0 + 1.5 * 0.05, 39.0 + 1.5 * 0.05)
+                .is_some()
+        );
     }
 
     #[test]

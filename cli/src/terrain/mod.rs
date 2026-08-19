@@ -382,7 +382,10 @@ mod tests {
 
     #[test]
     fn default_sample_at_distinguishes_oob_nodata() {
-        let s = FlatSrc { h: 1000.0, hole: true };
+        let s = FlatSrc {
+            h: 1000.0,
+            hole: true,
+        };
         // 边界内有效 → Land
         assert_eq!(s.sample_at(0.0, -90.0), Sample::Land(1000.0));
         // 边界内空洞 → NoData（默认实现区分 OOB 与空洞）
@@ -395,12 +398,19 @@ mod tests {
     #[test]
     fn los_water_nodata_unblocked_oob_unblocked() {
         // 低空射线（z=500 < 地形 1000）：陆地遮挡
-        let s = FlatSrc { h: 1000.0, hole: false };
+        let s = FlatSrc {
+            h: 1000.0,
+            hole: false,
+        };
         assert!(los_blocked(&s, 0.0, -90.0, 500.0, 1.0, 0.0, 0.0, 1.0, 100));
         // 高空（z=2000 > 1000）：不遮挡
-        assert!(!los_blocked(&s, 0.0, -90.0, 2000.0, 1.0, 0.0, 0.0, 1.0, 100));
+        assert!(!los_blocked(
+            &s, 0.0, -90.0, 2000.0, 1.0, 0.0, 0.0, 1.0, 100
+        ));
         // 射线进入 OOB（终点 lon=3 出界）→ 不遮挡（2026-08-11 放开输入点限制，同 NoData）
-        assert!(!los_blocked(&s, 0.0, -90.0, 2000.0, 1.0, 0.0, 0.0, 3.0, 100));
+        assert!(!los_blocked(
+            &s, 0.0, -90.0, 2000.0, 1.0, 0.0, 0.0, 3.0, 100
+        ));
     }
 
     #[test]
@@ -423,7 +433,10 @@ mod tests {
     #[test]
     fn degradation_ratios_counts_nodata_oob() {
         // FlatSrc：空洞区域 lon>0.5 && lat<-89.5（bounds: lon -2..2, lat -92..-88）
-        let s = FlatSrc { h: 1000.0, hole: true };
+        let s = FlatSrc {
+            h: 1000.0,
+            hole: true,
+        };
         let (nd, oob) = semantic_degradation_ratios(&s, 4);
         // 采样点 4×4：lat ∈ [-91.5, -88.5]，lon ∈ [-1.5, 1.5]
         // 空洞条件 lon>0.5 且 lat<-89.5：lon=1.5 行 lat=-91.5/-90.5 → 2 点 NoData
@@ -473,7 +486,11 @@ mod tests {
         write_uhl_only_dted(&dir.join("N42E015.dt0"), 15, 42).unwrap();
         write_uhl_only_dted(&dir.join("N42E016.dt0"), 16, 42).unwrap();
         let s = open_source(&dir).unwrap();
-        assert!(s.resolution_desc().starts_with("dted dir"), "desc={}", s.resolution_desc());
+        assert!(
+            s.resolution_desc().starts_with("dted dir"),
+            "desc={}",
+            s.resolution_desc()
+        );
         let b = s.bounds().unwrap();
         assert!((b.min_lon - 15.0).abs() < 1e-9 && (b.max_lon - 17.0).abs() < 1e-9);
         drop(std::fs::remove_dir_all(&dir));

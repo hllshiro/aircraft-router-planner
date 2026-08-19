@@ -164,7 +164,10 @@ pub fn parse_georef(
     let x1 = x0 + (width as f64 - 1.0) * sx;
     let y1 = y0 + (height as f64 - 1.0) * sy;
     // 无地理参考启发（与旧实现一致：extent 即像素范围 → 拒绝）
-    if x0.abs() < 1e-9 && y0.abs() < 1e-9 && (x1 - width as f64).abs() < 1e-9 && (y1 - height as f64).abs() < 1e-9
+    if x0.abs() < 1e-9
+        && y0.abs() < 1e-9
+        && (x1 - width as f64).abs() < 1e-9
+        && (y1 - height as f64).abs() < 1e-9
     {
         return Err(AppError::Data(
             "geotiff has no georeferencing (model extent == pixel range)".into(),
@@ -260,8 +263,8 @@ fn apply_nodata(data: &mut [f32], no_data: Option<f32>) {
 impl GeoTiffSource {
     pub fn open(path: &Path) -> Result<Self, AppError> {
         let file = std::fs::File::open(path)?;
-        let mut dec = Decoder::new(file)
-            .map_err(|e| AppError::Data(format!("tiff decode failed: {e}")))?;
+        let mut dec =
+            Decoder::new(file).map_err(|e| AppError::Data(format!("tiff decode failed: {e}")))?;
         let (width, height) = dec
             .dimensions()
             .map_err(|e| AppError::Data(format!("tiff dimensions failed: {e}")))?;
@@ -385,15 +388,12 @@ impl GeoTiffSource {
         let lr = (r as u32) % lazy.chunk_h;
         let l = (lr as usize) * (lazy.chunk_w as usize) + lc as usize;
         let v = *chunk.get(l)?;
-        if v.is_nan() {
-            None
-        } else {
-            Some(v)
-        }
+        if v.is_nan() { None } else { Some(v) }
     }
 
     /// 加载 chunk（缓存命中直取；未命中锁内解压 + 双检插入）。
-    fn lazy_chunk(&self, idx: u32) -> Option<Vec<f32>> {        let lazy = self.lazy.as_ref()?;
+    fn lazy_chunk(&self, idx: u32) -> Option<Vec<f32>> {
+        let lazy = self.lazy.as_ref()?;
         {
             let cache = lock_cache(&lazy.cache);
             if let Some(ch) = cache.map.get(&idx) {
@@ -480,7 +480,9 @@ fn collect_overviews(
         if dec.next_image().is_err() {
             break;
         }
-        let Ok((ow, oh)) = dec.dimensions() else { break };
+        let Ok((ow, oh)) = dec.dimensions() else {
+            break;
+        };
         if ow == 0 || oh == 0 || ow > main_w || oh > main_h {
             continue; // 非降采样（更大/异常）→ 跳过，继续下一个 IFD
         }
@@ -488,7 +490,9 @@ fn collect_overviews(
         if ow == main_w && oh == main_h {
             continue;
         }
-        let Ok(ogeo) = parse_georef(dec, ow, oh) else { continue };
+        let Ok(ogeo) = parse_georef(dec, ow, oh) else {
+            continue;
+        };
         // 原点对齐判定（两方 cell 半宽容差）
         let lon_ok = (ogeo.min_lon - main_geo.min_lon).abs()
             <= main_geo.cell_lon_deg * 0.5 + ogeo.cell_lon_deg * 0.5;
@@ -608,8 +612,7 @@ mod tests {
 
     /// 项目内 GeoTIFF（_test_small.tif，300×200，cell 0.001°）：路径定位。
     fn test_tif() -> Option<std::path::PathBuf> {
-        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../data/_test_small.tif");
+        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/_test_small.tif");
         p.exists().then_some(p)
     }
 
@@ -654,7 +657,10 @@ mod tests {
                 .get_value_at::<f64>(&geo_types::Coord { x: lon, y: lat }, 0)
                 .filter(|v| v.is_finite());
             match (got, want) {
-                (Some(a), Some(b)) => assert!((a - b).abs() < 1e-6, "mismatch at ({lon},{lat}): {a} vs {b}"),
+                (Some(a), Some(b)) => assert!(
+                    (a - b).abs() < 1e-6,
+                    "mismatch at ({lon},{lat}): {a} vs {b}"
+                ),
                 (None, None) => {}
                 (a, b) => panic!("mismatch at ({lon},{lat}): {a:?} vs {b:?}"),
             }
@@ -681,8 +687,8 @@ mod tests {
     /// 不存在时跳过（逻辑由其余测试 + 代码审查覆盖）。
     #[test]
     fn lazy_large_file_sampling() {
-        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../data/lazy_test_4096.tif");
+        let p =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/lazy_test_4096.tif");
         if !p.exists() {
             eprintln!("skip: lazy_test_4096.tif not found");
             return;
@@ -698,8 +704,14 @@ mod tests {
         let want = (2048.0 * 4096.0 + 2048.0) % 2000.0;
         assert!((got - want).abs() < 1.0, "got {got} want {want}");
         // NW / SE 角区域有值
-        assert!(s.height_at(b.min_lon + 0.0005, b.max_lat - 0.0005).is_some());
-        assert!(s.height_at(b.min_lon + 0.0005, b.min_lat + 0.0005).is_some());
+        assert!(
+            s.height_at(b.min_lon + 0.0005, b.max_lat - 0.0005)
+                .is_some()
+        );
+        assert!(
+            s.height_at(b.min_lon + 0.0005, b.min_lat + 0.0005)
+                .is_some()
+        );
         // 出界 → None
         assert!(s.height_at(b.max_lon + 0.01, b.min_lat).is_none());
     }
@@ -762,7 +774,9 @@ mod tests {
         let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../data/overview_test_multi.tif");
         if !p.exists() {
-            eprintln!("skip: overview_test_multi.tif not found (regenerate with scripts/gen_overview_test.py)");
+            eprintln!(
+                "skip: overview_test_multi.tif not found (regenerate with scripts/gen_overview_test.py)"
+            );
             return;
         }
         let s = GeoTiffSource::open(&p).unwrap();

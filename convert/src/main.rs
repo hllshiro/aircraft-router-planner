@@ -169,7 +169,11 @@ fn run_recompress(
         bytes,
         bytes as f64 / 1e6,
         started.elapsed().as_secs_f64(),
-        if experimental_zstd { "zstd (experimental, ruzstd Fastest)" } else { "deflate (miniz_oxide)" },
+        if experimental_zstd {
+            "zstd (experimental, ruzstd Fastest)"
+        } else {
+            "deflate (miniz_oxide)"
+        },
     );
     Ok(())
 }
@@ -289,7 +293,7 @@ struct GeoTiffGrid {
 impl GeoTiffGrid {
     fn open(path: &Path) -> Result<Self, AppError> {
         use aircraft_router_planner_cli::terrain::geotiff;
-        use tiff::decoder::{DecodingResult, Decoder};
+        use tiff::decoder::{Decoder, DecodingResult};
         use tiff::tags::Tag;
 
         let f = std::fs::File::open(path)?;
@@ -332,16 +336,28 @@ impl GeoTiffGrid {
                 .collect(),
             DecodingResult::F32(v) => v
                 .into_iter()
-                .map(|x| if x.is_finite() { x.round() as i16 } else { i16::MIN })
+                .map(|x| {
+                    if x.is_finite() {
+                        x.round() as i16
+                    } else {
+                        i16::MIN
+                    }
+                })
                 .collect(),
             DecodingResult::F64(v) => v
                 .into_iter()
-                .map(|x| if x.is_finite() { x.round() as i16 } else { i16::MIN })
+                .map(|x| {
+                    if x.is_finite() {
+                        x.round() as i16
+                    } else {
+                        i16::MIN
+                    }
+                })
                 .collect(),
             _ => {
                 return Err(AppError::Data(
                     "geotiff unsupported sample type (u64/i64)".into(),
-                ))
+                ));
             }
         };
         let n = (width as usize) * (height as usize);
@@ -351,11 +367,7 @@ impl GeoTiffGrid {
         let take = |i: usize| -> i16 {
             // samples>1 时 read_image 返回 chunky interleaved（每像素 samples 个值）
             let idx = i * samples;
-            if idx < raw.len() {
-                raw[idx]
-            } else {
-                i16::MIN
-            }
+            if idx < raw.len() { raw[idx] } else { i16::MIN }
         };
         let (rows, cols) = (height as usize, width as usize);
         let mut data = Vec::with_capacity(n);
@@ -487,7 +499,10 @@ impl SrtmGrid {
         // 尺寸按文件大小推断（SRTM1 = 3601²×2B ≈ 26MB；SRTM3 = 1201²×2B ≈ 2.9MB）
         let n = bytes.len() / 2;
         if bytes.len() % 2 != 0 || n == 0 {
-            return Err(AppError::Data(format!("hgt size not even: {} bytes", bytes.len())));
+            return Err(AppError::Data(format!(
+                "hgt size not even: {} bytes",
+                bytes.len()
+            )));
         }
         let side = (n as f64).sqrt().round() as usize;
         if side == 0 || side * side != n {
@@ -539,7 +554,10 @@ impl GridSource for SrtmGrid {
         }
     }
     fn source_desc(&self) -> String {
-        format!("SRTM .hgt {}x{} cell {:.6}deg", self.rows, self.cols, self.cell_deg)
+        format!(
+            "SRTM .hgt {}x{} cell {:.6}deg",
+            self.rows, self.cols, self.cell_deg
+        )
     }
 }
 
@@ -552,7 +570,11 @@ fn parse_hgt_name(name: &str) -> Result<(f64, f64), AppError> {
     let (lat_sign, mut i) = match bytes[0] {
         b'N' | b'n' => (1.0, 1),
         b'S' | b's' => (-1.0, 1),
-        _ => return Err(AppError::Data(format!("hgt name {name:?} missing N/S prefix"))),
+        _ => {
+            return Err(AppError::Data(format!(
+                "hgt name {name:?} missing N/S prefix"
+            )));
+        }
     };
     let lat_start = i;
     while i < bytes.len() && bytes[i].is_ascii_digit() {
@@ -560,12 +582,18 @@ fn parse_hgt_name(name: &str) -> Result<(f64, f64), AppError> {
     }
     let lat_str = &name[lat_start..i];
     if i >= bytes.len() {
-        return Err(AppError::Data(format!("hgt name {name:?} missing E/W separator")));
+        return Err(AppError::Data(format!(
+            "hgt name {name:?} missing E/W separator"
+        )));
     }
     let lon_sign = match bytes[i] {
         b'E' | b'e' => 1.0,
         b'W' | b'w' => -1.0,
-        _ => return Err(AppError::Data(format!("hgt name {name:?} bad E/W separator"))),
+        _ => {
+            return Err(AppError::Data(format!(
+                "hgt name {name:?} bad E/W separator"
+            )));
+        }
     };
     i += 1;
     let lon_start = i;
@@ -574,7 +602,9 @@ fn parse_hgt_name(name: &str) -> Result<(f64, f64), AppError> {
     }
     let lon_str = &name[lon_start..i];
     if lat_str.is_empty() || lon_str.is_empty() {
-        return Err(AppError::Data(format!("hgt name {name:?} missing coordinate digits")));
+        return Err(AppError::Data(format!(
+            "hgt name {name:?} missing coordinate digits"
+        )));
     }
     let lat = lat_str
         .parse::<f64>()
@@ -680,7 +710,8 @@ impl ArpkWriter {
         } else {
             miniz_oxide::deflate::compress_to_vec_zlib(&bytes, 6)
         };
-        self.index.push((self.data_start + self.written, comp.len() as u32));
+        self.index
+            .push((self.data_start + self.written, comp.len() as u32));
         self.out.write_all(&comp)?;
         self.written += comp.len() as u64;
         Ok(())
@@ -725,9 +756,17 @@ impl ArpkWriter {
         put_f64(&mut hdr, 40, self.cell_lon_deg);
         put_f64(&mut hdr, 48, self.cell_lat_deg);
         put_f64(&mut hdr, 56, 1.0); // z_resolution_m（i16 米）
-        hdr[64] = if self.datum_ellipsoid { VDATUM_ELLIPSOID } else { VDATUM_EGM96 };
+        hdr[64] = if self.datum_ellipsoid {
+            VDATUM_ELLIPSOID
+        } else {
+            VDATUM_EGM96
+        };
         hdr[65] = SEMANTICS_EQUIANGULAR;
-        hdr[66] = if self.zstd { COMPRESSION_ZSTD } else { COMPRESSION_DEFLATE };
+        hdr[66] = if self.zstd {
+            COMPRESSION_ZSTD
+        } else {
+            COMPRESSION_DEFLATE
+        };
         hdr[67] = 0;
         put_u32(&mut hdr, 68, BLOCK_SIZE);
         put_u32(&mut hdr, 72, self.blocks_x as u32);
@@ -830,8 +869,8 @@ pub fn recompress_arpk1(
     output: &Path,
     experimental_zstd: bool,
 ) -> Result<u64, AppError> {
-    use std::io::{Read, Seek, SeekFrom, Write};
     use memmap2::Mmap;
+    use std::io::{Read, Seek, SeekFrom, Write};
     let f = std::fs::File::open(input)?;
     let mmap = unsafe { Mmap::map(&f)? };
     let bytes = &mmap[..];
@@ -860,15 +899,27 @@ pub fn recompress_arpk1(
     let mut out = std::fs::File::create(output)?;
     // 头 288B + sha 占位 32B（改 block_compression → 目标压缩）+ 索引区占位
     let mut hdr = bytes[0..HEADER_SIZE + 32].to_vec();
-    hdr[66] = if experimental_zstd { COMPRESSION_ZSTD } else { COMPRESSION_DEFLATE };
+    hdr[66] = if experimental_zstd {
+        COMPRESSION_ZSTD
+    } else {
+        COMPRESSION_DEFLATE
+    };
     out.write_all(&hdr)?;
     out.write_all(&vec![0u8; idx_bytes])?;
 
     let mut index: Vec<(u64, u32)> = Vec::with_capacity(n);
     let mut written = 0u64;
     for b in 0..n {
-        let off = u64::from_le_bytes(bytes[idx_start + b * 12..idx_start + b * 12 + 8].try_into().unwrap());
-        let len = u32::from_le_bytes(bytes[idx_start + b * 12 + 8..idx_start + b * 12 + 12].try_into().unwrap());
+        let off = u64::from_le_bytes(
+            bytes[idx_start + b * 12..idx_start + b * 12 + 8]
+                .try_into()
+                .unwrap(),
+        );
+        let len = u32::from_le_bytes(
+            bytes[idx_start + b * 12 + 8..idx_start + b * 12 + 12]
+                .try_into()
+                .unwrap(),
+        );
         let raw = &bytes[off as usize..(off + len as u64) as usize];
         let diff: Vec<u8> = match src_compression {
             COMPRESSION_RAW => raw.to_vec(),
@@ -882,7 +933,11 @@ pub fn recompress_arpk1(
             }
             COMPRESSION_DEFLATE => miniz_oxide::inflate::decompress_to_vec_zlib(raw)
                 .map_err(|e| AppError::Data(format!("recompress: inflate: {e}")))?,
-            c => return Err(AppError::Data(format!("recompress: unsupported compression {c}"))),
+            c => {
+                return Err(AppError::Data(format!(
+                    "recompress: unsupported compression {c}"
+                )));
+            }
         };
         if diff.len() != block_n * 2 {
             return Err(AppError::Data("recompress: bad block length".into()));
@@ -928,18 +983,21 @@ pub fn recompress_arpk1(
     out.sync_all()?;
     eprintln!(
         "recompress: {input:?} ({rows}x{cols}, {n} blocks, compression {src_compression} → {}) → {output:?} ({:.1} MiB)",
-        if experimental_zstd { "zstd (experimental)" } else { "deflate" },
+        if experimental_zstd {
+            "zstd (experimental)"
+        } else {
+            "deflate"
+        },
         written as f64 / (1 << 20) as f64
     );
     Ok(written)
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aircraft_router_planner_cli::terrain::builtin::BuiltinSource;
     use aircraft_router_planner_cli::terrain::TerrainSource;
+    use aircraft_router_planner_cli::terrain::builtin::BuiltinSource;
 
     /// 构造 SRTM .hgt 字节（大端 i16 行优先；行 0 = 北）。
     /// 网格：3×3，值 = 行号*10 + 列号（便于验证翻转：南行序应为 2*10+.. → 0*10+..）。
@@ -967,7 +1025,11 @@ mod tests {
     fn find_dted_test_data() -> Option<std::path::PathBuf> {
         let home = std::env::var("CARGO_HOME")
             .ok()
-            .or_else(|| std::env::var("USERPROFILE").ok().map(|p| format!("{p}\\.cargo")))
+            .or_else(|| {
+                std::env::var("USERPROFILE")
+                    .ok()
+                    .map(|p| format!("{p}\\.cargo"))
+            })
             .or_else(|| std::env::var("HOME").ok().map(|p| format!("{p}/.cargo")))?;
         let src_root = std::path::Path::new(&home).join("registry/src");
         let entries = std::fs::read_dir(&src_root).ok()?;
@@ -1047,7 +1109,10 @@ mod tests {
         let hgt = dir.join(format!("N00E000_{id}.hgt"));
         let arpk = dir.join(format!("N00E000_{id}.arpack"));
         std::fs::write(&hgt, hgt_bytes(4, 4)).unwrap();
-        let opts = ConvertOptions { source: "conv-test".into(), ..Default::default() };
+        let opts = ConvertOptions {
+            source: "conv-test".into(),
+            ..Default::default()
+        };
         let stats = convert_file(&hgt, &arpk, &opts).unwrap();
         assert_eq!(stats.n_blocks, 1); // 4×4 < 256
         let s = BuiltinSource::open(&arpk).unwrap();
@@ -1095,7 +1160,7 @@ mod tests {
     /// 采样与原始逐点一致）+ 块压缩字段 = deflate。
     #[test]
     fn recompress_to_deflate_roundtrip() {
-        use aircraft_router_planner_cli::terrain::builtin::{write_pack_raw, COMPRESSION_DEFLATE};
+        use aircraft_router_planner_cli::terrain::builtin::{COMPRESSION_DEFLATE, write_pack_raw};
         let dir = std::env::temp_dir();
         let id = std::process::id();
         let src = dir.join(format!("recomp_src_{id}.arpack"));
@@ -1130,7 +1195,10 @@ mod tests {
         let written = recompress_arpk1(&src, &out, false).unwrap();
         assert!(written > 0);
         let out_bytes = std::fs::read(&out).unwrap();
-        assert_eq!(out_bytes[66], COMPRESSION_DEFLATE, "block_compression = deflate");
+        assert_eq!(
+            out_bytes[66], COMPRESSION_DEFLATE,
+            "block_compression = deflate"
+        );
 
         let s = BuiltinSource::open(&out).unwrap();
         s.verify_sha().unwrap();
@@ -1154,7 +1222,7 @@ mod tests {
     /// open + verify_sha + 采样与原始逐点一致（ruzstd 0.9 Fastest 编解码 round-trip）。
     #[test]
     fn recompress_to_zstd_experimental_roundtrip() {
-        use aircraft_router_planner_cli::terrain::builtin::{write_pack_raw, COMPRESSION_ZSTD};
+        use aircraft_router_planner_cli::terrain::builtin::{COMPRESSION_ZSTD, write_pack_raw};
         let dir = std::env::temp_dir();
         let id = std::process::id();
         let src = dir.join(format!("recompz_src_{id}.arpack"));

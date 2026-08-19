@@ -119,7 +119,12 @@ pub fn synthetic_cost_field(rows: usize, cols: usize, cell_m: f64, seed: u64) ->
 /// - Land/Water/Lake → 1.0（基础代价；地形高度代价由调用方按高度叠加）；
 /// - NoData → `nodata_mult`（NODATA 高代价倍数，初值 5x）；
 /// - OutOfBounds → `f32::INFINITY`（禁行墙，路径不得越出）。
-pub fn build_semantic_cost_field<F>(rows: usize, cols: usize, mut sample: F, nodata_mult: f32) -> CostField
+pub fn build_semantic_cost_field<F>(
+    rows: usize,
+    cols: usize,
+    mut sample: F,
+    nodata_mult: f32,
+) -> CostField
 where
     F: FnMut(usize, usize) -> Sample,
 {

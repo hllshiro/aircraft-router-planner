@@ -5,7 +5,9 @@ use aircraft_router_planner_cli::terrain::TerrainSource;
 
 fn main() {
     let mut args = std::env::args().skip(1);
-    let path = args.next().expect("usage: arpk1_probe <file.arpk1> [lon lat ...]");
+    let path = args
+        .next()
+        .expect("usage: arpk1_probe <file.arpk1> [lon lat ...]");
     let src = match aircraft_router_planner_cli::terrain::open_source(std::path::Path::new(&path)) {
         Ok(s) => s,
         Err(e) => {
@@ -35,7 +37,13 @@ fn main() {
 }
 
 fn pts_default(src: &dyn TerrainSource) {
-    for (lon, lat) in [(116.000, 39.000), (116.001, 39.001), (116.080, 39.120), (116.199, 39.299), (116.050, 39.300)] {
+    for (lon, lat) in [
+        (116.000, 39.000),
+        (116.001, 39.001),
+        (116.080, 39.120),
+        (116.199, 39.299),
+        (116.050, 39.300),
+    ] {
         println!("sample({lon}, {lat}) = {:?}", src.height_at(lon, lat));
     }
 }

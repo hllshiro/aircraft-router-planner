@@ -73,7 +73,10 @@ impl Default for SmoothOptions {
 ///   min(巡航物理下限, turn_radius)，solver 的 verify A6 检查与预取 slack 用它；
 /// - 旋翼机 r→0 合法（可悬停原地转向，九轮共识），turn_radius 不钳；
 /// - max_climb = `max_climb_angle_deg` → 默认表 15°（固定翼运动学复验用）。
-pub fn smooth_options_for(profile: &VehicleProfile, params: &DefaultParams) -> (SmoothOptions, f64) {
+pub fn smooth_options_for(
+    profile: &VehicleProfile,
+    params: &DefaultParams,
+) -> (SmoothOptions, f64) {
     let v = profile
         .cruise_speed_mps
         .or_else(|| profile.speed_range_mps.map(|[a, b]| (a + b) / 2.0))
@@ -155,7 +158,10 @@ pub fn theta_star_smooth(
             let b = path.points[j];
             if !check(a.lon, a.lat, a.alt_m, b.lon, b.lat, b.alt_m) {
                 if std::env::var_os("ARP_DEBUG_SMOOTH").is_some() && out.len() < 4 {
-                    eprintln!("[ts-dbg] i={i} j={j} reject=check ({:.4},{:.4})->({:.4},{:.4})", a.lon, a.lat, b.lon, b.lat);
+                    eprintln!(
+                        "[ts-dbg] i={i} j={j} reject=check ({:.4},{:.4})->({:.4},{:.4})",
+                        a.lon, a.lat, b.lon, b.lat
+                    );
                 }
                 j -= 1;
                 continue;
@@ -198,7 +204,10 @@ pub fn theta_star_smooth(
                     };
                     if d > effective_max {
                         if std::env::var_os("ARP_DEBUG_SMOOTH").is_some() && out.len() < 4 {
-                            eprintln!("[ts-dbg] i={i} j={j} reject=turn {d:.1}>={effective_max} h0={h0:.1} h1={h1:.1} entry={entry_heading:?} outlen={}", out.len());
+                            eprintln!(
+                                "[ts-dbg] i={i} j={j} reject=turn {d:.1}>={effective_max} h0={h0:.1} h1={h1:.1} entry={entry_heading:?} outlen={}",
+                                out.len()
+                            );
                         }
                         // 跳点转角超限：尝试圆弧过渡拆分（2026-08-11 zz33）。
                         // 绕多边形北缘时 raw 折返段与拉直方向冲突（wp1→wp2 需转
@@ -268,9 +277,19 @@ pub fn theta_star_smooth(
                     let h0 = heading_deg_pts(&a, &b);
                     let h1 = heading_deg_pts(&b, &c);
                     if crate::path::angle_diff_deg(h0, h1).abs() > max_turn {
-                        if let Some((pts, k)) =
-                            arc_transition(&a, &b, &c, max_turn, min_r_m, check, &path.points, i, true, false, 0)
-                        {
+                        if let Some((pts, k)) = arc_transition(
+                            &a,
+                            &b,
+                            &c,
+                            max_turn,
+                            min_r_m,
+                            check,
+                            &path.points,
+                            i,
+                            true,
+                            false,
+                            0,
+                        ) {
                             let npts = pts.len();
                             // 弹出 b（急转弯点）：弧从入段线上的 S 开始，不再经过 b
                             // （否则 b→S 是掉头 180°，verify 拒）。
@@ -369,7 +388,9 @@ pub(crate) fn arc_transition(
     } else {
         -1.0
     };
-    let n = ((theta / max_turn_deg).ceil() as usize).max(min_steps).max(2);
+    let n = ((theta / max_turn_deg).ceil() as usize)
+        .max(min_steps)
+        .max(2);
     let delta = theta / n as f64;
     // 步长（米）：保证弧半径 ≥ min_r_m，且不小于 2km（避免点过密）。
     // keep_b（必经点/段端点硬点）：用物理转弯半径——弧紧贴 b（切点偏差
@@ -443,7 +464,10 @@ pub(crate) fn arc_transition(
     for k in 1..=n {
         let t = k as f64 / n as f64;
         let h_rad = (phi0 + side * t * theta).to_radians();
-        let (p_lon, p_lat) = (c_lon + r_eff * h_rad.sin() / kx, c_lat + r_eff * h_rad.cos() / ky);
+        let (p_lon, p_lat) = (
+            c_lon + r_eff * h_rad.sin() / kx,
+            c_lat + r_eff * h_rad.cos() / ky,
+        );
         pts.push(crate::path::PathPoint {
             lon: p_lon,
             lat: p_lat,
@@ -558,7 +582,9 @@ pub fn catmull_rom_spline(path: &Path, samples_per_seg: usize) -> Path {
             let t2 = t * t;
             let t3 = t2 * t;
             let cr = |a: f64, b: f64, c: f64, d: f64| {
-                0.5 * ((2.0 * b) + (-a + c) * t + (2.0 * a - 5.0 * b + 4.0 * c - d) * t2
+                0.5 * ((2.0 * b)
+                    + (-a + c) * t
+                    + (2.0 * a - 5.0 * b + 4.0 * c - d) * t2
                     + (-a + 3.0 * b - 3.0 * c + d) * t3)
             };
             out.push(PathPoint {
@@ -623,10 +649,16 @@ impl LocalProjection {
         }
     }
     pub fn to_xy(&self, lon: f64, lat: f64) -> (f64, f64) {
-        ((lon - self.clon) * self.k * 111_320.0, (lat - self.clat) * 111_320.0)
+        (
+            (lon - self.clon) * self.k * 111_320.0,
+            (lat - self.clat) * 111_320.0,
+        )
     }
     pub fn to_lonlat(&self, x: f64, y: f64) -> (f64, f64) {
-        (self.clon + x / (self.k * 111_320.0), self.clat + y / 111_320.0)
+        (
+            self.clon + x / (self.k * 111_320.0),
+            self.clat + y / 111_320.0,
+        )
     }
 }
 
@@ -745,14 +777,35 @@ mod base_tests {
             PathPoint::new(0.03, 0.03, 100.0),
         ]);
         // 入航向 0°（东），首跳点方向 45°（东北）→ 45° <= 60° 允许
-        let out = theta_star_smooth(&p, &|_, _, _, _, _, _| true, Some(60.0), Some(0.0), 0.0, 95.0);
+        let out = theta_star_smooth(
+            &p,
+            &|_, _, _, _, _, _| true,
+            Some(60.0),
+            Some(0.0),
+            0.0,
+            95.0,
+        );
         assert_eq!(out.len(), 2, "45° 首跳应允许: got {}", out.len());
         // 入航向 90°（北），首跳点方向 45° → 差 45° <= 60° 允许
-        let out = theta_star_smooth(&p, &|_, _, _, _, _, _| true, Some(60.0), Some(90.0), 0.0, 95.0);
+        let out = theta_star_smooth(
+            &p,
+            &|_, _, _, _, _, _| true,
+            Some(60.0),
+            Some(90.0),
+            0.0,
+            95.0,
+        );
         assert_eq!(out.len(), 2, "45° 差应允许: got {}", out.len());
         // 入航向 180°（西），首跳点方向 45° → 差 135° > 60° → 拒跳，退邻点
         // （首跳被拒但后续跳点仍可拉直 → 3 点：(0,0)→(0.01,0.01)→(0.03,0.03)）
-        let out = theta_star_smooth(&p, &|_, _, _, _, _, _| true, Some(60.0), Some(180.0), 0.0, 95.0);
+        let out = theta_star_smooth(
+            &p,
+            &|_, _, _, _, _, _| true,
+            Some(60.0),
+            Some(180.0),
+            0.0,
+            95.0,
+        );
         assert_eq!(out.len(), 3, "135° 首跳应拒: got {}", out.len());
         // 无入航向（起点段）→ 不约束首跳（保持原语义）
         let out = theta_star_smooth(&p, &|_, _, _, _, _, _| true, Some(60.0), None, 0.0, 95.0);
@@ -811,12 +864,7 @@ mod base_tests {
         assert!(out.len() >= 4);
         // 首末点保持
         let d0 = haversine_m(out.points[0].lon, out.points[0].lat, 0.0, 0.0);
-        let d1 = haversine_m(
-            out.last().unwrap().lon,
-            out.last().unwrap().lat,
-            1.0,
-            0.0,
-        );
+        let d1 = haversine_m(out.last().unwrap().lon, out.last().unwrap().lat, 1.0, 0.0);
         assert!(d0 < 100.0 && d1 < 100.0, "d0={d0} d1={d1}");
         // 高度剖面保持 100
         for pt in &out.points {
@@ -1029,7 +1077,11 @@ pub fn verify_path(
         let mid = path.points[n / 2];
         LocalProjection::new(mid.lon, mid.lat)
     };
-    let xy: Vec<(f64, f64)> = path.points.iter().map(|p| proj.to_xy(p.lon, p.lat)).collect();
+    let xy: Vec<(f64, f64)> = path
+        .points
+        .iter()
+        .map(|p| proj.to_xy(p.lon, p.lat))
+        .collect();
     for i in 1..n {
         // 爬升角（仅固定翼）
         if kinematic {
@@ -1133,9 +1185,8 @@ pub fn verify_path(
         if let Some(zs) = ctx.zones {
             for z in zs {
                 if z.is_wall() {
-                    let clr = crate::config::zone_segment_clearance_km(
-                        a.lon, a.lat, b.lon, b.lat, z,
-                    );
+                    let clr =
+                        crate::config::zone_segment_clearance_km(a.lon, a.lat, b.lon, b.lat, z);
                     if clr <= 1e-9 || clr < infl_km {
                         rep.issues.push(format!(
                             "segment {i}: clearance {clr:.2}km < inflation {infl_km:.2}km (zone wall)"
@@ -1192,10 +1243,9 @@ pub fn verify_path(
                     // 完整 Zone 语义：水平 + 高度区间（AGL 需地面高度）；硬墙已在上面
                     // 净距检查覆盖（全高度墙），这里只查 Restricted（高度层语义）。
                     let ground = ctx.terrain.and_then(|t| t.height_at(lon, lat));
-                    if zs
-                        .iter()
-                        .any(|z| !z.is_wall() && crate::config::zone_contains_at(z, &g, alt, ground))
-                    {
+                    if zs.iter().any(|z| {
+                        !z.is_wall() && crate::config::zone_contains_at(z, &g, alt, ground)
+                    }) {
                         rep.issues.push(format!(
                             "sample (lon={lon:.4},lat={lat:.4},alt={alt:.0}) inside zone (alt band)"
                         ));
@@ -1212,9 +1262,8 @@ pub fn verify_path(
                 // 单点判定与 Theta* check 共用原语（阶段1-A）——口径单一来源。
                 match terrain_point_clearance(ter, lon, lat, alt, opts.clearance_m) {
                     TerrainPointClearance::Fail(msg) => {
-                        rep.issues.push(format!(
-                            "sample (lon={lon:.4},lat={lat:.4}) {msg}"
-                        ));
+                        rep.issues
+                            .push(format!("sample (lon={lon:.4},lat={lat:.4}) {msg}"));
                     }
                     TerrainPointClearance::Ok => {}
                     TerrainPointClearance::NoData => {
@@ -1288,7 +1337,8 @@ pub fn verify_path(
         if tr.over_threshold {
             rep.warnings.push(format!(
                 "radar: cumulative detection p {:.4} > threshold {:.4}",
-                tr.cumulative_p, thr.p_cross()
+                tr.cumulative_p,
+                thr.p_cross()
             ));
         } else if tr.cumulative_p > 0.0 {
             rep.warnings.push(format!(
@@ -1343,7 +1393,8 @@ pub fn terrain_point_clearance(
             if alt < h + clearance_m {
                 TerrainPointClearance::Fail(format!(
                     "clearance {:.0}m < {:.0}m (terrain {h:.0}m)",
-                    alt - h, clearance_m
+                    alt - h,
+                    clearance_m
                 ))
             } else {
                 TerrainPointClearance::Ok
@@ -1479,7 +1530,9 @@ pub fn default_chain<'a>(
         // Catmull-Rom 过点样条：对"绕行弧线"（Theta* 拉直受深探测 check 限制只能折线逼近）
         // 输出曲率≈绕行半径的平滑样条，复验（转角/半径/弦高）自然通过；
         // 对"锯齿直穿"则样条曲率小 → 半径复验失败 → 回退 Dubins/直线替代（正确语义）。
-        chain.push(Box::new(CatmullRomSmoother { samples_per_seg: 16 }));
+        chain.push(Box::new(CatmullRomSmoother {
+            samples_per_seg: 16,
+        }));
         chain.push(Box::new(DubinsSmoother {
             r_m: opts.turn_radius_m,
             sample_n: opts.dubins_sample_n,
@@ -1634,7 +1687,13 @@ pub fn smooth_path_chain<'a>(
         } else {
             opts.clone()
         };
-        let rep = verify_path(stage, Some(&reference), &verify_opts, ctx, phys_min_radius_m);
+        let rep = verify_path(
+            stage,
+            Some(&reference),
+            &verify_opts,
+            ctx,
+            phys_min_radius_m,
+        );
         return SmoothResult {
             path: stage.clone(),
             applied,
@@ -1655,9 +1714,12 @@ pub fn smooth_path_chain<'a>(
                 serde_json::json!({ "name": n, "issues": iss, "warnings": warn })
             }).collect::<Vec<_>>(),
         });
-        eprintln!("{}", serde_json::to_string(&json).unwrap_or_else(|_| {
-            r#"{"event":"smooth_chain_failed","serialize_error":true}"#.into()
-        }));
+        eprintln!(
+            "{}",
+            serde_json::to_string(&json).unwrap_or_else(|_| {
+                r#"{"event":"smooth_chain_failed","serialize_error":true}"#.into()
+            })
+        );
     }
     SmoothResult {
         path: input.clone(),
@@ -1709,12 +1771,21 @@ mod chain_tests {
         );
         assert!(t.is_some(), "浅穿必须判相交");
         if let Some((t1, t2)) = t {
-            assert!(t1 > 0.5 && t2 < 0.7, "浅穿区间应在 0.59..0.63 附近, got {t1:.3}..{t2:.3}");
+            assert!(
+                t1 > 0.5 && t2 < 0.7,
+                "浅穿区间应在 0.59..0.63 附近, got {t1:.3}..{t2:.3}"
+            );
         }
         // 远线段（不穿圆）→ None
         assert!(
             segment_circle_intersect_t(
-                118.0, 38.0, 117.0, 38.5, 116.27050736818683, 41.08978345198258, 50.0
+                118.0,
+                38.0,
+                117.0,
+                38.5,
+                116.27050736818683,
+                41.08978345198258,
+                50.0
             )
             .is_none()
         );
@@ -1755,7 +1826,7 @@ mod chain_tests {
             nofly: None,
             zones: None,
             threat: None,
-              zone_inflation_m: 0.0,
+            zone_inflation_m: 0.0,
         };
         let rep = verify_path(&p, None, &opts, &ctx, None);
         assert!(rep.ok, "issues: {:?}", rep.issues);
@@ -1774,7 +1845,7 @@ mod chain_tests {
             nofly: None,
             zones: None,
             threat: None,
-              zone_inflation_m: 0.0,
+            zone_inflation_m: 0.0,
         };
         let rep = verify_path(&p, None, &opts, &ctx, None);
         assert!(!rep.ok);
@@ -1807,11 +1878,15 @@ mod chain_tests {
             nofly: None,
             zones: Some(&zones),
             threat: None,
-              zone_inflation_m: 0.0,
+            zone_inflation_m: 0.0,
         };
         let rep = verify_path(&p_in, None, &opts, &ctx, None);
         assert!(!rep.ok);
-        assert!(rep.issues.iter().any(|s| s.contains("zone")), "{:?}", rep.issues);
+        assert!(
+            rep.issues.iter().any(|s| s.contains("zone")),
+            "{:?}",
+            rep.issues
+        );
         // 高度 3000 在区间外 → 放行（水平位置相同）
         let p_out = Path::new(vec![
             PathPoint::new(0.0, 0.0, 3000.0),
@@ -1839,7 +1914,7 @@ mod chain_tests {
             nofly: Some(&idx),
             zones: None,
             threat: None,
-              zone_inflation_m: 0.0,
+            zone_inflation_m: 0.0,
         };
         let rep = verify_path(&p, None, &opts, &ctx, None);
         assert!(!rep.ok);
@@ -1849,7 +1924,7 @@ mod chain_tests {
     #[test]
     fn verify_turn_radius_violation() {
         let opts = SmoothOptions {
-            max_turn_deg: 180.0, // 只测转弯半径
+            max_turn_deg: 180.0,      // 只测转弯半径
             turn_radius_m: 100_000.0, // 极小转弯必违规
             ..Default::default()
         };
@@ -1864,11 +1939,15 @@ mod chain_tests {
             nofly: None,
             zones: None,
             threat: None,
-              zone_inflation_m: 0.0,
+            zone_inflation_m: 0.0,
         };
         let rep = verify_path(&p, None, &opts, &ctx, None);
         assert!(!rep.ok);
-        assert!(rep.issues.iter().any(|s| s.contains("radius")), "{:?}", rep.issues);
+        assert!(
+            rep.issues.iter().any(|s| s.contains("radius")),
+            "{:?}",
+            rep.issues
+        );
     }
 
     /// 阶段1-B 护栏：软项微小超差在容忍带内判过但计 warn（转角 ≤ max+2°）。
@@ -1891,7 +1970,7 @@ mod chain_tests {
             nofly: None,
             zones: None,
             threat: None,
-              zone_inflation_m: 0.0,
+            zone_inflation_m: 0.0,
         };
         let rep = verify_path(&p, None, &opts, &ctx, None);
         assert!(rep.ok, "60.5° 转角在容忍带内不应判败: {:?}", rep.issues);
@@ -1920,11 +1999,15 @@ mod chain_tests {
             nofly: None,
             zones: None,
             threat: None,
-              zone_inflation_m: 0.0,
+            zone_inflation_m: 0.0,
         };
         let rep = verify_path(&p, None, &opts, &ctx, None);
         assert!(!rep.ok);
-        assert!(rep.issues.iter().any(|s| s.contains("turn")), "{:?}", rep.issues);
+        assert!(
+            rep.issues.iter().any(|s| s.contains("turn")),
+            "{:?}",
+            rep.issues
+        );
     }
 
     #[test]
@@ -1935,7 +2018,7 @@ mod chain_tests {
             nofly: None,
             zones: None,
             threat: None,
-              zone_inflation_m: 0.0,
+            zone_inflation_m: 0.0,
         };
         // 带锯齿的折线（共线 + 轻微偏转），高度 500 满足净空
         let pts: Vec<PathPoint> = (0..20)
@@ -1983,7 +2066,7 @@ mod chain_tests {
             nofly: None,
             zones: None,
             threat: None,
-              zone_inflation_m: 0.0,
+            zone_inflation_m: 0.0,
         };
         let input = Path::new(vec![
             PathPoint::new(0.0, 0.0, 500.0),
@@ -1997,7 +2080,10 @@ mod chain_tests {
         assert!(!out.applied.is_empty(), "applied: {:?}", out.applied);
         assert_eq!(out.warning, None, "NoData 地形不应 smoothing_failed");
         assert!(
-            out.verify.warnings.iter().any(|w| w.contains("NoData terrain")),
+            out.verify
+                .warnings
+                .iter()
+                .any(|w| w.contains("NoData terrain")),
             "应保留 NoData 降级警告，实际 {:?}",
             out.verify.warnings
         );
@@ -2011,7 +2097,7 @@ mod chain_tests {
             nofly: None,
             zones: None,
             threat: None,
-              zone_inflation_m: 0.0,
+            zone_inflation_m: 0.0,
         };
         let input = Path::new(vec![
             PathPoint::new(f64::NAN, 0.0, 500.0),
@@ -2050,7 +2136,7 @@ mod chain_tests {
             nofly: None,
             zones: None,
             threat: None,
-              zone_inflation_m: 0.0,
+            zone_inflation_m: 0.0,
         };
         let wave = square_wave(4, 0.02);
         let check = |lon1: f64, lat1: f64, _: f64, lon2: f64, lat2: f64, _: f64| {
@@ -2075,7 +2161,7 @@ mod chain_tests {
             nofly: None,
             zones: None,
             threat: None,
-              zone_inflation_m: 0.0,
+            zone_inflation_m: 0.0,
         };
         let wave = square_wave(4, 0.02);
         let check = |_: f64, _: f64, _: f64, _: f64, _: f64, _: f64| true;
@@ -2099,7 +2185,7 @@ mod chain_tests {
             nofly: None,
             zones: None,
             threat: None,
-              zone_inflation_m: 0.0,
+            zone_inflation_m: 0.0,
         };
         let wave = square_wave(4, 0.02);
         let rep = verify_path(&wave, None, &opts, &ctx, None);
@@ -2119,7 +2205,7 @@ mod chain_tests {
             nofly: None,
             zones: None,
             threat: None,
-              zone_inflation_m: 0.0,
+            zone_inflation_m: 0.0,
         };
         // check 拒绝斜穿（模拟绕障方波）→ theta_star 截不了 → 保持
         let wave = square_wave(4, 0.02);
@@ -2145,7 +2231,11 @@ mod chain_tests {
         let (o, a6) = smooth_options_for(&prof, &p);
         assert!((a6 - 5000.0).abs() < 1e-9, "a6 = {a6}");
         assert_eq!(o.aircraft_type, AircraftType::FixedWing);
-        assert!((o.turn_radius_m - 5000.0).abs() < 1e-9, "turn {}", o.turn_radius_m);
+        assert!(
+            (o.turn_radius_m - 5000.0).abs() < 1e-9,
+            "turn {}",
+            o.turn_radius_m
+        );
         // 默认 max_climb = 默认表 15°
         assert!((o.max_climb_deg - 15.0).abs() < 1e-9);
 
@@ -2177,7 +2267,11 @@ mod chain_tests {
             ..Default::default()
         };
         let (o, a6) = smooth_options_for(&prof, &p);
-        assert!((o.turn_radius_m - 442.0).abs() < 1e-9, "turn {}", o.turn_radius_m);
+        assert!(
+            (o.turn_radius_m - 442.0).abs() < 1e-9,
+            "turn {}",
+            o.turn_radius_m
+        );
         assert!((a6 - 442.0).abs() < 1e-9, "a6 = {a6}");
         let v_turn = (442.0 * 9.81 * 30f64.to_radians().tan()).sqrt();
         assert!((v_turn - 50.0).abs() < 1.0, "v_turn = {v_turn}");

@@ -19,12 +19,15 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use axum::{Json, Router, routing::{get, post}};
+use axum::{
+    routing::{get, post},
+    Json, Router,
+};
 use serde::Deserialize;
 use serde_json::Value;
 use tower_http::services::{ServeDir, ServeFile};
 
-use aircraft_router_planner_cli::terrain::{TerrainSource, open_source};
+use aircraft_router_planner_cli::terrain::{open_source, TerrainSource};
 
 mod basemap;
 
@@ -71,7 +74,10 @@ fn cli_bin() -> PathBuf {
         if pb.exists() {
             return pb;
         }
-        eprintln!("[warn] ARP_CLI set but not found: {} — falling back to candidates", pb.display());
+        eprintln!(
+            "[warn] ARP_CLI set but not found: {} — falling back to candidates",
+            pb.display()
+        );
     }
     let mut cands: Vec<PathBuf> = Vec::new();
     if let Ok(exe) = std::env::current_exe() {
@@ -106,10 +112,7 @@ fn run_cli(input_json: &str) -> Result<Value, String> {
         .map_err(|e| format!("Failed to spawn CLI: {}", e))?;
 
     {
-        let stdin = child
-            .stdin
-            .as_mut()
-            .ok_or("Failed to open CLI stdin")?;
+        let stdin = child.stdin.as_mut().ok_or("Failed to open CLI stdin")?;
         stdin
             .write_all(input_json.as_bytes())
             .map_err(|e| format!("Failed to write to CLI stdin: {}", e))?;
@@ -161,7 +164,12 @@ fn get_source(path: &str) -> Result<Arc<dyn TerrainSource>, String> {
 /// 2026-08-13：前端粘贴 Windows 绝对路径带 U+202A → 文件打不开 → 瓦片全部失败空白。
 pub(crate) fn sanitize_path(path: &str) -> String {
     path.chars()
-        .filter(|c| !matches!(*c, '\u{202a}' | '\u{202b}' | '\u{202c}' | '\u{200e}' | '\u{200f}' | '\u{feff}'))
+        .filter(|c| {
+            !matches!(
+                *c,
+                '\u{202a}' | '\u{202b}' | '\u{202c}' | '\u{200e}' | '\u{200f}' | '\u{feff}'
+            )
+        })
         .collect::<String>()
         .trim()
         .to_string()
@@ -202,7 +210,10 @@ pub(crate) fn resolve_terrain_path(path: &str) -> Result<PathBuf, String> {
     if let Some(c) = cands.iter().find(|c| c.exists()) {
         return Ok(c.clone());
     }
-    Err(format!("terrain file not found: {}（候选: {:?}）", path, cands))
+    Err(format!(
+        "terrain file not found: {}（候选: {:?}）",
+        path, cands
+    ))
 }
 
 /// `data/x.arpack` → `x.arpack`；`x.arpack` → `x.arpack`（无目录则原样）。
@@ -227,7 +238,8 @@ struct TerrainReq {
 }
 
 /// POST /api/terrain 请求体。
-async fn terrain_route(Json(payload): Json<TerrainReq>) -> Json<Value> {    let src = match get_source(&payload.path) {
+async fn terrain_route(Json(payload): Json<TerrainReq>) -> Json<Value> {
+    let src = match get_source(&payload.path) {
         Ok(s) => s,
         Err(e) => return Json(serde_json::json!({ "error": format!("open terrain: {e}") })),
     };
@@ -241,10 +253,7 @@ async fn terrain_route(Json(payload): Json<TerrainReq>) -> Json<Value> {    let 
         },
     };
 
-    if !(min_lon.is_finite()
-        && min_lat.is_finite()
-        && max_lon.is_finite()
-        && max_lat.is_finite())
+    if !(min_lon.is_finite() && min_lat.is_finite() && max_lon.is_finite() && max_lat.is_finite())
         || min_lon >= max_lon
         || min_lat >= max_lat
     {
@@ -313,7 +322,9 @@ async fn elevation_route(Json(payload): Json<ElevationReq>) -> Json<Value> {
         Err(e) => return Json(serde_json::json!({ "error": format!("open terrain: {e}") })),
     };
     // height_at 返回 Option<f64>；NaN 视为无数据 → null（serde_json 不支持 NaN 序列化）
-    let elev = src.height_at(payload.lon, payload.lat).filter(|v| v.is_finite());
+    let elev = src
+        .height_at(payload.lon, payload.lat)
+        .filter(|v| v.is_finite());
     Json(serde_json::json!({ "elevation_m": elev }))
 }
 
@@ -458,6 +469,9 @@ async fn main() {
         .await
         .unwrap_or_else(|e| panic!("Failed to bind port {port}: {e}"));
 
-    println!("Server listening on http://0.0.0.0:{port} (web: {})", web_dir.display());
+    println!(
+        "Server listening on http://0.0.0.0:{port} (web: {})",
+        web_dir.display()
+    );
     axum::serve(listener, app).await.expect("Server error");
 }

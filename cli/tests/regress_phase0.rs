@@ -40,10 +40,10 @@ fn real_terrain_path() -> Option<PathBuf> {
 /// - 数据缺失 → terrain.source=none（合成平面）。
 fn load_case(name: &str) -> Input {
     let p = cases_dir().join(name);
-    let raw = std::fs::read_to_string(&p)
-        .unwrap_or_else(|e| panic!("{name}: read case failed: {e}"));
-    let mut input: Input = Input::from_json_str(&raw)
-        .unwrap_or_else(|e| panic!("{name}: parse failed: {e}"));
+    let raw =
+        std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("{name}: read case failed: {e}"));
+    let mut input: Input =
+        Input::from_json_str(&raw).unwrap_or_else(|e| panic!("{name}: parse failed: {e}"));
     if input.mission.terrain.source == config::TerrainSourceType::None {
         return input;
     }
@@ -81,9 +81,7 @@ fn point_in_polygon(verts: &[[f64; 2]], p: &Geo) -> bool {
     for i in 0..verts.len() {
         let (xi, yi) = (verts[i][0], verts[i][1]);
         let (xj, yj) = (verts[j][0], verts[j][1]);
-        if ((yi > y) != (yj > y))
-            && (x < (xj - xi) * (y - yi) / (yj - yi) + xi)
-        {
+        if ((yi > y) != (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi) {
             inside = !inside;
         }
         j = i;
@@ -155,14 +153,17 @@ fn phase0_feedback_inputs_regression() {
     eprintln!(
         "[regress] {} cases, real terrain = {}",
         names.len(),
-        if terrain_ok { "present" } else { "MISSING (using terrain none)" }
+        if terrain_ok {
+            "present"
+        } else {
+            "MISSING (using terrain none)"
+        }
     );
 
     for name in &names {
         let input = load_case(name);
         // 输入必须过契约校验（退化输入本身即 bug，反馈输入都应是合法任务）
-        config::validate(&input)
-            .unwrap_or_else(|e| panic!("{name}: validate failed: {e:?}"));
+        config::validate(&input).unwrap_or_else(|e| panic!("{name}: validate failed: {e:?}"));
 
         let mut params = SolveParams::default();
         if input.mission.terrain.source != config::TerrainSourceType::None {
@@ -285,6 +286,10 @@ fn phase0_feedback_inputs_regression() {
             );
         }
 
-        eprintln!("[regress] {name}: status={} vehicles={}", out.status, out.vehicles.len());
+        eprintln!(
+            "[regress] {name}: status={} vehicles={}",
+            out.status,
+            out.vehicles.len()
+        );
     }
 }

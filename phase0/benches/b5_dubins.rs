@@ -4,7 +4,7 @@
 //! - 转弯半径 R=5km（巡航 ~200m/s、坡度 45° 量级，A6 自洽参考）；
 //! - 产出：单段求解耗时、拟合成功率（≥90% 判据）、平均单段长度。
 
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 use phase0::dubins::{dubins_path, dubins_shortest_len, dubins_success_rate};
 use rand::{RngExt, SeedableRng};
 use std::hint::black_box;
@@ -85,7 +85,10 @@ fn criterion_benchmark(c: &mut Criterion) {
         }
         let _ = dubins_path((x0, y0), th0, (x1, y1), th1, r);
     }
-    println!("[fit-fail-analysis] samples with d<2R: {}/{}", close, N_SAMPLES);
+    println!(
+        "[fit-fail-analysis] samples with d<2R: {}/{}",
+        close, N_SAMPLES
+    );
 }
 
 criterion_group!(benches, criterion_benchmark);

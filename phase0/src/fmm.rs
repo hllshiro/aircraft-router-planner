@@ -155,13 +155,7 @@ const STATE_ACCEPTED: u8 = 2;
 
 /// 2D Godunov 迎风更新：以已接受邻居解二次方程。
 #[inline]
-fn solve_t(
-    field: &CostField,
-    times: &[f32],
-    state: &[u8],
-    r: usize,
-    c: usize,
-) -> f32 {
+fn solve_t(field: &CostField, times: &[f32], state: &[u8], r: usize, c: usize) -> f32 {
     let cost = field.get(r, c);
     let idx = |rr: usize, cc: usize| rr * field.cols + cc;
 

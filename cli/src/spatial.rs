@@ -6,8 +6,8 @@
 //!
 //! 确定性（13 轮共识热路径）：查询结果按 (id) 排序输出，迭代序与插入序无关。
 
-use rstar::{RTree, RTreeObject, AABB};
 use rstar::PointDistance;
+use rstar::{AABB, RTree, RTreeObject};
 
 /// 雷达条目（投影圆：中心经纬度 + 膨胀后半径）。
 #[derive(Debug, Clone)]

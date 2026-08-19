@@ -12,14 +12,16 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use crate::config::{
-    point_in_polygon_xy, pt_seg_dist_km, resolve_target_ref, zone_contains, zone_contains_at,
     Input, Output, PathPoint, Stats, TerrainSourceType, VehicleOutput, Zone, ZoneShape,
+    point_in_polygon_xy, pt_seg_dist_km, resolve_target_ref, zone_contains, zone_contains_at,
 };
 use crate::coord::Geo;
-use crate::costfield::{backtrack_path, build_semantic_cost_field, build_semantic_cost_field_par_local, fmm_propagate};
+use crate::costfield::{
+    backtrack_path, build_semantic_cost_field, build_semantic_cost_field_par_local, fmm_propagate,
+};
 use crate::error::{AppError, InputInvalidReason};
 use crate::path::{Path, PathPoint as RouterPoint};
-use crate::smooth::{default_chain, segment_circle_intersect_t, smooth_path_chain, VerifyContext};
+use crate::smooth::{VerifyContext, default_chain, segment_circle_intersect_t, smooth_path_chain};
 use crate::spatial::{CircleEntry, CircleIndex};
 use crate::terrain::builtin::BuiltinSource;
 use crate::terrain::mask::{GeoMask, MaskedSource};
@@ -155,9 +157,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                         .to_ascii_lowercase();
                     match ext.as_str() {
                         // ARPK1/zstd → BuiltinSource（BulkPrefetch 预取路径）
-                        "arpack" | "zstd" => {
-                            InnerSource::Builtin(BuiltinSource::open(&p)?)
-                        }
+                        "arpack" | "zstd" => InnerSource::Builtin(BuiltinSource::open(&p)?),
                         // 外部格式 → open_source 分派对应解析库（GeoTiff/Dted/Srtm/目录）
                         _ => InnerSource::Dyn(crate::terrain::open_source(&p)?),
                     }
@@ -197,8 +197,8 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                 .mask_path
                 .clone()
                 .or_else(|| input.mission.terrain.mask_path.clone().map(PathBuf::from));
-            let explicit_terrain = params.terrain_path.is_some()
-                || input.mission.terrain.path.is_some();
+            let explicit_terrain =
+                params.terrain_path.is_some() || input.mission.terrain.path.is_some();
             match mask {
                 Some(mp) => {
                     if !mp.exists() {
@@ -209,9 +209,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                     }
                     let gm = GeoMask::open(&mp)?;
                     match inner {
-                        InnerSource::Builtin(b) => {
-                            TerrainHandle::Masked(MaskedSource::new(b, gm))
-                        }
+                        InnerSource::Builtin(b) => TerrainHandle::Masked(MaskedSource::new(b, gm)),
                         InnerSource::Dyn(d) => {
                             TerrainHandle::MaskedExternal(MaskedSource::new(d, gm))
                         }
@@ -267,15 +265,17 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                     .mid_waypoints
                     .iter()
                     .map(|w| {
-                        Geo::new(w.lon, w.lat)
-                            .map_err(|_| AppError::InputInvalid(InputInvalidReason::IllegalCoordinate))
+                        Geo::new(w.lon, w.lat).map_err(|_| {
+                            AppError::InputInvalid(InputInvalidReason::IllegalCoordinate)
+                        })
                     })
                     .collect::<Result<Vec<_>, AppError>>()?;
                 let mid_alts = v.mid_waypoints.iter().map(|w| w.alt_m).collect::<Vec<_>>();
                 Ok(VehicleSpec {
                     id: v.id.clone(),
-                    start: Geo::new(v.start_pose.lon, v.start_pose.lat)
-                        .map_err(|_| AppError::InputInvalid(InputInvalidReason::IllegalCoordinate))?,
+                    start: Geo::new(v.start_pose.lon, v.start_pose.lat).map_err(|_| {
+                        AppError::InputInvalid(InputInvalidReason::IllegalCoordinate)
+                    })?,
                     target: resolve_target_ref(v.target_ref.as_deref(), &mission_target)?,
                     alt_m: v.start_pose.alt_m,
                     target_alt_m: crate::config::resolve_target_alt(
@@ -386,7 +386,13 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
     } else {
         base_grid
     };
-    eprintln!("[debug] region span={:.2}deg grid={} cell_m={:.0} (base {:.2})", region.span_deg, grid, region.span_deg * 111_320.0 / grid as f64, base_region.span_deg);
+    eprintln!(
+        "[debug] region span={:.2}deg grid={} cell_m={:.0} (base {:.2})",
+        region.span_deg,
+        grid,
+        region.span_deg * 111_320.0 / grid as f64,
+        base_region.span_deg
+    );
 
     // 4. Zone 集合（no_fly + restricted + obstacles）
     //    代价场墙策略（M2 高度层）：
@@ -507,7 +513,8 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                 .unwrap_or(0.0)
         };
         // 机型平滑参数提前（受限区剖面需要 max_climb：决定下降/爬升距离）
-        let (opts, phys_min_radius_m) = crate::smooth::smooth_options_for(&v.profile, &params_merged);
+        let (opts, phys_min_radius_m) =
+            crate::smooth::smooth_options_for(&v.profile, &params_merged);
         // 起点低于当地地面 → 抬到地面 MSL（主管 2026-08-14 三反：起终点贴地合理，
         // 不加净空；起飞/降落段允许贴近地形，中间巡航段才保净空）
         let start_alt_norm = v.alt_m.max(ground_at(v.start.lon, v.start.lat));
@@ -535,8 +542,8 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
         //     「路径地形最高 + 净空 + 100m」重跑（**路径级**抬升，非区域级——避免把
         //     区域最大地形当目标导致过度抬升破坏 restricted 底部/顶部剖面语义）；
         //   · 抬升后仍无解 → 无过滤场保底（宁丑勿违）。
-        let mut terrain_probe_done = false;   // 已用无过滤场探测路径
-        let mut terrain_alt_raised = false;   // 已抬升巡航高度
+        let mut terrain_probe_done = false; // 已用无过滤场探测路径
+        let mut terrain_alt_raised = false; // 已抬升巡航高度
         let mut terrain_fallback_done = false; // 已回退无过滤场（保底）
         // 有效巡航高度（可被抬升逻辑更新；初始 = 起终点地面抬升后的起点高度）
         let mut alt_eff = start_alt_norm;
@@ -618,9 +625,12 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                             serde_json::json!({ "attempt": a, "issues": iss })
                         }).collect::<Vec<_>>(),
                     });
-                    eprintln!("{}", serde_json::to_string(&json).unwrap_or_else(|_| {
-                        r#"{"event":"fmm_attempts_exhausted","serialize_error":true}"#.into()
-                    }));
+                    eprintln!(
+                        "{}",
+                        serde_json::to_string(&json).unwrap_or_else(|_| {
+                            r#"{"event":"fmm_attempts_exhausted","serialize_error":true}"#.into()
+                        })
+                    );
                 }
                 pts = raw_joined.points.clone();
                 warnings.push("smoothing_failed: max attempts exhausted".into());
@@ -696,16 +706,18 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                     None
                 };
             let field_ref = veh_field.as_ref().unwrap_or(&field);
-            eprintln!("[debug] fmm attempt {} field ready (veh={})", attempts, veh_field.is_some());
+            eprintln!(
+                "[debug] fmm attempt {} field ready (veh={})",
+                attempts,
+                veh_field.is_some()
+            );
             // 逐段 FMM → 回溯 → 拼接（去重段端点）
             let mut raw_segs: Vec<Path> = Vec::new();
             let mut no_solution = false;
             // P7：环带目标集只作用于最后一段（→ target）；有武器时 FMM 传播
             // 到环带 [Rmin, Rmax] 内 T 最小可达 cell 即停（docs/技术方案 §4.2）。
-            let ring_range: Option<[f64; 2]> = v
-                .weapon
-                .as_ref()
-                .and_then(|w| w.effective_range_km());
+            let ring_range: Option<[f64; 2]> =
+                v.weapon.as_ref().and_then(|w| w.effective_range_km());
             let seg_total = seg_ends.windows(2).len();
             for (si, seg) in seg_ends.windows(2).enumerate() {
                 let (s, e) = (seg[0], seg[1]);
@@ -718,7 +730,8 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                 let mut cells_opt: Option<Vec<(usize, usize)>> = None;
                 if is_target_seg {
                     if let Some([rmin_km, rmax_km]) = ring_range {
-                        if let Some((rr, rc)) = ring_target_cell(&res, &v.target, &region, grid, rmin_km, rmax_km)
+                        if let Some((rr, rc)) =
+                            ring_target_cell(&res, &v.target, &region, grid, rmin_km, rmax_km)
                         {
                             cells_opt = backtrack_path(field_ref, &res, rr, rc, sr, sc);
                         }
@@ -726,7 +739,9 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                             // 环带内无可达 cell → 仅当目标点本身落在环带内（Rmin≈0）
                             // 才回退点目标；否则"带最小射程的武器不得停在 Rmin 内"
                             // → 几何无解（degradations 标注，后续随 no_solution 出口）。
-                            let d_km = crate::path::haversine_m(e.lon, e.lat, v.target.lon, v.target.lat) / 1000.0;
+                            let d_km =
+                                crate::path::haversine_m(e.lon, e.lat, v.target.lon, v.target.lat)
+                                    / 1000.0;
                             if d_km >= rmin_km && d_km <= rmax_km {
                                 cells_opt = backtrack_path(field_ref, &res, dr, dc, sr, sc);
                             }
@@ -744,7 +759,12 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                         cells_opt = backtrack_path(field_ref, &res, dr, dc, sr, sc);
                         if cells_opt.is_none() {
                             if let Some((rr, rc, relax_km)) = relaxed_target_cell(
-                                &res, &region, grid, e.lon, e.lat, RELAX_TARGET_MAX_KM,
+                                &res,
+                                &region,
+                                grid,
+                                e.lon,
+                                e.lat,
+                                RELAX_TARGET_MAX_KM,
                             ) {
                                 cells_opt = backtrack_path(field_ref, &res, rr, rc, sr, sc);
                                 if cells_opt.is_some() {
@@ -880,12 +900,11 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                     }
                 }
                 let clearance = opts.clearance_m.max(1.0);
-                if path_max_terr > 0.0 && path_max_terr + clearance >= alt_eff + TERRAIN_MASK_SLACK_M {
+                if path_max_terr > 0.0
+                    && path_max_terr + clearance >= alt_eff + TERRAIN_MASK_SLACK_M
+                {
                     let new_alt = (path_max_terr + clearance + 100.0).max(v.alt_m);
-                    let ceiling_ok = v
-                        .profile
-                        .ceiling_m
-                        .is_none_or(|c| new_alt <= c);
+                    let ceiling_ok = v.profile.ceiling_m.is_none_or(|c| new_alt <= c);
                     if new_alt > alt_eff + 0.5 && ceiling_ok {
                         terrain_alt_raised = true;
                         alt_eff = new_alt;
@@ -927,668 +946,713 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                 continue 'fmm_attempt;
             }
             pts = raw_joined.points.clone();
-        if pts.len() >= 2 {
-            let check = make_segment_check(
-                &all_zones,
-                Some(&threat as &dyn crate::threat::ThreatModel),
-                inflation_km,
-                terrain.as_source(),
-                opts.clearance_m,
-            );
-            let ctx = VerifyContext {
-                terrain: terrain.as_source(),
-                nofly: Some(&nofly),
-                zones: Some(&all_zones),
-                threat: Some(&threat),
-                zone_inflation_m: inflation_m,
-            };
-            // 风险1修复（2026-08-07）：平滑链 verify + 威胁 LOS 采样直接打地形源
-            // （height_at 走 LRU），采样点可能越出代价场预取矩形——region 仅起点/target
-            // 包围盒 + 0.15° 缓冲，而绕行弧（NoFly/雷达/restricted）可偏出该矩形 → 冷块
-            // mmap 切片 + zstd 解压延迟。平滑前按 smooth_src 联合包围盒 + 机动 slack
-            // （转弯半径 + 5km，Dubins 弧偏出 raw 的量级）补一次批量预取：块进全局 LRU，
-            // 之后 height_at 全部命中缓存。region 本身不动——扩大会粗化 FMM 网格 cell
-            // （小区域固定 256 格），有锯齿风险。
-            if let Some(t) = terrain.as_bulk() {
-                let slack_deg = (phys_min_radius_m + 5_000.0) / 111_320.0;
-                let mut min_lon = f64::INFINITY;
-                let mut min_lat = f64::INFINITY;
-                let mut max_lon = f64::NEG_INFINITY;
-                let mut max_lat = f64::NEG_INFINITY;
-                for seg in &smooth_src {
-                    for p in &seg.points {
-                        min_lon = min_lon.min(p.lon);
-                        min_lat = min_lat.min(p.lat);
-                        max_lon = max_lon.max(p.lon);
-                        max_lat = max_lat.max(p.lat);
-                    }
-                }
-                if min_lon.is_finite() {
-                    t.prefetch_lonlat(
-                        min_lon - slack_deg,
-                        min_lat - slack_deg,
-                        max_lon + slack_deg,
-                        max_lat + slack_deg,
-                    );
-                }
-            }
-            // 每段独立平滑（首尾段端点保留——Theta* 截直不得移除必经点）。
-            // 入口航向：前一段输出方向，约束当前段首跳（段边界转角，否则拼接后
-            // 终检暴露——2026-08-07 主管 1755 点场景 seg3 out→climb 与 seg4
-            // climb→A 夹角 61.94° > 60°，climb 是段首点单段 verify 无法发现）。
-            let mut smooth_segs: Vec<crate::path::Path> = Vec::new();
-            // boundary arc 因净距（zone clearance）失败而回退的边界点坐标：final verify
-            // 的 turn 检查对该边界豁免（≤65°；arc 会压到膨胀线内 → 宁可不转，机动空间
-            // 优先，宁丑勿违）。2026-08-11 主管输入：wp1 必经点转角 60.7°>60°，U 形弧
-            // 采样点偏墙 ~386m → arc 后段距墙 1.90km < 2.00km → 全链回退 687 点锯齿。
-            let mut turn_exempt: Vec<(f64, f64)> = Vec::new();
-            let mut seg_warnings = Vec::new();
-            let mut entry_heading: Option<f64> = None;
-            // P7：发射包线终端航向下放平滑级（docs/技术方案 §4.2：终端姿态不只是
-            // 到达判据，作为平滑级输入）——最后一段末点 heading_deg = 窗口中心，
-            // Dubins 拟合天然吃终端 pose（docs/08：heading 已支持）。不提供 heading
-            // 窗口 → 不约束（现状点目标语义）。
-            if let Some([lo, hi]) = v
-                .weapon
-                .as_ref()
-                .and_then(|w| w.envelope.as_ref())
-                .and_then(|e| e.heading_deg)
-            {
-                if let Some(last_seg) = smooth_src.last_mut() {
-                    if let Some(p) = last_seg.points.last_mut() {
-                        p.heading_deg = Some(heading_window_center(lo, hi));
-                    }
-                }
-            }
-            // 段级平滑中间阶段的地形净空不足最大高度（smooth.rs SmoothResult.
-            // terrain_gap_m）：theta_star 拉直段穿山被回退楼梯吞掉时，final verify
-            // 无 terrain issue，靠这里触发抬升重跑（2026-08-11 zz30 2480m 峰）。
-            let mut seg_terr_max: f64 = 0.0;
-            // 段边界硬约束点（起点/必经点/目标）：arc 修复会弹出边界点 b，必经点不得
-            // 被替代（user 硬约束），否则违反"任何平滑不得移除必经点"。
-            let hard_boundary: Vec<(f64, f64)> = seg_ends.iter().map(|g| (g.lon, g.lat)).collect();
-            for (idx, seg) in smooth_src.iter().enumerate() {
-                if std::env::var_os("ARP_DEBUG_SMOOTH").is_some() {
-                    eprintln!(
-                        "[smooth-dbg] SEG{idx} mask={} len={} first=({:.4},{:.4})@{} last=({:.4},{:.4})@{}",
-                        profile_mask[idx] as u8,
-                        seg.points.len(),
-                        seg.points.first().map_or(0.0, |p| p.lon),
-                        seg.points.first().map_or(0.0, |p| p.lat),
-                        seg.points.first().map_or(0.0, |p| p.alt_m),
-                        seg.points.last().map_or(0.0, |p| p.lon),
-                        seg.points.last().map_or(0.0, |p| p.lat),
-                        seg.points.last().map_or(0.0, |p| p.alt_m),
-                    );
-                }
-                let mut out_seg = if profile_mask[idx] {
-                    // 受限区剖面段：已按 max_climb 生成下降/平飞/爬升，直接采用
-                    seg.clone()
-                } else {
-                    // 首跳 entry 放宽上限：当前段起点是硬边界点（起点/必经点/目标）
-                    // → 必经点处大转向合法（zigzag27：wp3 160° 掉头），放宽到 175°
-                    // 让 theta_star 直接拉直，段边界由 arc_transition 切弧；
-                    // 非硬点段（如受限区剖面锚点间过渡段）保持 95°（zigzag11 保护）。
-                    // 容差与下方硬点识别一致（max(0.75×cell, 250m)）。
-                    let hard_tol_m = (cell_m * 0.75).max(250.0);
-                    let seg_start_is_hard = seg.points.first().map_or(false, |p0| {
-                        hard_boundary.iter().any(|(lo, la)| {
-                            dist_km(*lo, *la, p0.lon, p0.lat) * 1000.0 < hard_tol_m
-                        })
-                    });
-                    let entry_max_deg = if seg_start_is_hard { 175.0 } else { 95.0 };
-                    let chain = default_chain(&opts, &check, entry_heading, entry_max_deg);
-                    let result = smooth_path_chain(seg, &chain, &opts, &ctx, Some(phys_min_radius_m));
-                    if let Some(t) = result.terrain_gap_m {
-                        seg_terr_max = seg_terr_max.max(t);
-                    }
-                    if let Some(w) = &result.warning {
-                        seg_warnings.push(w.clone());
-                    }
-                    seg_warnings.extend(result.verify.warnings.iter().cloned());
-                    result.path
+            if pts.len() >= 2 {
+                let check = make_segment_check(
+                    &all_zones,
+                    Some(&threat as &dyn crate::threat::ThreatModel),
+                    inflation_km,
+                    terrain.as_source(),
+                    opts.clearance_m,
+                );
+                let ctx = VerifyContext {
+                    terrain: terrain.as_source(),
+                    nofly: Some(&nofly),
+                    zones: Some(&all_zones),
+                    threat: Some(&threat),
+                    zone_inflation_m: inflation_m,
                 };
-                // 段边界转角修复（2026-08-08 主管真实地形场景 zigzag19）：
-                // desc_in/out_climb（mask=true 固定直线）方向不受 entry_heading 约束
-                // （entry 只约束 default_chain 段首跳），且 build 的 climb 出口约束用
-                // tail 终点方向近似、与 theta 拉直后实际首段方向偏差大 → 拼接后段边界
-                // 转角可超 max_turn（pt3 65.9° / pt4 70.5°）→ final verify 拒 → 全链
-                // 回退 raw 密集锯齿。每段（含 mask=true）push 前检查与前一段输出在
-                // 边界点 b 的转角，超限 → arc_transition 插入过渡弧（弹出 b，弧点高度
-                // = b.alt_m 平飞，逐段 check 不穿墙；E→c 仍沿出段方向，爬升角由
-                // climb_base 保证）。arc 失败（穿墙等）保持原样，宁丑勿违；必经点
-                // （keep_b）处大转角同样插弧——物理上必经点平滑转弯必须切弧（偏差
-                // ≤ r·tan(θ/2) ≈ 0.6km，2026-08-10 zigzag25 主管输入实测）。
-                if let Some(prev) = smooth_segs.last_mut() {
-                    let n = prev.points.len();
-                    if n >= 2 && out_seg.points.len() >= 2 {
-                        let a = prev.points[n - 2];
-                        let b = prev.points[n - 1];
-                        let c = out_seg.points[1];
-                        let h0 = crate::path::bearing_deg(a.lon, a.lat, b.lon, b.lat);
-                        let h1 = crate::path::bearing_deg(b.lon, b.lat, c.lon, c.lat);
-                        let d = crate::path::angle_diff_deg(h0, h1).abs();
-                        // 段端点网格离散：FMM 终点 snap 到最近网格节点，段端点（起点/
-                        // 必经点/目标）可偏离输入坐标 ~0.5 cell（cell 818m → ~400m）。
-                        // 1e-9 精确匹配会漏判（2026-08-10 zigzag25：b 距必经点 242m
-                        // → 必经点未受保护 → 大半径弧弹出 b 且 E 越过出段节点 → 折返
-                        // 178° → final verify 拒 → 回退 471 点锯齿）。容差 = max(0.75
-                        // ×cell, 250m) 覆盖网格离散；keep_b=true → 弧用物理转弯半径
-                        // （紧贴 b，切点偏差 ≤ r·tan(θ/2) ≈ 0.6km，满足必经点容差
-                        // 0.05°≈5.5km 测试断言——物理上必经点处平滑转弯必须切弧）。
+                // 风险1修复（2026-08-07）：平滑链 verify + 威胁 LOS 采样直接打地形源
+                // （height_at 走 LRU），采样点可能越出代价场预取矩形——region 仅起点/target
+                // 包围盒 + 0.15° 缓冲，而绕行弧（NoFly/雷达/restricted）可偏出该矩形 → 冷块
+                // mmap 切片 + zstd 解压延迟。平滑前按 smooth_src 联合包围盒 + 机动 slack
+                // （转弯半径 + 5km，Dubins 弧偏出 raw 的量级）补一次批量预取：块进全局 LRU，
+                // 之后 height_at 全部命中缓存。region 本身不动——扩大会粗化 FMM 网格 cell
+                // （小区域固定 256 格），有锯齿风险。
+                if let Some(t) = terrain.as_bulk() {
+                    let slack_deg = (phys_min_radius_m + 5_000.0) / 111_320.0;
+                    let mut min_lon = f64::INFINITY;
+                    let mut min_lat = f64::INFINITY;
+                    let mut max_lon = f64::NEG_INFINITY;
+                    let mut max_lat = f64::NEG_INFINITY;
+                    for seg in &smooth_src {
+                        for p in &seg.points {
+                            min_lon = min_lon.min(p.lon);
+                            min_lat = min_lat.min(p.lat);
+                            max_lon = max_lon.max(p.lon);
+                            max_lat = max_lat.max(p.lat);
+                        }
+                    }
+                    if min_lon.is_finite() {
+                        t.prefetch_lonlat(
+                            min_lon - slack_deg,
+                            min_lat - slack_deg,
+                            max_lon + slack_deg,
+                            max_lat + slack_deg,
+                        );
+                    }
+                }
+                // 每段独立平滑（首尾段端点保留——Theta* 截直不得移除必经点）。
+                // 入口航向：前一段输出方向，约束当前段首跳（段边界转角，否则拼接后
+                // 终检暴露——2026-08-07 主管 1755 点场景 seg3 out→climb 与 seg4
+                // climb→A 夹角 61.94° > 60°，climb 是段首点单段 verify 无法发现）。
+                let mut smooth_segs: Vec<crate::path::Path> = Vec::new();
+                // boundary arc 因净距（zone clearance）失败而回退的边界点坐标：final verify
+                // 的 turn 检查对该边界豁免（≤65°；arc 会压到膨胀线内 → 宁可不转，机动空间
+                // 优先，宁丑勿违）。2026-08-11 主管输入：wp1 必经点转角 60.7°>60°，U 形弧
+                // 采样点偏墙 ~386m → arc 后段距墙 1.90km < 2.00km → 全链回退 687 点锯齿。
+                let mut turn_exempt: Vec<(f64, f64)> = Vec::new();
+                let mut seg_warnings = Vec::new();
+                let mut entry_heading: Option<f64> = None;
+                // P7：发射包线终端航向下放平滑级（docs/技术方案 §4.2：终端姿态不只是
+                // 到达判据，作为平滑级输入）——最后一段末点 heading_deg = 窗口中心，
+                // Dubins 拟合天然吃终端 pose（docs/08：heading 已支持）。不提供 heading
+                // 窗口 → 不约束（现状点目标语义）。
+                if let Some([lo, hi]) = v
+                    .weapon
+                    .as_ref()
+                    .and_then(|w| w.envelope.as_ref())
+                    .and_then(|e| e.heading_deg)
+                {
+                    if let Some(last_seg) = smooth_src.last_mut() {
+                        if let Some(p) = last_seg.points.last_mut() {
+                            p.heading_deg = Some(heading_window_center(lo, hi));
+                        }
+                    }
+                }
+                // 段级平滑中间阶段的地形净空不足最大高度（smooth.rs SmoothResult.
+                // terrain_gap_m）：theta_star 拉直段穿山被回退楼梯吞掉时，final verify
+                // 无 terrain issue，靠这里触发抬升重跑（2026-08-11 zz30 2480m 峰）。
+                let mut seg_terr_max: f64 = 0.0;
+                // 段边界硬约束点（起点/必经点/目标）：arc 修复会弹出边界点 b，必经点不得
+                // 被替代（user 硬约束），否则违反"任何平滑不得移除必经点"。
+                let hard_boundary: Vec<(f64, f64)> =
+                    seg_ends.iter().map(|g| (g.lon, g.lat)).collect();
+                for (idx, seg) in smooth_src.iter().enumerate() {
+                    if std::env::var_os("ARP_DEBUG_SMOOTH").is_some() {
+                        eprintln!(
+                            "[smooth-dbg] SEG{idx} mask={} len={} first=({:.4},{:.4})@{} last=({:.4},{:.4})@{}",
+                            profile_mask[idx] as u8,
+                            seg.points.len(),
+                            seg.points.first().map_or(0.0, |p| p.lon),
+                            seg.points.first().map_or(0.0, |p| p.lat),
+                            seg.points.first().map_or(0.0, |p| p.alt_m),
+                            seg.points.last().map_or(0.0, |p| p.lon),
+                            seg.points.last().map_or(0.0, |p| p.lat),
+                            seg.points.last().map_or(0.0, |p| p.alt_m),
+                        );
+                    }
+                    let mut out_seg = if profile_mask[idx] {
+                        // 受限区剖面段：已按 max_climb 生成下降/平飞/爬升，直接采用
+                        seg.clone()
+                    } else {
+                        // 首跳 entry 放宽上限：当前段起点是硬边界点（起点/必经点/目标）
+                        // → 必经点处大转向合法（zigzag27：wp3 160° 掉头），放宽到 175°
+                        // 让 theta_star 直接拉直，段边界由 arc_transition 切弧；
+                        // 非硬点段（如受限区剖面锚点间过渡段）保持 95°（zigzag11 保护）。
+                        // 容差与下方硬点识别一致（max(0.75×cell, 250m)）。
                         let hard_tol_m = (cell_m * 0.75).max(250.0);
-                        let is_hard = hard_boundary.iter().any(|(lo, la)| {
-                            dist_km(*lo, *la, b.lon, b.lat) * 1000.0 < hard_tol_m
+                        let seg_start_is_hard = seg.points.first().map_or(false, |p0| {
+                            hard_boundary.iter().any(|(lo, la)| {
+                                dist_km(*lo, *la, p0.lon, p0.lat) * 1000.0 < hard_tol_m
+                            })
                         });
-                        if d > opts.max_turn_deg {
-                            if let Some((arc_pts, _k)) = crate::smooth::arc_transition(
-                                &a,
-                                &b,
-                                &c,
-                                opts.max_turn_deg,
-                                opts.turn_radius_m,
-                                &check,
-                                &prev.points,
-                                n - 1,
-                                false,
-                                is_hard,
-                                0,
-                            ) {
-                                let arc_len = arc_pts.len();
-                                let e = *arc_pts.last().unwrap();
-                                // 净距预检（2026-08-11 主管输入）：arc 使弧点偏出原直线
-                                // （U 形弧采样偏墙 ~386m），arc 后段 E→next 可能压到
-                                // zone 膨胀线内（1.90km < 2.00km）→ final verify 拒 →
-                                // 全链回退 raw 网格楼梯。插入前逐段检查弧段 + E→next 的
-                                // 墙净距（zone_segment_clearance_km 与 verify 同口径）；
-                                // 不足 → 回退 arc（保持必经点 b，宁丑勿违），该边界转角
-                                // ≤65° 记入豁免（机动空间优先）。
-                                let c2 = out_seg.points.get(1).copied().unwrap_or(c);
-                                let arc_ok = seg_zone_clearance_ok_arc(
-                                    &arc_pts, &e, &c2, &all_zones, inflation_m,
-                                );
-                                if arc_ok {
-                                    prev.points.truncate(n - 1);
-                                    prev.points.extend(arc_pts);
-                                    // 后续段起点若为被弹出的 b（剖面锚点/平滑段端点，非硬约束）
-                                    // → 同步到弧末点 E，否则 joined 出现 E→b 回头路
-                                    // （2026-08-08 实测 E→原 pt3 转角 179.99°）。
-                                    if !out_seg.points.is_empty() {
-                                        let p0 = &out_seg.points[0];
-                                        if (p0.lon - b.lon).abs() < 1e-9
-                                            && (p0.lat - b.lat).abs() < 1e-9
-                                        {
-                                            out_seg.points[0] = e;
+                        let entry_max_deg = if seg_start_is_hard { 175.0 } else { 95.0 };
+                        let chain = default_chain(&opts, &check, entry_heading, entry_max_deg);
+                        let result =
+                            smooth_path_chain(seg, &chain, &opts, &ctx, Some(phys_min_radius_m));
+                        if let Some(t) = result.terrain_gap_m {
+                            seg_terr_max = seg_terr_max.max(t);
+                        }
+                        if let Some(w) = &result.warning {
+                            seg_warnings.push(w.clone());
+                        }
+                        seg_warnings.extend(result.verify.warnings.iter().cloned());
+                        result.path
+                    };
+                    // 段边界转角修复（2026-08-08 主管真实地形场景 zigzag19）：
+                    // desc_in/out_climb（mask=true 固定直线）方向不受 entry_heading 约束
+                    // （entry 只约束 default_chain 段首跳），且 build 的 climb 出口约束用
+                    // tail 终点方向近似、与 theta 拉直后实际首段方向偏差大 → 拼接后段边界
+                    // 转角可超 max_turn（pt3 65.9° / pt4 70.5°）→ final verify 拒 → 全链
+                    // 回退 raw 密集锯齿。每段（含 mask=true）push 前检查与前一段输出在
+                    // 边界点 b 的转角，超限 → arc_transition 插入过渡弧（弹出 b，弧点高度
+                    // = b.alt_m 平飞，逐段 check 不穿墙；E→c 仍沿出段方向，爬升角由
+                    // climb_base 保证）。arc 失败（穿墙等）保持原样，宁丑勿违；必经点
+                    // （keep_b）处大转角同样插弧——物理上必经点平滑转弯必须切弧（偏差
+                    // ≤ r·tan(θ/2) ≈ 0.6km，2026-08-10 zigzag25 主管输入实测）。
+                    if let Some(prev) = smooth_segs.last_mut() {
+                        let n = prev.points.len();
+                        if n >= 2 && out_seg.points.len() >= 2 {
+                            let a = prev.points[n - 2];
+                            let b = prev.points[n - 1];
+                            let c = out_seg.points[1];
+                            let h0 = crate::path::bearing_deg(a.lon, a.lat, b.lon, b.lat);
+                            let h1 = crate::path::bearing_deg(b.lon, b.lat, c.lon, c.lat);
+                            let d = crate::path::angle_diff_deg(h0, h1).abs();
+                            // 段端点网格离散：FMM 终点 snap 到最近网格节点，段端点（起点/
+                            // 必经点/目标）可偏离输入坐标 ~0.5 cell（cell 818m → ~400m）。
+                            // 1e-9 精确匹配会漏判（2026-08-10 zigzag25：b 距必经点 242m
+                            // → 必经点未受保护 → 大半径弧弹出 b 且 E 越过出段节点 → 折返
+                            // 178° → final verify 拒 → 回退 471 点锯齿）。容差 = max(0.75
+                            // ×cell, 250m) 覆盖网格离散；keep_b=true → 弧用物理转弯半径
+                            // （紧贴 b，切点偏差 ≤ r·tan(θ/2) ≈ 0.6km，满足必经点容差
+                            // 0.05°≈5.5km 测试断言——物理上必经点处平滑转弯必须切弧）。
+                            let hard_tol_m = (cell_m * 0.75).max(250.0);
+                            let is_hard = hard_boundary.iter().any(|(lo, la)| {
+                                dist_km(*lo, *la, b.lon, b.lat) * 1000.0 < hard_tol_m
+                            });
+                            if d > opts.max_turn_deg {
+                                if let Some((arc_pts, _k)) = crate::smooth::arc_transition(
+                                    &a,
+                                    &b,
+                                    &c,
+                                    opts.max_turn_deg,
+                                    opts.turn_radius_m,
+                                    &check,
+                                    &prev.points,
+                                    n - 1,
+                                    false,
+                                    is_hard,
+                                    0,
+                                ) {
+                                    let arc_len = arc_pts.len();
+                                    let e = *arc_pts.last().unwrap();
+                                    // 净距预检（2026-08-11 主管输入）：arc 使弧点偏出原直线
+                                    // （U 形弧采样偏墙 ~386m），arc 后段 E→next 可能压到
+                                    // zone 膨胀线内（1.90km < 2.00km）→ final verify 拒 →
+                                    // 全链回退 raw 网格楼梯。插入前逐段检查弧段 + E→next 的
+                                    // 墙净距（zone_segment_clearance_km 与 verify 同口径）；
+                                    // 不足 → 回退 arc（保持必经点 b，宁丑勿违），该边界转角
+                                    // ≤65° 记入豁免（机动空间优先）。
+                                    let c2 = out_seg.points.get(1).copied().unwrap_or(c);
+                                    let arc_ok = seg_zone_clearance_ok_arc(
+                                        &arc_pts,
+                                        &e,
+                                        &c2,
+                                        &all_zones,
+                                        inflation_m,
+                                    );
+                                    if arc_ok {
+                                        prev.points.truncate(n - 1);
+                                        prev.points.extend(arc_pts);
+                                        // 后续段起点若为被弹出的 b（剖面锚点/平滑段端点，非硬约束）
+                                        // → 同步到弧末点 E，否则 joined 出现 E→b 回头路
+                                        // （2026-08-08 实测 E→原 pt3 转角 179.99°）。
+                                        if !out_seg.points.is_empty() {
+                                            let p0 = &out_seg.points[0];
+                                            if (p0.lon - b.lon).abs() < 1e-9
+                                                && (p0.lat - b.lat).abs() < 1e-9
+                                            {
+                                                out_seg.points[0] = e;
+                                            }
                                         }
-                                    }
-                                    if std::env::var_os("ARP_DEBUG_SMOOTH").is_some() {
-                                        eprintln!(
-                                            "[smooth-dbg] boundary arc at ({:.4},{:.4}) turn {:.1}->{} pts",
-                                            b.lon, b.lat, d, arc_len
-                                        );
-                                    }
-                                } else {
-                                    // 弧末点外推到出段直线（E' 距 b = 4×r，clamp 0.75×|bc|）：
-                                    // U 形弧末点偏墙（~386m）使 arc 后段压到膨胀线内；E' 落在
-                                    // b→c 直线上后，段 E'→next 恢复为 b→c 子段净距（≥ 原值）。
-                                    // E'=2.2r 时弧内部转角 63.8°>60°（pt5→E' 短弦偏出段方向）；
-                                    // 4r 使 pt5→E' 趋近出段方向（turn≈3θ/4<60，θ≤80），
-                                    // verify radius（b, 弧中点, E'）≥442（θ=90° 最差 ~902m）。
-                                    let bc_m = crate::path::haversine_m(b.lon, b.lat, c.lon, c.lat);
-                                    let ext_m = (4.0 * opts.turn_radius_m).min(bc_m * 0.75);
-                                    if ext_m > opts.turn_radius_m {
-                                        let h_bc = crate::path::bearing_deg(b.lon, b.lat, c.lon, c.lat);
-                                        let lat0 = b.lat.to_radians();
-                                        let kx = 111_320.0 * lat0.cos();
-                                        let ky = 111_320.0;
-                                        let e2 = crate::path::PathPoint::new(
-                                            b.lon + ext_m * h_bc.to_radians().sin() / kx,
-                                            b.lat + ext_m * h_bc.to_radians().cos() / ky,
-                                            b.alt_m,
-                                        );
-                                        // 外推后弧末段 p_{n-1}→E' 可能偏离弧方向（转角超限，
-                                        // verify 拒）——细分弧重试：n 增大 → 末段步进减小 →
-                                        // p_{n-1}→E' 趋近出段方向（2026-08-11 zz33：θ=166.8°
-                                        // 掉头 n=3 时 p2→E' 101°；n=5 时 p4→E' 33°）。
-                                        let mut accepted = false;
-                                        for min_steps in 4..=8usize {
-                                            let Some((arc_pts_sub, _)) =
-                                                crate::smooth::arc_transition(
-                                                    &a,
-                                                    &b,
-                                                    &c,
-                                                    opts.max_turn_deg,
-                                                    opts.turn_radius_m,
-                                                    &check,
-                                                    &prev.points,
-                                                    n - 1,
-                                                    false,
-                                                    is_hard,
-                                                    min_steps,
-                                                )
-                                            else {
-                                                continue;
-                                            };
-                                            let mut arc_pts2 = arc_pts_sub.clone();
-                                            if let Some(last) = arc_pts2.last_mut() {
-                                                *last = e2;
-                                            }
-                                            if !seg_zone_clearance_ok_arc(
-                                                &arc_pts2, &e2, &c2, &all_zones, inflation_m,
-                                            ) {
-                                                continue;
-                                            }
-                                            // 弧点转角（与 verify 同口径 bearing）：入段 a→S
-                                            // 及弧内各段均 ≤ max_turn。外推 E' 只影响末段
-                                            // p_{n-1}→E'（细分后 ≈ 出段方向）。
-                                            let mut prev_h = crate::path::bearing_deg(
-                                                a.lon, a.lat, arc_pts2[0].lon, arc_pts2[0].lat,
+                                        if std::env::var_os("ARP_DEBUG_SMOOTH").is_some() {
+                                            eprintln!(
+                                                "[smooth-dbg] boundary arc at ({:.4},{:.4}) turn {:.1}->{} pts",
+                                                b.lon, b.lat, d, arc_len
                                             );
-                                            let mut turn_ok = true;
-                                            for w in arc_pts2.windows(2) {
-                                                let h = crate::path::bearing_deg(
-                                                    w[0].lon, w[0].lat, w[1].lon, w[1].lat,
-                                                );
-                                                if crate::path::angle_diff_deg(prev_h, h).abs()
-                                                    > opts.max_turn_deg + 1e-6
-                                                {
-                                                    turn_ok = false;
-                                                    break;
-                                                }
-                                                prev_h = h;
-                                            }
-                                            if !turn_ok {
-                                                continue;
-                                            }
-                                            let arc_len2 = arc_pts2.len();
-                                            prev.points.truncate(n - 1);
-                                            prev.points.extend(arc_pts2);
-                                            if !out_seg.points.is_empty() {
-                                                let p0 = &out_seg.points[0];
-                                                if (p0.lon - b.lon).abs() < 1e-9
-                                                    && (p0.lat - b.lat).abs() < 1e-9
-                                                {
-                                                    out_seg.points[0] = e2;
-                                                }
-                                            }
-                                            if std::env::var_os("ARP_DEBUG_SMOOTH").is_some() {
-                                                eprintln!(
-                                                    "[smooth-dbg] boundary arc ext at ({:.4},{:.4}) turn {:.1}->{} pts (E' {:.0}m, steps {min_steps})",
-                                                    b.lon, b.lat, d, arc_len2, ext_m
-                                                );
-                                            }
-                                            accepted = true;
-                                            break;
                                         }
-                                        if !accepted && d <= 65.0 {
-                                            // arc 会破坏净空 → 不插弧，保持 b；该边界转角 ≤65
-                                            // 豁免（final verify 后过滤，宁丑勿违）。
+                                    } else {
+                                        // 弧末点外推到出段直线（E' 距 b = 4×r，clamp 0.75×|bc|）：
+                                        // U 形弧末点偏墙（~386m）使 arc 后段压到膨胀线内；E' 落在
+                                        // b→c 直线上后，段 E'→next 恢复为 b→c 子段净距（≥ 原值）。
+                                        // E'=2.2r 时弧内部转角 63.8°>60°（pt5→E' 短弦偏出段方向）；
+                                        // 4r 使 pt5→E' 趋近出段方向（turn≈3θ/4<60，θ≤80），
+                                        // verify radius（b, 弧中点, E'）≥442（θ=90° 最差 ~902m）。
+                                        let bc_m =
+                                            crate::path::haversine_m(b.lon, b.lat, c.lon, c.lat);
+                                        let ext_m = (4.0 * opts.turn_radius_m).min(bc_m * 0.75);
+                                        if ext_m > opts.turn_radius_m {
+                                            let h_bc = crate::path::bearing_deg(
+                                                b.lon, b.lat, c.lon, c.lat,
+                                            );
+                                            let lat0 = b.lat.to_radians();
+                                            let kx = 111_320.0 * lat0.cos();
+                                            let ky = 111_320.0;
+                                            let e2 = crate::path::PathPoint::new(
+                                                b.lon + ext_m * h_bc.to_radians().sin() / kx,
+                                                b.lat + ext_m * h_bc.to_radians().cos() / ky,
+                                                b.alt_m,
+                                            );
+                                            // 外推后弧末段 p_{n-1}→E' 可能偏离弧方向（转角超限，
+                                            // verify 拒）——细分弧重试：n 增大 → 末段步进减小 →
+                                            // p_{n-1}→E' 趋近出段方向（2026-08-11 zz33：θ=166.8°
+                                            // 掉头 n=3 时 p2→E' 101°；n=5 时 p4→E' 33°）。
+                                            let mut accepted = false;
+                                            for min_steps in 4..=8usize {
+                                                let Some((arc_pts_sub, _)) =
+                                                    crate::smooth::arc_transition(
+                                                        &a,
+                                                        &b,
+                                                        &c,
+                                                        opts.max_turn_deg,
+                                                        opts.turn_radius_m,
+                                                        &check,
+                                                        &prev.points,
+                                                        n - 1,
+                                                        false,
+                                                        is_hard,
+                                                        min_steps,
+                                                    )
+                                                else {
+                                                    continue;
+                                                };
+                                                let mut arc_pts2 = arc_pts_sub.clone();
+                                                if let Some(last) = arc_pts2.last_mut() {
+                                                    *last = e2;
+                                                }
+                                                if !seg_zone_clearance_ok_arc(
+                                                    &arc_pts2,
+                                                    &e2,
+                                                    &c2,
+                                                    &all_zones,
+                                                    inflation_m,
+                                                ) {
+                                                    continue;
+                                                }
+                                                // 弧点转角（与 verify 同口径 bearing）：入段 a→S
+                                                // 及弧内各段均 ≤ max_turn。外推 E' 只影响末段
+                                                // p_{n-1}→E'（细分后 ≈ 出段方向）。
+                                                let mut prev_h = crate::path::bearing_deg(
+                                                    a.lon,
+                                                    a.lat,
+                                                    arc_pts2[0].lon,
+                                                    arc_pts2[0].lat,
+                                                );
+                                                let mut turn_ok = true;
+                                                for w in arc_pts2.windows(2) {
+                                                    let h = crate::path::bearing_deg(
+                                                        w[0].lon, w[0].lat, w[1].lon, w[1].lat,
+                                                    );
+                                                    if crate::path::angle_diff_deg(prev_h, h).abs()
+                                                        > opts.max_turn_deg + 1e-6
+                                                    {
+                                                        turn_ok = false;
+                                                        break;
+                                                    }
+                                                    prev_h = h;
+                                                }
+                                                if !turn_ok {
+                                                    continue;
+                                                }
+                                                let arc_len2 = arc_pts2.len();
+                                                prev.points.truncate(n - 1);
+                                                prev.points.extend(arc_pts2);
+                                                if !out_seg.points.is_empty() {
+                                                    let p0 = &out_seg.points[0];
+                                                    if (p0.lon - b.lon).abs() < 1e-9
+                                                        && (p0.lat - b.lat).abs() < 1e-9
+                                                    {
+                                                        out_seg.points[0] = e2;
+                                                    }
+                                                }
+                                                if std::env::var_os("ARP_DEBUG_SMOOTH").is_some() {
+                                                    eprintln!(
+                                                        "[smooth-dbg] boundary arc ext at ({:.4},{:.4}) turn {:.1}->{} pts (E' {:.0}m, steps {min_steps})",
+                                                        b.lon, b.lat, d, arc_len2, ext_m
+                                                    );
+                                                }
+                                                accepted = true;
+                                                break;
+                                            }
+                                            if !accepted && d <= 65.0 {
+                                                // arc 会破坏净空 → 不插弧，保持 b；该边界转角 ≤65
+                                                // 豁免（final verify 后过滤，宁丑勿违）。
+                                                turn_exempt.push((b.lon, b.lat));
+                                                if std::env::var_os("ARP_DEBUG_SMOOTH").is_some() {
+                                                    eprintln!(
+                                                        "[smooth-dbg] boundary arc SKIP (clearance) at ({:.4},{:.4}) turn {:.1} exempt",
+                                                        b.lon, b.lat, d
+                                                    );
+                                                }
+                                            } else if !accepted
+                                                && std::env::var_os("ARP_DEBUG_SMOOTH").is_some()
+                                            {
+                                                eprintln!(
+                                                    "[smooth-dbg] boundary arc FAIL (clearance, turn {:.1} > 65) at ({:.4},{:.4})",
+                                                    d, b.lon, b.lat
+                                                );
+                                            }
+                                        } else if d <= 65.0 {
                                             turn_exempt.push((b.lon, b.lat));
                                             if std::env::var_os("ARP_DEBUG_SMOOTH").is_some() {
                                                 eprintln!(
-                                                    "[smooth-dbg] boundary arc SKIP (clearance) at ({:.4},{:.4}) turn {:.1} exempt",
+                                                    "[smooth-dbg] boundary arc SKIP (clearance, short seg) at ({:.4},{:.4}) turn {:.1} exempt",
                                                     b.lon, b.lat, d
                                                 );
                                             }
-                                        } else if !accepted && std::env::var_os("ARP_DEBUG_SMOOTH").is_some() {
+                                        } else if std::env::var_os("ARP_DEBUG_SMOOTH").is_some() {
                                             eprintln!(
                                                 "[smooth-dbg] boundary arc FAIL (clearance, turn {:.1} > 65) at ({:.4},{:.4})",
                                                 d, b.lon, b.lat
                                             );
                                         }
-                                    } else if d <= 65.0 {
-                                        turn_exempt.push((b.lon, b.lat));
-                                        if std::env::var_os("ARP_DEBUG_SMOOTH").is_some() {
-                                            eprintln!(
-                                                "[smooth-dbg] boundary arc SKIP (clearance, short seg) at ({:.4},{:.4}) turn {:.1} exempt",
-                                                b.lon, b.lat, d
-                                            );
-                                        }
-                                    } else if std::env::var_os("ARP_DEBUG_SMOOTH").is_some() {
-                                        eprintln!(
-                                            "[smooth-dbg] boundary arc FAIL (clearance, turn {:.1} > 65) at ({:.4},{:.4})",
-                                            d, b.lon, b.lat
-                                        );
                                     }
+                                } else if std::env::var_os("ARP_DEBUG_SMOOTH").is_some() {
+                                    eprintln!(
+                                        "[smooth-dbg] boundary arc FAIL at ({:.4},{:.4}) turn {:.1} hard={is_hard}",
+                                        b.lon, b.lat, d
+                                    );
                                 }
-                            } else if std::env::var_os("ARP_DEBUG_SMOOTH").is_some() {
-                                eprintln!(
-                                    "[smooth-dbg] boundary arc FAIL at ({:.4},{:.4}) turn {:.1} hard={is_hard}",
-                                    b.lon, b.lat, d
-                                );
                             }
                         }
                     }
+                    let entry_next = out_seg.last_segment_heading();
+                    smooth_segs.push(out_seg);
+                    entry_heading = entry_next;
                 }
-                let entry_next = out_seg.last_segment_heading();
-                smooth_segs.push(out_seg);
-                entry_heading = entry_next;
-            }
-            // 拼接 + 全路径终检（段间转角/整路径威胁在拼接后才可见）
-            let joined = join_paths(&smooth_segs);
-            // 段端点 = 起点 + 必经点 + 目标（直线替代用；必经点硬约束，任何平滑不得移除）
-            let mut straight_pts: Vec<crate::path::PathPoint> = Vec::new();
-            for g in &seg_ends {
-                let p = crate::path::PathPoint::new(g.lon, g.lat, alt_eff);
-                let dup = straight_pts.last().map_or(false, |q| {
-                    (q.lon - p.lon).abs() < 1e-12 && (q.lat - p.lat).abs() < 1e-12
-                });
-                if !dup {
-                    straight_pts.push(p);
-                }
-            }
-            let straight = Path::new(straight_pts);
-            let final_rep = crate::smooth::verify_path(
-                &joined,
-                None,
-                &opts,
-                &ctx,
-                Some(phys_min_radius_m),
-            );
-            // 阶段1-C：收集失败原因（仅失败的 attempt；保留最近 3 次）
-            if !final_rep.ok {
-                last_failures.push((attempts, final_rep.issues.clone()));
-                if last_failures.len() > 3 {
-                    last_failures.remove(0);
-                }
-            }
-            if final_rep.ok {
-                pts = joined.points;
-                // extend 而非覆盖：保留 profile 级降速提示（turn_radius 信任输入）
-                warnings.extend(seg_warnings.iter().cloned());
-                break 'fmm_attempt;
-            } else {
-                // arc 失败边界的 turn 豁免（2026-08-11 主管输入）：boundary arc 因净距
-                // 预检回退（arc 会压到膨胀线内）后保持必经点 b 原样 → final verify 仅剩
-                // 该边界 turn 超限（≤65°）——机动空间优先，宁可不转（宁丑勿违）。过滤
-                // 掉这些 turn issue（转 warning）；若其余 issues 为空 → 交付拼接路径。
-                if !turn_exempt.is_empty() {
-                    let mut kept: Vec<String> = Vec::new();
-                    for iss in final_rep.issues.iter() {
-                        let exempted = iss.strip_prefix("vertex ").is_some_and(|rest| {
-                            let Some(colon) = rest.find(": turn ") else {
-                                return false;
-                            };
-                            let Ok(idx) = rest[..colon].trim().parse::<usize>() else {
-                                return false;
-                            };
-                            joined.points.get(idx).is_some_and(|p| {
-                                turn_exempt
-                                    .iter()
-                                    .any(|(lo, la)| dist_km(*lo, *la, p.lon, p.lat) < 1.0)
-                            })
-                        });
-                        if !exempted {
-                            kept.push(iss.clone());
-                        }
+                // 拼接 + 全路径终检（段间转角/整路径威胁在拼接后才可见）
+                let joined = join_paths(&smooth_segs);
+                // 段端点 = 起点 + 必经点 + 目标（直线替代用；必经点硬约束，任何平滑不得移除）
+                let mut straight_pts: Vec<crate::path::PathPoint> = Vec::new();
+                for g in &seg_ends {
+                    let p = crate::path::PathPoint::new(g.lon, g.lat, alt_eff);
+                    let dup = straight_pts.last().map_or(false, |q| {
+                        (q.lon - p.lon).abs() < 1e-12 && (q.lat - p.lat).abs() < 1e-12
+                    });
+                    if !dup {
+                        straight_pts.push(p);
                     }
-                    if kept.len() != final_rep.issues.len() {
-                        warnings.push(format!(
+                }
+                let straight = Path::new(straight_pts);
+                let final_rep =
+                    crate::smooth::verify_path(&joined, None, &opts, &ctx, Some(phys_min_radius_m));
+                // 阶段1-C：收集失败原因（仅失败的 attempt；保留最近 3 次）
+                if !final_rep.ok {
+                    last_failures.push((attempts, final_rep.issues.clone()));
+                    if last_failures.len() > 3 {
+                        last_failures.remove(0);
+                    }
+                }
+                if final_rep.ok {
+                    pts = joined.points;
+                    // extend 而非覆盖：保留 profile 级降速提示（turn_radius 信任输入）
+                    warnings.extend(seg_warnings.iter().cloned());
+                    break 'fmm_attempt;
+                } else {
+                    // arc 失败边界的 turn 豁免（2026-08-11 主管输入）：boundary arc 因净距
+                    // 预检回退（arc 会压到膨胀线内）后保持必经点 b 原样 → final verify 仅剩
+                    // 该边界 turn 超限（≤65°）——机动空间优先，宁可不转（宁丑勿违）。过滤
+                    // 掉这些 turn issue（转 warning）；若其余 issues 为空 → 交付拼接路径。
+                    if !turn_exempt.is_empty() {
+                        let mut kept: Vec<String> = Vec::new();
+                        for iss in final_rep.issues.iter() {
+                            let exempted = iss.strip_prefix("vertex ").is_some_and(|rest| {
+                                let Some(colon) = rest.find(": turn ") else {
+                                    return false;
+                                };
+                                let Ok(idx) = rest[..colon].trim().parse::<usize>() else {
+                                    return false;
+                                };
+                                joined.points.get(idx).is_some_and(|p| {
+                                    turn_exempt
+                                        .iter()
+                                        .any(|(lo, la)| dist_km(*lo, *la, p.lon, p.lat) < 1.0)
+                                })
+                            });
+                            if !exempted {
+                                kept.push(iss.clone());
+                            }
+                        }
+                        if kept.len() != final_rep.issues.len() {
+                            warnings.push(format!(
                             "boundary turn at ({:.4},{:.4}) exceeds {}deg but arc would violate zone clearance; kept as-is (机动空间优先)",
                             turn_exempt[0].0, turn_exempt[0].1, opts.max_turn_deg
                         ));
-                        if kept.is_empty() {
-                            pts = joined.points;
-                            warnings.extend(seg_warnings.iter().cloned());
-                            break 'fmm_attempt;
+                            if kept.is_empty() {
+                                pts = joined.points;
+                                warnings.extend(seg_warnings.iter().cloned());
+                                break 'fmm_attempt;
+                            }
                         }
                     }
-                }
-                // 地形净空不足 → 抬升重跑（2026-08-11 主管输入 2480m 峰）：verify
-                // issue 采样密（~200m），以其地形高度为准；段级平滑中间阶段的
-                // terrain issue（回退楼梯吞掉，见 seg_terr_max）取 max 并集。
-                // 抬升严格递增（>alt_eff+0.5 且 ≤ceiling）单调有界，attempts 上限
-                // 兜底。原 FAIL 分支（smoothing_failed + 直线替代 + 雷达替代）仅在
-                // 抬升不可行/超限后执行。
-                let mut terr_anchor: Option<(f64, f64, f64)> = None; // (lon, lat, terrain h)
-                let mut terr_max = 0.0_f64;
-                for iss in &final_rep.issues {
-                    let Some(pos) = iss.find("(terrain ") else { continue };
-                    let tail = iss[pos + "(terrain ".len()..].trim_end_matches(')').trim();
-                    let Ok(h) = tail.trim_end_matches('m').trim().parse::<f64>() else { continue };
-                    if h > terr_max {
-                        terr_max = h;
-                        // issue 前缀含 "sample (lon=..,lat=..)" → 解析坐标（自动锚点用）
-                        let coord = (|| {
-                            let lon = iss.find("lon=").and_then(|p| {
-                                let s: String = iss[p + 4..]
-                                    .chars()
-                                    .take_while(|c| c.is_ascii_digit() || *c == '.' || *c == '-')
-                                    .collect();
-                                s.parse().ok()
-                            })?;
-                            let lat = iss.find("lat=").and_then(|p| {
-                                let s: String = iss[p + 4..]
-                                    .chars()
-                                    .take_while(|c| c.is_ascii_digit() || *c == '.' || *c == '-')
-                                    .collect();
-                                s.parse().ok()
-                            })?;
-                            Some((lon, lat, h))
-                        })();
-                        terr_anchor = coord;
+                    // 地形净空不足 → 抬升重跑（2026-08-11 主管输入 2480m 峰）：verify
+                    // issue 采样密（~200m），以其地形高度为准；段级平滑中间阶段的
+                    // terrain issue（回退楼梯吞掉，见 seg_terr_max）取 max 并集。
+                    // 抬升严格递增（>alt_eff+0.5 且 ≤ceiling）单调有界，attempts 上限
+                    // 兜底。原 FAIL 分支（smoothing_failed + 直线替代 + 雷达替代）仅在
+                    // 抬升不可行/超限后执行。
+                    let mut terr_anchor: Option<(f64, f64, f64)> = None; // (lon, lat, terrain h)
+                    let mut terr_max = 0.0_f64;
+                    for iss in &final_rep.issues {
+                        let Some(pos) = iss.find("(terrain ") else {
+                            continue;
+                        };
+                        let tail = iss[pos + "(terrain ".len()..].trim_end_matches(')').trim();
+                        let Ok(h) = tail.trim_end_matches('m').trim().parse::<f64>() else {
+                            continue;
+                        };
+                        if h > terr_max {
+                            terr_max = h;
+                            // issue 前缀含 "sample (lon=..,lat=..)" → 解析坐标（自动锚点用）
+                            let coord = (|| {
+                                let lon = iss.find("lon=").and_then(|p| {
+                                    let s: String = iss[p + 4..]
+                                        .chars()
+                                        .take_while(|c| {
+                                            c.is_ascii_digit() || *c == '.' || *c == '-'
+                                        })
+                                        .collect();
+                                    s.parse().ok()
+                                })?;
+                                let lat = iss.find("lat=").and_then(|p| {
+                                    let s: String = iss[p + 4..]
+                                        .chars()
+                                        .take_while(|c| {
+                                            c.is_ascii_digit() || *c == '.' || *c == '-'
+                                        })
+                                        .collect();
+                                    s.parse().ok()
+                                })?;
+                                Some((lon, lat, h))
+                            })();
+                            terr_anchor = coord;
+                        }
                     }
-                }
-                let terr_max = terr_max.max(seg_terr_max);
-                if terr_max > 0.0 {
-                    let clearance = opts.clearance_m.max(1.0);
-                    let new_alt = (terr_max + clearance + 100.0).max(v.alt_m);
-                    let ceiling_ok = v.profile.ceiling_m.is_none_or(|c| new_alt <= c);
-                    if new_alt > alt_eff + 0.5 && ceiling_ok {
-                        terrain_alt_raised = true;
-                        alt_eff = new_alt;
-                        // 自动中间锚点：优先 verify issue 坐标；缺失（seg_terr_max 更大 /
-                        // issue 无坐标）→ 沿当前走廊 raw_joined 采样地形找最高点（近似）。
-                        let anchor = terr_anchor.or_else(|| {
-                            let t = terrain.as_source()?;
-                            let mut best: Option<(f64, f64, f64)> = None;
-                            let mut bh = 0.0_f64;
-                            for p in &raw_joined.points {
-                                if let Sample::Land(h) = t.sample_at(p.lon, p.lat) {
-                                    if h > bh {
-                                        bh = h;
-                                        best = Some((p.lon, p.lat, h));
+                    let terr_max = terr_max.max(seg_terr_max);
+                    if terr_max > 0.0 {
+                        let clearance = opts.clearance_m.max(1.0);
+                        let new_alt = (terr_max + clearance + 100.0).max(v.alt_m);
+                        let ceiling_ok = v.profile.ceiling_m.is_none_or(|c| new_alt <= c);
+                        if new_alt > alt_eff + 0.5 && ceiling_ok {
+                            terrain_alt_raised = true;
+                            alt_eff = new_alt;
+                            // 自动中间锚点：优先 verify issue 坐标；缺失（seg_terr_max 更大 /
+                            // issue 无坐标）→ 沿当前走廊 raw_joined 采样地形找最高点（近似）。
+                            let anchor = terr_anchor.or_else(|| {
+                                let t = terrain.as_source()?;
+                                let mut best: Option<(f64, f64, f64)> = None;
+                                let mut bh = 0.0_f64;
+                                for p in &raw_joined.points {
+                                    if let Sample::Land(h) = t.sample_at(p.lon, p.lat) {
+                                        if h > bh {
+                                            bh = h;
+                                            best = Some((p.lon, p.lat, h));
+                                        }
                                     }
                                 }
+                                best.map(|(lo, la, _)| (lo, la, new_alt))
+                            });
+                            if let Some(a) = anchor {
+                                terrain_anchor = Some(a);
                             }
-                            best.map(|(lo, la, _)| (lo, la, new_alt))
-                        });
-                        if let Some(a) = anchor {
-                            terrain_anchor = Some(a);
+                            eprintln!(
+                                "[debug] smooth terrain clearance -> raise cruise alt {:.0}->{:.0}m (terrain {:.0}m, v={})",
+                                start_alt_norm, alt_eff, terr_max, v.id
+                            );
+                            continue 'fmm_attempt;
                         }
+                    }
+                    // 终检失败 → 回退未平滑拼接（必经点保留，宁丑勿违）
+                    if std::env::var_os("ARP_DEBUG_SMOOTH").is_some() {
                         eprintln!(
-                            "[debug] smooth terrain clearance -> raise cruise alt {:.0}->{:.0}m (terrain {:.0}m, v={})",
-                            start_alt_norm, alt_eff, terr_max, v.id
+                            "[smooth-dbg] FINAL VERIFY FAIL points={} issues={} warnings={}",
+                            joined.points.len(),
+                            final_rep.issues.len(),
+                            final_rep.warnings.len()
                         );
-                        continue 'fmm_attempt;
+                        for (pi, pp) in joined.points.iter().enumerate() {
+                            eprintln!(
+                                "[smooth-dbg]   pt{pi}: lon={:.6} lat={:.6} alt={:.0}",
+                                pp.lon, pp.lat, pp.alt_m
+                            );
+                        }
+                        for iss in final_rep.issues.iter().take(10) {
+                            eprintln!("[smooth-dbg]   final issue: {iss}");
+                        }
+                        for (si, seg) in smooth_segs.iter().enumerate() {
+                            eprintln!("[smooth-dbg]   seg{si}: {} pts", seg.points.len());
+                        }
                     }
-                }
-                // 终检失败 → 回退未平滑拼接（必经点保留，宁丑勿违）
-                if std::env::var_os("ARP_DEBUG_SMOOTH").is_some() {
-                    eprintln!(
-                        "[smooth-dbg] FINAL VERIFY FAIL points={} issues={} warnings={}",
-                        joined.points.len(),
-                        final_rep.issues.len(),
-                        final_rep.warnings.len()
-                    );
-                    for (pi, pp) in joined.points.iter().enumerate() {
-                        eprintln!(
-                            "[smooth-dbg]   pt{pi}: lon={:.6} lat={:.6} alt={:.0}",
-                            pp.lon, pp.lat, pp.alt_m
-                        );
-                    }
-                    for iss in final_rep.issues.iter().take(10) {
-                        eprintln!("[smooth-dbg]   final issue: {iss}");
-                    }
-                    for (si, seg) in smooth_segs.iter().enumerate() {
-                        eprintln!("[smooth-dbg]   seg{si}: {} pts", seg.points.len());
-                    }
-                }
-                // P2 可见图 patch 绕过（docs/12 §8/§13；feature-flag 默认关，C6）
-                // 触发：终检硬闸失败 → 失败点多簇（PATCH_R=30km 合并，字典序 tie-break）
-                // → 每簇 patch 矩形 → 边界锚点（骨架首个可通交点，§7）→ 可见图
-                // （多障碍 + 限飞区弦判据接线 + 雷达同源边权）→ 拼接回骨架 →
-                // 接缝复验（C7 扩张重试硬上限 + 固定步长）。成功交付 + degradations
-                // 标注；失败按 C3 归因分层（截断 ≠ 几何无解，C2），归原 raw 回退。
-                if crate::patch::patch_enabled()
-                    && crate::patch::patch_applicable(
-                        &input
-                            .mission
-                            .no_fly_zones
-                            .iter()
-                            .chain(input.mission.obstacles.iter())
-                            .cloned()
-                            .collect::<Vec<_>>(),
-                        ctx.terrain.is_some(),
-                    )
-                {
-                    let skeleton: Vec<[f64; 2]> =
-                        raw_joined.points.iter().map(|p| [p.lon, p.lat]).collect();
-                    let clusters =
-                        crate::patch::cluster_failures(&final_rep.issues, crate::patch::PATCH_R_DEG);
-                    if !clusters.is_empty() && skeleton.len() >= 2 {
-                        let wall_polys: Vec<&Zone> = input
-                            .mission
-                            .no_fly_zones
-                            .iter()
-                            .chain(input.mission.obstacles.iter())
-                            .filter(|z| z.is_wall() && matches!(z.shape, ZoneShape::Polygon { .. }))
-                            .collect();
-                        let circle_walls: Vec<&Zone> = input
-                            .mission
-                            .no_fly_zones
-                            .iter()
-                            .chain(input.mission.obstacles.iter())
-                            .filter(|z| z.is_wall() && matches!(z.shape, ZoneShape::Circle { .. }))
-                            .collect();
-                        let restricted: Vec<&Zone> = input.mission.restricted_zones.iter().collect();
-                        let inflation_m = (opts.turn_radius_m * 0.5).clamp(2_000.0, 10_000.0);
-                        let radar_opt = if input.mission.red_forces.radars.is_empty() {
-                            None
-                        } else {
-                            Some((&threat, params_merged.radar_cost_coef))
-                        };
-                        // P4：地形净空 + NODATA 5x 进 patch（§3.3 P2 口径完整化）
-                        let terrain_opt = ctx.terrain.map(|t| (t, opts.clearance_m.max(1.0)));
-                        // P4-M4：真·多 patch 串接（§11.2 第 3 条）——失败点沿全程分布的
-                        // 100km+ 贴墙走廊：所有簇依次 patch，每簇成功后把 patch 拼入当前
-                        // 路径（stitch），下一簇锚点取"当前拼接路径"与簇 rect 的交点
-                        // （迭代拼接，边界锚点 tie-break 同单簇）；每步整链 verify
-                        // （阶段 1-D 硬闸）通过才拼入。全部簇处理完 → 交付拼接路径。
-                        let mut current: Vec<[f64; 2]> = skeleton;
-                        let mut used_any = false;
-                        for c in &clusters {
-                            let mut rect =
-                                crate::patch::PatchRect::from_center(*c, crate::patch::PATCH_R_DEG);
-                            // P5-M3：必经点安全子集（§13.2 R3）——patch 不得改必经点位置：
-                            // 簇矩形含必经点 → 跳过该簇（degradations 标注）；不含 →
-                            // patch 正常（必经点骨架段不受影响）。
-                            if v.mid_waypoints
+                    // P2 可见图 patch 绕过（docs/12 §8/§13；feature-flag 默认关，C6）
+                    // 触发：终检硬闸失败 → 失败点多簇（PATCH_R=30km 合并，字典序 tie-break）
+                    // → 每簇 patch 矩形 → 边界锚点（骨架首个可通交点，§7）→ 可见图
+                    // （多障碍 + 限飞区弦判据接线 + 雷达同源边权）→ 拼接回骨架 →
+                    // 接缝复验（C7 扩张重试硬上限 + 固定步长）。成功交付 + degradations
+                    // 标注；失败按 C3 归因分层（截断 ≠ 几何无解，C2），归原 raw 回退。
+                    if crate::patch::patch_enabled()
+                        && crate::patch::patch_applicable(
+                            &input
+                                .mission
+                                .no_fly_zones
                                 .iter()
-                                .any(|wp| rect.contains([wp.lon, wp.lat]))
-                            {
-                                degradations.push(format!(
+                                .chain(input.mission.obstacles.iter())
+                                .cloned()
+                                .collect::<Vec<_>>(),
+                            ctx.terrain.is_some(),
+                        )
+                    {
+                        let skeleton: Vec<[f64; 2]> =
+                            raw_joined.points.iter().map(|p| [p.lon, p.lat]).collect();
+                        let clusters = crate::patch::cluster_failures(
+                            &final_rep.issues,
+                            crate::patch::PATCH_R_DEG,
+                        );
+                        if !clusters.is_empty() && skeleton.len() >= 2 {
+                            let wall_polys: Vec<&Zone> = input
+                                .mission
+                                .no_fly_zones
+                                .iter()
+                                .chain(input.mission.obstacles.iter())
+                                .filter(|z| {
+                                    z.is_wall() && matches!(z.shape, ZoneShape::Polygon { .. })
+                                })
+                                .collect();
+                            let circle_walls: Vec<&Zone> = input
+                                .mission
+                                .no_fly_zones
+                                .iter()
+                                .chain(input.mission.obstacles.iter())
+                                .filter(|z| {
+                                    z.is_wall() && matches!(z.shape, ZoneShape::Circle { .. })
+                                })
+                                .collect();
+                            let restricted: Vec<&Zone> =
+                                input.mission.restricted_zones.iter().collect();
+                            let inflation_m = (opts.turn_radius_m * 0.5).clamp(2_000.0, 10_000.0);
+                            let radar_opt = if input.mission.red_forces.radars.is_empty() {
+                                None
+                            } else {
+                                Some((&threat, params_merged.radar_cost_coef))
+                            };
+                            // P4：地形净空 + NODATA 5x 进 patch（§3.3 P2 口径完整化）
+                            let terrain_opt = ctx.terrain.map(|t| (t, opts.clearance_m.max(1.0)));
+                            // P4-M4：真·多 patch 串接（§11.2 第 3 条）——失败点沿全程分布的
+                            // 100km+ 贴墙走廊：所有簇依次 patch，每簇成功后把 patch 拼入当前
+                            // 路径（stitch），下一簇锚点取"当前拼接路径"与簇 rect 的交点
+                            // （迭代拼接，边界锚点 tie-break 同单簇）；每步整链 verify
+                            // （阶段 1-D 硬闸）通过才拼入。全部簇处理完 → 交付拼接路径。
+                            let mut current: Vec<[f64; 2]> = skeleton;
+                            let mut used_any = false;
+                            for c in &clusters {
+                                let mut rect = crate::patch::PatchRect::from_center(
+                                    *c,
+                                    crate::patch::PATCH_R_DEG,
+                                );
+                                // P5-M3：必经点安全子集（§13.2 R3）——patch 不得改必经点位置：
+                                // 簇矩形含必经点 → 跳过该簇（degradations 标注）；不含 →
+                                // patch 正常（必经点骨架段不受影响）。
+                                if v.mid_waypoints
+                                    .iter()
+                                    .any(|wp| rect.contains([wp.lon, wp.lat]))
+                                {
+                                    degradations.push(format!(
                                     "patch: cluster at ({:.4},{:.4}) contains mid_waypoint, skipped (R3)",
                                     c[0], c[1]
                                 ));
-                                continue;
-                            }
-                            let mut retry = 0;
-                            loop {
-                                let (ein, eout) = crate::patch::boundary_anchors(&current, &rect);
-                                if let (Some(a), Some(b)) = (ein, eout) {
-                                    let obstacles: Vec<Vec<[f64; 2]>> = wall_polys
-                                        .iter()
-                                        .filter_map(|z| match &z.shape {
-                                            ZoneShape::Polygon { vertices } => {
-                                                if vertices.iter().any(|v| rect.contains([v[0], v[1]])) {
-                                                    Some(vertices.clone())
-                                                } else {
-                                                    None
-                                                }
-                                            }
-                                            _ => None,
-                                        })
-                                        .collect();
-                                    // P4：圆硬墙（膨胀后）进入可见图切点锚点
-                                    let circle_obs: Vec<crate::patch::CircleObs> = circle_walls
-                                        .iter()
-                                        .filter_map(|z| match &z.shape {
-                                            ZoneShape::Circle { center, radius_km } => {
-                                                if rect.contains([center[0], center[1]]) {
-                                                    Some(crate::patch::CircleObs {
-                                                        center: *center,
-                                                        r_eff_m: radius_km * 1000.0 + inflation_m,
-                                                    })
-                                                } else {
-                                                    None
-                                                }
-                                            }
-                                            _ => None,
-                                        })
-                                        .collect();
-                                    if !obstacles.is_empty() || !circle_obs.is_empty() || !restricted.is_empty() {
-                                        match crate::patch::plan_patch_multi(
-                                            a,
-                                            b,
-                                            &obstacles,
-                                            &circle_obs,
-                                            &restricted,
-                                            inflation_m,
-                                            alt_eff,
-                                            radar_opt,
-                                            terrain_opt,
-                                        ) {
-                                            crate::patch::PatchOutcome::Path(patch_pts, _len_km) => {
-                                                let joined_pts = crate::patch::stitch(
-                                                    &current, &patch_pts, a, b,
-                                                );
-                                                let joined_path = crate::path::Path::new(
-                                                    joined_pts
+                                    continue;
+                                }
+                                let mut retry = 0;
+                                loop {
+                                    let (ein, eout) =
+                                        crate::patch::boundary_anchors(&current, &rect);
+                                    if let (Some(a), Some(b)) = (ein, eout) {
+                                        let obstacles: Vec<Vec<[f64; 2]>> = wall_polys
+                                            .iter()
+                                            .filter_map(|z| match &z.shape {
+                                                ZoneShape::Polygon { vertices } => {
+                                                    if vertices
                                                         .iter()
-                                                        .map(|[lon, lat]| {
-                                                            crate::path::PathPoint::new(
-                                                                *lon, *lat, alt_eff,
-                                                            )
+                                                        .any(|v| rect.contains([v[0], v[1]]))
+                                                    {
+                                                        Some(vertices.clone())
+                                                    } else {
+                                                        None
+                                                    }
+                                                }
+                                                _ => None,
+                                            })
+                                            .collect();
+                                        // P4：圆硬墙（膨胀后）进入可见图切点锚点
+                                        let circle_obs: Vec<crate::patch::CircleObs> = circle_walls
+                                            .iter()
+                                            .filter_map(|z| match &z.shape {
+                                                ZoneShape::Circle { center, radius_km } => {
+                                                    if rect.contains([center[0], center[1]]) {
+                                                        Some(crate::patch::CircleObs {
+                                                            center: *center,
+                                                            r_eff_m: radius_km * 1000.0
+                                                                + inflation_m,
                                                         })
-                                                        .collect(),
-                                                );
-                                                let rep_j = crate::smooth::verify_path(
-                                                    &joined_path,
-                                                    None,
-                                                    &opts,
-                                                    &ctx,
-                                                    Some(phys_min_radius_m),
-                                                );
-                                                if rep_j.ok {
-                                                    current = joined_pts;
-                                                    used_any = true;
-                                                    degradations.push(
+                                                    } else {
+                                                        None
+                                                    }
+                                                }
+                                                _ => None,
+                                            })
+                                            .collect();
+                                        if !obstacles.is_empty()
+                                            || !circle_obs.is_empty()
+                                            || !restricted.is_empty()
+                                        {
+                                            match crate::patch::plan_patch_multi(
+                                                a,
+                                                b,
+                                                &obstacles,
+                                                &circle_obs,
+                                                &restricted,
+                                                inflation_m,
+                                                alt_eff,
+                                                radar_opt,
+                                                terrain_opt,
+                                            ) {
+                                                crate::patch::PatchOutcome::Path(
+                                                    patch_pts,
+                                                    _len_km,
+                                                ) => {
+                                                    let joined_pts = crate::patch::stitch(
+                                                        &current, &patch_pts, a, b,
+                                                    );
+                                                    let joined_path = crate::path::Path::new(
+                                                        joined_pts
+                                                            .iter()
+                                                            .map(|[lon, lat]| {
+                                                                crate::path::PathPoint::new(
+                                                                    *lon, *lat, alt_eff,
+                                                                )
+                                                            })
+                                                            .collect(),
+                                                    );
+                                                    let rep_j = crate::smooth::verify_path(
+                                                        &joined_path,
+                                                        None,
+                                                        &opts,
+                                                        &ctx,
+                                                        Some(phys_min_radius_m),
+                                                    );
+                                                    if rep_j.ok {
+                                                        current = joined_pts;
+                                                        used_any = true;
+                                                        degradations.push(
                                                         "patch: visibility-graph bypass adopted (docs/12 §3.3/§3.5)"
                                                             .into(),
                                                     );
-                                                    warnings.extend(rep_j.warnings.iter().cloned());
-                                                    break;
-                                                }
-                                                // 接缝违规 → C7：扩张 patch 重试（硬上限 + 固定步长）
-                                                if retry < crate::patch::PATCH_RETRY_MAX {
-                                                    rect.half_deg *= crate::patch::PATCH_RETRY_EXPAND;
-                                                    retry += 1;
-                                                    continue;
-                                                }
-                                                // C3 归因：verify 硬闸失败 → 拟合缺陷 vs 几何无解
-                                                let all_inflated: Vec<Vec<[f64; 2]>> = obstacles
-                                                    .iter()
-                                                    .map(|v| {
-                                                        let hull = crate::patch::convex_hull(v);
-                                                        crate::patch::inflate_convex(
-                                                            &hull,
-                                                            inflation_m / 111_320.0,
-                                                        )
-                                                    })
-                                                    .filter(|h| h.len() >= 3)
-                                                    .collect();
-                                                match crate::patch::classify_verify_failure(
+                                                        warnings
+                                                            .extend(rep_j.warnings.iter().cloned());
+                                                        break;
+                                                    }
+                                                    // 接缝违规 → C7：扩张 patch 重试（硬上限 + 固定步长）
+                                                    if retry < crate::patch::PATCH_RETRY_MAX {
+                                                        rect.half_deg *=
+                                                            crate::patch::PATCH_RETRY_EXPAND;
+                                                        retry += 1;
+                                                        continue;
+                                                    }
+                                                    // C3 归因：verify 硬闸失败 → 拟合缺陷 vs 几何无解
+                                                    let all_inflated: Vec<Vec<[f64; 2]>> =
+                                                        obstacles
+                                                            .iter()
+                                                            .map(|v| {
+                                                                let hull =
+                                                                    crate::patch::convex_hull(v);
+                                                                crate::patch::inflate_convex(
+                                                                    &hull,
+                                                                    inflation_m / 111_320.0,
+                                                                )
+                                                            })
+                                                            .filter(|h| h.len() >= 3)
+                                                            .collect();
+                                                    match crate::patch::classify_verify_failure(
                                                     &patch_pts,
                                                     &rep_j.issues,
                                                     all_inflated
@@ -1610,108 +1674,56 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                                                         )
                                                     }
                                                 }
-                                            }
-                                            crate::patch::PatchOutcome::SearchTruncated => {
-                                                // C2：截断 ≠ 几何无解；标注降级，归原 raw 回退
-                                                degradations.push(
+                                                }
+                                                crate::patch::PatchOutcome::SearchTruncated => {
+                                                    // C2：截断 ≠ 几何无解；标注降级，归原 raw 回退
+                                                    degradations.push(
                                                     "patch: search_truncated (visible-graph cap, docs/12 §13.1 C2)"
                                                         .into(),
                                                 );
+                                                }
+                                                crate::patch::PatchOutcome::GeometricImpossible => {
+                                                }
                                             }
-                                            crate::patch::PatchOutcome::GeometricImpossible => {}
                                         }
                                     }
+                                    break;
                                 }
-                                break;
+                            }
+                            if used_any {
+                                pts = current
+                                    .iter()
+                                    .map(|[lon, lat]| {
+                                        crate::path::PathPoint::new(*lon, *lat, alt_eff)
+                                    })
+                                    .collect();
+                                warnings.extend(seg_warnings.iter().cloned());
+                                break 'fmm_attempt;
                             }
                         }
-                        if used_any {
-                            pts = current
-                                .iter()
-                                .map(|[lon, lat]| crate::path::PathPoint::new(*lon, *lat, alt_eff))
-                                .collect();
-                            warnings.extend(seg_warnings.iter().cloned());
-                            break 'fmm_attempt;
-                        }
                     }
-                }
-                // 终检失败 → 回退未平滑拼接（必经点保留，宁丑勿违）
-                pts = raw_joined.points;
-                let msg = "smoothing_failed: no smoothed stage passed full verification";
-                warnings.push(msg.into());
-                degradations.push(msg.into());
-                warnings.extend(final_rep.warnings.iter().cloned());
-                // 空洞/代价场网格伪影兜底（空洞策略 2026-08-04：可用结果 + 降级警告进
-                // stats.degradations）：FMM 对 NoData 5x 代价区域绕行 → raw 是密集网格
-                // 楼梯（本场景绕渤海 NoData 44km 侧偏，1138km vs 直线 784km）→ Theta*
-                // 拉直被弦高门（相对 raw 100m）拒绝 → 全链失败回退楼梯。若 raw 显著长于
-                // 分段直线（网格伪影而非真实绕障）且直线通过完整几何复验（不穿硬墙/不超
-                // 机动/净空满足，NoData 已降级为警告）→ 交付直线（必经点保留）+ 降级警告。
-                let cur_dist = Path::new(pts.clone()).length_m();
-                // 不穿雷达深区（≥0.7×有效半径）才走通用兜底——穿雷达由下方雷达专用
-                // 直线直穿替代处理（主管 2026-08-05 拍板语义，保持雷达行为不变）。
-                let threat_ok = straight.points.iter().all(|p| {
-                    threat.static_penetration(p.lon, p.lat, p.alt_m) >= 0.7
-                });
-                if straight.points.len() >= 2
-                    && cur_dist > straight.length_m() * 1.05 + 1_000.0
-                    && threat_ok
-                {
-                    let rep_s = crate::smooth::verify_path(
-                        &straight,
-                        None,
-                        &opts,
-                        &ctx,
-                        Some(phys_min_radius_m),
-                    );
-                    if rep_s.ok {
-                        pts = straight.points.clone();
-                        // 直线替代成功 → 最终交付已平滑，撤销 smoothing_failed 误报
-                        warnings.retain(|w| !w.starts_with("smoothing_failed"));
-                        degradations.retain(|d| !d.starts_with("smoothing_failed"));
-                        warnings.extend(rep_s.warnings.iter().cloned());
-                        let msg2 = format!(
-                            "raw FMM grid artifact: straight-line transit adopted (terrain NoData degraded)"
-                        );
-                        if !degradations.contains(&msg2) {
-                            degradations.push(msg2.clone());
-                        }
-                        warnings.push(msg2);
-                    }
-                }
-            }
-            // 雷达 degradation：从终检 issues + 终检 warnings + 段警告提取（雷达软约束，去重）
-            for i in final_rep
-                .issues
-                .iter()
-                .chain(final_rep.warnings.iter())
-                .chain(seg_warnings.iter())
-            {
-                if i.contains("radar") && !degradations.contains(i) {
-                    degradations.push(i.clone());
-                }
-            }
-            // 雷达避不开 → 直线直穿替代（主管 2026-08-05 锯齿问题修复）：
-            // FMM 直穿雷达区时 Theta* 拒绝拉直（check 穿雷达=false）→ 交付网格锯齿；
-            // 若整路径探测概率仍超阈值 且 距离显著大于直线（锯齿是网格伪影而非真实绕行）
-            // → 用分段直线直穿（必经点保留，最短暴露时长）。直线需过几何复验（防穿山/超机动）。
-            if let Some(tm) = ctx.threat {
-                let rep_now = tm.evaluate(&Path::new(pts.clone()), ctx.terrain);
-                // 直穿判定：路径某点深入任一雷达有效半径 70% 以内（与 Theta* 深探测
-                // DEEP_RATIO 一致）才视为"避不开的直穿"；完全绕出（最近点 ≥ 0.7×半径）
-                // 保持绕行，不替代。（P_cross 是验收阈值，不参与直穿判定——主管
-                // 2026-08-06：航路必须绕开雷达探测区域，不得因调高 P_cross 而直穿。）
-                let mut penetrates = false;
-                for p in &pts {
-                    if threat.static_penetration(p.lon, p.lat, p.alt_m) < 0.7 {
-                        penetrates = true;
-                        break;
-                    }
-                }
-                if rep_now.over_threshold && penetrates {
+                    // 终检失败 → 回退未平滑拼接（必经点保留，宁丑勿违）
+                    pts = raw_joined.points;
+                    let msg = "smoothing_failed: no smoothed stage passed full verification";
+                    warnings.push(msg.into());
+                    degradations.push(msg.into());
+                    warnings.extend(final_rep.warnings.iter().cloned());
+                    // 空洞/代价场网格伪影兜底（空洞策略 2026-08-04：可用结果 + 降级警告进
+                    // stats.degradations）：FMM 对 NoData 5x 代价区域绕行 → raw 是密集网格
+                    // 楼梯（本场景绕渤海 NoData 44km 侧偏，1138km vs 直线 784km）→ Theta*
+                    // 拉直被弦高门（相对 raw 100m）拒绝 → 全链失败回退楼梯。若 raw 显著长于
+                    // 分段直线（网格伪影而非真实绕障）且直线通过完整几何复验（不穿硬墙/不超
+                    // 机动/净空满足，NoData 已降级为警告）→ 交付直线（必经点保留）+ 降级警告。
                     let cur_dist = Path::new(pts.clone()).length_m();
+                    // 不穿雷达深区（≥0.7×有效半径）才走通用兜底——穿雷达由下方雷达专用
+                    // 直线直穿替代处理（主管 2026-08-05 拍板语义，保持雷达行为不变）。
+                    let threat_ok = straight
+                        .points
+                        .iter()
+                        .all(|p| threat.static_penetration(p.lon, p.lat, p.alt_m) >= 0.7);
                     if straight.points.len() >= 2
                         && cur_dist > straight.length_m() * 1.05 + 1_000.0
+                        && threat_ok
                     {
                         let rep_s = crate::smooth::verify_path(
                             &straight,
@@ -1725,19 +1737,75 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                             // 直线替代成功 → 最终交付已平滑，撤销 smoothing_failed 误报
                             warnings.retain(|w| !w.starts_with("smoothing_failed"));
                             degradations.retain(|d| !d.starts_with("smoothing_failed"));
-                            let msg = format!(
-                                "radar: unavoidable crossing -> straight-line transit (p {:.4})",
-                                rep_now.cumulative_p
+                            warnings.extend(rep_s.warnings.iter().cloned());
+                            let msg2 = format!(
+                                "raw FMM grid artifact: straight-line transit adopted (terrain NoData degraded)"
                             );
-                            if !degradations.contains(&msg) {
-                                degradations.push(msg.clone());
+                            if !degradations.contains(&msg2) {
+                                degradations.push(msg2.clone());
                             }
-                            warnings.push(msg);
+                            warnings.push(msg2);
+                        }
+                    }
+                }
+                // 雷达 degradation：从终检 issues + 终检 warnings + 段警告提取（雷达软约束，去重）
+                for i in final_rep
+                    .issues
+                    .iter()
+                    .chain(final_rep.warnings.iter())
+                    .chain(seg_warnings.iter())
+                {
+                    if i.contains("radar") && !degradations.contains(i) {
+                        degradations.push(i.clone());
+                    }
+                }
+                // 雷达避不开 → 直线直穿替代（主管 2026-08-05 锯齿问题修复）：
+                // FMM 直穿雷达区时 Theta* 拒绝拉直（check 穿雷达=false）→ 交付网格锯齿；
+                // 若整路径探测概率仍超阈值 且 距离显著大于直线（锯齿是网格伪影而非真实绕行）
+                // → 用分段直线直穿（必经点保留，最短暴露时长）。直线需过几何复验（防穿山/超机动）。
+                if let Some(tm) = ctx.threat {
+                    let rep_now = tm.evaluate(&Path::new(pts.clone()), ctx.terrain);
+                    // 直穿判定：路径某点深入任一雷达有效半径 70% 以内（与 Theta* 深探测
+                    // DEEP_RATIO 一致）才视为"避不开的直穿"；完全绕出（最近点 ≥ 0.7×半径）
+                    // 保持绕行，不替代。（P_cross 是验收阈值，不参与直穿判定——主管
+                    // 2026-08-06：航路必须绕开雷达探测区域，不得因调高 P_cross 而直穿。）
+                    let mut penetrates = false;
+                    for p in &pts {
+                        if threat.static_penetration(p.lon, p.lat, p.alt_m) < 0.7 {
+                            penetrates = true;
+                            break;
+                        }
+                    }
+                    if rep_now.over_threshold && penetrates {
+                        let cur_dist = Path::new(pts.clone()).length_m();
+                        if straight.points.len() >= 2
+                            && cur_dist > straight.length_m() * 1.05 + 1_000.0
+                        {
+                            let rep_s = crate::smooth::verify_path(
+                                &straight,
+                                None,
+                                &opts,
+                                &ctx,
+                                Some(phys_min_radius_m),
+                            );
+                            if rep_s.ok {
+                                pts = straight.points.clone();
+                                // 直线替代成功 → 最终交付已平滑，撤销 smoothing_failed 误报
+                                warnings.retain(|w| !w.starts_with("smoothing_failed"));
+                                degradations.retain(|d| !d.starts_with("smoothing_failed"));
+                                let msg = format!(
+                                    "radar: unavoidable crossing -> straight-line transit (p {:.4})",
+                                    rep_now.cumulative_p
+                                );
+                                if !degradations.contains(&msg) {
+                                    degradations.push(msg.clone());
+                                }
+                                warnings.push(msg);
+                            }
                         }
                     }
                 }
             }
-        }
             break 'fmm_attempt;
         }
         // 抬升提示（2026-08-10 / 2026-08-14）：中间段巡航高度被地形抬升必须显式告知；
@@ -1901,7 +1969,9 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
             let mut env_fail: Vec<String> = Vec::new();
             if let Some(last) = pts.last() {
                 if let Some([rmin_km, rmax_km]) = w.effective_range_km() {
-                    let d_km = crate::path::haversine_m(last.lon, last.lat, v.target.lon, v.target.lat) / 1000.0;
+                    let d_km =
+                        crate::path::haversine_m(last.lon, last.lat, v.target.lon, v.target.lat)
+                            / 1000.0;
                     if !(d_km >= rmin_km - 1e-6 && d_km <= rmax_km + 1e-6) {
                         env_fail.push(format!(
                             "terminal {d_km:.1} km from target outside weapon ring [{rmin_km}, {rmax_km}] km"
@@ -1919,7 +1989,9 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                         f64::NAN
                     };
                     if h_last.is_finite() && !heading_in_window(h_last, lo, hi) {
-                        env_fail.push(format!("terminal heading {h_last:.1} deg outside [{lo}, {hi}]"));
+                        env_fail.push(format!(
+                            "terminal heading {h_last:.1} deg outside [{lo}, {hi}]"
+                        ));
                     }
                 }
                 if let Some([lo, hi]) = env.alt_m {
@@ -1942,7 +2014,10 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                 }
             }
             if !env_fail.is_empty() {
-                warnings.push(format!("launch envelope not satisfied: {}", env_fail.join("; ")));
+                warnings.push(format!(
+                    "launch envelope not satisfied: {}",
+                    env_fail.join("; ")
+                ));
                 emit_classified(
                     &v.id,
                     "geometrically_impossible",
@@ -2301,9 +2376,12 @@ fn terrain_follow_insert(
                 let is_start_seg = i == 0;
                 let is_end_seg = i + 2 == pts.len();
                 if is_start_seg || is_end_seg {
-                    let end_ref = if is_start_seg { pts[0] } else { pts[pts.len() - 1] };
-                    let dist_to_ref =
-                        crate::path::haversine_m(lon, lat, end_ref.lon, end_ref.lat);
+                    let end_ref = if is_start_seg {
+                        pts[0]
+                    } else {
+                        pts[pts.len() - 1]
+                    };
+                    let dist_to_ref = crate::path::haversine_m(lon, lat, end_ref.lon, end_ref.lat);
                     new_alt = new_alt.min(end_ref.alt_m + tan_a * dist_to_ref);
                     // 不穿地（起飞/降落段净空 ≥ 0 底线）
                     if let Sample::Land(h) = tsrc.sample_at(lon, lat) {
@@ -2396,8 +2474,8 @@ pub(crate) fn detect_multi_vehicle_crossings(vehicles: &mut [VehicleOutput]) {
             if pi.len() < 2 || pj.len() < 2 {
                 continue;
             }
-            let mid_lat = pi.iter().chain(pj.iter()).map(|p| p.y).sum::<f64>()
-                / (pi.len() + pj.len()) as f64;
+            let mid_lat =
+                pi.iter().chain(pj.iter()).map(|p| p.y).sum::<f64>() / (pi.len() + pj.len()) as f64;
             let mut best: Option<(f64, f64, f64, f64)> = None; // (h_km, v_m, lon, lat)
             for a in pi.windows(2) {
                 for b in pj.windows(2) {
@@ -2484,9 +2562,7 @@ fn ring_target_cell(
             }
             let (lon, lat) = cell_lonlat(r, c, region, grid);
             let d_km = crate::path::haversine_m(lon, lat, target.lon, target.lat) / 1000.0;
-            if d_km >= rmin_km && d_km <= rmax_km
-                && best.is_none_or(|(bt, _, _)| t < bt)
-            {
+            if d_km >= rmin_km && d_km <= rmax_km && best.is_none_or(|(bt, _, _)| t < bt) {
                 best = Some((t, r, c));
             }
         }
@@ -2737,7 +2813,9 @@ fn radar_param_degradations(input: &Input, out: &mut Vec<String>) {
     if let Some(v) = p.radar_inflation
         && !(v.is_finite() && v > 1.0)
     {
-        out.push(format!("parameter radar_inflation={v} invalid -> default 1.2"));
+        out.push(format!(
+            "parameter radar_inflation={v} invalid -> default 1.2"
+        ));
     }
     if let Some(v) = p.p_cross
         && !(v.is_finite() && v >= 0.0 && v <= 1.0)
@@ -2747,22 +2825,30 @@ fn radar_param_degradations(input: &Input, out: &mut Vec<String>) {
     if let Some(v) = p.suppression_delta
         && !(v.is_finite() && v >= 0.0 && v < 1.0)
     {
-        out.push(format!("parameter suppression_delta={v} invalid -> default 0.5"));
+        out.push(format!(
+            "parameter suppression_delta={v} invalid -> default 0.5"
+        ));
     }
     if let Some(v) = p.radar_cost_coef
         && !(v.is_finite() && v > 0.0)
     {
-        out.push(format!("parameter radar_cost_coef={v} invalid -> default 200"));
+        out.push(format!(
+            "parameter radar_cost_coef={v} invalid -> default 200"
+        ));
     }
     if let Some(v) = p.los_mask_coef
         && !(v.is_finite() && v >= 0.0 && v <= 1.0)
     {
-        out.push(format!("parameter los_mask_coef={v} invalid -> default 0.08"));
+        out.push(format!(
+            "parameter los_mask_coef={v} invalid -> default 0.08"
+        ));
     }
     if let Some(s) = &p.detection_curve
         && !matches!(s.to_ascii_lowercase().as_str(), "exponential" | "linear")
     {
-        out.push(format!("parameter detection_curve={s} invalid -> default exponential"));
+        out.push(format!(
+            "parameter detection_curve={s} invalid -> default exponential"
+        ));
     }
 }
 
@@ -2773,7 +2859,9 @@ fn join_paths(segs: &[Path]) -> Path {
         for p in &seg.points {
             let dup = pts
                 .last()
-                .map(|q: &RouterPoint| (q.lon - p.lon).abs() < 1e-12 && (q.lat - p.lat).abs() < 1e-12)
+                .map(|q: &RouterPoint| {
+                    (q.lon - p.lon).abs() < 1e-12 && (q.lat - p.lat).abs() < 1e-12
+                })
                 .unwrap_or(false);
             if !dup {
                 pts.push(*p);
@@ -2867,13 +2955,7 @@ fn make_segment_check<'a>(
                 //    半径 100km 边缘偏差 ~±2% 可翻转"穿/不穿"，边缘浅穿场景 check
                 //    放行 verify 拒（2026-08-07 zigzag16 restricted 圆心东移）。
                 if let Some((t1, t2)) = crate::smooth::segment_circle_intersect_t(
-                    lon1,
-                    lat1,
-                    lon2,
-                    lat2,
-                    center[0],
-                    center[1],
-                    *radius_km,
+                    lon1, lat1, lon2, lat2, center[0], center[1], *radius_km,
                 ) {
                     for i in 0..=N {
                         let t = t1 + (t2 - t1) * i as f64 / N as f64;
@@ -3070,13 +3152,10 @@ fn seg_zone_clearance_ok(
     infl_m: f64,
 ) -> bool {
     let infl_km = infl_m / 1000.0;
-    zones
-        .iter()
-        .filter(|z| z.is_wall())
-        .all(|z| {
-            let clr = crate::config::zone_segment_clearance_km(lon1, lat1, lon2, lat2, z);
-            clr > 1e-9 && clr >= infl_km
-        })
+    zones.iter().filter(|z| z.is_wall()).all(|z| {
+        let clr = crate::config::zone_segment_clearance_km(lon1, lat1, lon2, lat2, z);
+        clr > 1e-9 && clr >= infl_km
+    })
 }
 
 /// boundary arc 插入前净距预检：arc 各相邻段 + 弧末点 E→出段第二点 c2 都必须满足
@@ -3100,7 +3179,6 @@ fn seg_zone_clearance_ok_arc(
     }
     seg_zone_clearance_ok(e.lon, e.lat, c2.lon, c2.lat, zones, infl_m)
 }
-
 
 /// 受限区穿行剖面高度决策（主管 2026-08-06 二轮：比较顶部绕飞与底部穿行的代价，选更优）。
 /// 仅对高度区间内的 restricted 调用；返回：
@@ -3224,8 +3302,12 @@ fn restricted_pass_alt(
         };
         // 限飞区高度区间必须存在（validate 已强制 Restricted 提供 [alt_min, alt_max]）；
         // 缺失时按全高度处理（退化输入兜底，不 panic）。
-        let Some(min_alt) = z.alt_min_m else { return None };
-        let Some(max_alt) = z.alt_max_m else { return None };
+        let Some(min_alt) = z.alt_min_m else {
+            return None;
+        };
+        let Some(max_alt) = z.alt_max_m else {
+            return None;
+        };
         let bottom = min_alt - 500.0;
         let top = max_alt + 500.0;
         let climb_dist = |pass: f64| -> f64 {
@@ -3237,7 +3319,8 @@ fn restricted_pass_alt(
         };
         let d_in = pt_polygon_boundary_km(start.lon, start.lat, vertices);
         let d_out = pt_polygon_boundary_km(target.lon, target.lat, vertices);
-        let fit = |pass: f64| d_in * 1000.0 >= climb_dist(pass) && d_out * 1000.0 >= climb_dist(pass);
+        let fit =
+            |pass: f64| d_in * 1000.0 >= climb_dist(pass) && d_out * 1000.0 >= climb_dist(pass);
         // 顶部绕飞可行性：爬升距离 + 升限（alt_max + 500 ≤ ceiling）
         let top_ok = fit(top) && ceiling_m.map_or(true, |c| top <= c);
         // 底部穿行可行性：爬升距离 + 底部严格低于 alt_min + 穿行带（直线穿多边形段）地形
@@ -3253,8 +3336,12 @@ fn restricted_pass_alt(
     };
     // 限飞区高度区间必须存在（validate 已强制 Restricted 提供 [alt_min, alt_max]）；
     // 缺失时按全高度处理（退化输入兜底，不 panic）。
-    let Some(min_alt) = z.alt_min_m else { return None };
-    let Some(max_alt) = z.alt_max_m else { return None };
+    let Some(min_alt) = z.alt_min_m else {
+        return None;
+    };
+    let Some(max_alt) = z.alt_max_m else {
+        return None;
+    };
     let bottom = min_alt - 500.0;
     let top = max_alt + 500.0;
     let climb_dist = |pass: f64| -> f64 {
@@ -3314,12 +3401,8 @@ fn bottom_terrain_ok(
         let (lo, hi) = (i_a.min(i_b), i_a.max(i_b));
         let mut seg_len_m = 0.0_f64;
         for k in lo + 1..=hi {
-            seg_len_m += crate::path::haversine_m(
-                raw[k - 1].lon,
-                raw[k - 1].lat,
-                raw[k].lon,
-                raw[k].lat,
-            );
+            seg_len_m +=
+                crate::path::haversine_m(raw[k - 1].lon, raw[k - 1].lat, raw[k].lon, raw[k].lat);
         }
         // raw 相邻点间距 ≈ cell（8 邻域回溯），按点序号线性插值足够
         let n = ((seg_len_m / 200.0).ceil() as usize).clamp(8, 2048);
@@ -3338,7 +3421,7 @@ fn bottom_terrain_ok(
         }
         return match max_terr {
             Some(h) => h + 100.0 <= bottom, // 净空满足 → 底部可行
-            None => true,                    // 穿行段无陆地（水面/无数据）→ 直穿
+            None => true,                   // 穿行段无陆地（水面/无数据）→ 直穿
         };
     }
     // 平面近似：start→target 直线穿行带（圆：解析二次方程；多边形：边交点成带）
@@ -3364,16 +3447,16 @@ fn bottom_terrain_ok(
                 let sq = disc.sqrt();
                 let u_in = ((-b - sq) / (2.0 * a)).max(0.0);
                 let u_out = ((-b + sq) / (2.0 * a)).min(1.0);
-                if u_out <= u_in { Vec::new() } else { vec![(u_in, u_out)] }
+                if u_out <= u_in {
+                    Vec::new()
+                } else {
+                    vec![(u_in, u_out)]
+                }
             }
         }
-        ZoneShape::Polygon { vertices } => line_polygon_inside_bands(
-            start.lon,
-            start.lat,
-            target.lon,
-            target.lat,
-            vertices,
-        ),
+        ZoneShape::Polygon { vertices } => {
+            line_polygon_inside_bands(start.lon, start.lat, target.lon, target.lat, vertices)
+        }
     };
     if bands.is_empty() {
         return true; // 直线不穿 restricted（FMM 直穿不经过）
@@ -3395,7 +3478,7 @@ fn bottom_terrain_ok(
     }
     match max_terr {
         Some(h) => h + 100.0 <= bottom, // 净空满足 → 底部可行
-        None => true,                    // 穿行段无陆地（水面/无数据）→ 直穿
+        None => true,                   // 穿行段无陆地（水面/无数据）→ 直穿
     }
 }
 
@@ -3415,7 +3498,17 @@ fn restricted_detour_required(
     if !restricted_blocks_alt(z, alt_m) {
         return false;
     }
-    restricted_pass_alt(z, alt_m, ceiling_m, terrain, start, target, max_climb_deg, None).is_none()
+    restricted_pass_alt(
+        z,
+        alt_m,
+        ceiling_m,
+        terrain,
+        start,
+        target,
+        max_climb_deg,
+        None,
+    )
+    .is_none()
 }
 
 /// 直线段是否穿/贴任一硬墙（NoFly/Obstacle，全高度墙）：净距 ≤ 0 或 < inflation。
@@ -3463,9 +3556,11 @@ fn line_hits_restricted_band_km(
         // 端点本身在带内（退化/零长度段覆盖；圆/多边形同口径 zone_contains）
         let in_band_at = |lon: f64, lat: f64, alt: f64| -> bool {
             match Geo::new(lon, lat) {
-                Ok(g) => crate::config::zone_contains(z, &g)
-                    && z.alt_min_m.is_some_and(|lo| alt >= lo)
-                    && z.alt_max_m.is_some_and(|hi| alt <= hi),
+                Ok(g) => {
+                    crate::config::zone_contains(z, &g)
+                        && z.alt_min_m.is_some_and(|lo| alt >= lo)
+                        && z.alt_max_m.is_some_and(|hi| alt <= hi)
+                }
                 Err(_) => false,
             }
         };
@@ -3475,13 +3570,7 @@ fn line_hits_restricted_band_km(
         let bands: Vec<(f64, f64)> = match &z.shape {
             crate::config::ZoneShape::Circle { center, radius_km } => {
                 match segment_circle_intersect_t(
-                    lon1,
-                    lat1,
-                    lon2,
-                    lat2,
-                    center[0],
-                    center[1],
-                    *radius_km,
+                    lon1, lat1, lon2, lat2, center[0], center[1], *radius_km,
                 ) {
                     Some((t1, t2)) => vec![(t1, t2)],
                     None => Vec::new(),
@@ -3495,9 +3584,7 @@ fn line_hits_restricted_band_km(
             for kk in 0..=8 {
                 let tt = b1 + (b2 - b1) * kk as f64 / 8.0;
                 let alt = alt1 + (alt2 - alt1) * tt;
-                if z
-                    .alt_min_m
-                    .is_some_and(|lo| alt >= lo)
+                if z.alt_min_m.is_some_and(|lo| alt >= lo)
                     && z.alt_max_m.is_some_and(|hi| alt <= hi)
                 {
                     return true;
@@ -3561,10 +3648,10 @@ fn build_restricted_profiles(
             let pa = &seg.points[i];
             let pb = &seg.points[i + 1];
             let d = crate::config::zone_segment_clearance_km(pa.lon, pa.lat, pb.lon, pb.lat, z);
-            let a_in = Geo::new(pa.lon, pa.lat)
-                .map_or(false, |g| crate::config::zone_contains(z, &g));
-            let b_in = Geo::new(pb.lon, pb.lat)
-                .map_or(false, |g| crate::config::zone_contains(z, &g));
+            let a_in =
+                Geo::new(pa.lon, pa.lat).map_or(false, |g| crate::config::zone_contains(z, &g));
+            let b_in =
+                Geo::new(pb.lon, pb.lat).map_or(false, |g| crate::config::zone_contains(z, &g));
             if d <= 1e-9 || a_in || b_in {
                 return i;
             }
@@ -3592,10 +3679,10 @@ fn build_restricted_profiles(
             // 端点 inside 判定与 verify（zone_contains_at）同口径：Geo::distance_m
             // （haversine）≤ r——dist_km（平面近似）在圆边界处有 ~0.1% 偏差，
             // 边界点（如距圆心 20.02 vs 19.99km）会漏判进入 → 首段含圆内 3000m 违规。
-            let a_in = Geo::new(pa.lon, pa.lat)
-                .map_or(false, |g| crate::config::zone_contains(z, &g));
-            let b_in = Geo::new(pb.lon, pb.lat)
-                .map_or(false, |g| crate::config::zone_contains(z, &g));
+            let a_in =
+                Geo::new(pa.lon, pa.lat).map_or(false, |g| crate::config::zone_contains(z, &g));
+            let b_in =
+                Geo::new(pb.lon, pb.lat).map_or(false, |g| crate::config::zone_contains(z, &g));
             let crossing = d <= 1e-9 || a_in || b_in; // 段与 zone 相交/端点在内
             if crossing && !in_circle {
                 // 凸 zone：in_idx 只取第一次进入（raw 锯齿在边界摆动时可能"出→再进"，
@@ -3807,7 +3894,8 @@ fn build_restricted_profiles(
             if in_other_band(tail.points[i].lon, tail.points[i].lat) {
                 continue;
             }
-            if dist_km(tail.points[i].lon, tail.points[i].lat, pin2.lon, pin2.lat) >= climb_base_km {
+            if dist_km(tail.points[i].lon, tail.points[i].lat, pin2.lon, pin2.lat) >= climb_base_km
+            {
                 let h1 = heading(p0pt.lon, p0pt.lat, tail.points[i].lon, tail.points[i].lat);
                 let h2 = heading(tail.points[i].lon, tail.points[i].lat, pin2.lon, pin2.lat);
                 if angle_between(h1, h2) <= 55.0 {
@@ -3823,7 +3911,9 @@ fn build_restricted_profiles(
             if in_other_band(tail.points[i].lon, tail.points[i].lat) {
                 continue;
             }
-            if dist_km(pout2.lon, pout2.lat, tail.points[i].lon, tail.points[i].lat) >= climb_base_km {
+            if dist_km(pout2.lon, pout2.lat, tail.points[i].lon, tail.points[i].lat)
+                >= climb_base_km
+            {
                 let h1 = heading(pout2.lon, pout2.lat, tail.points[i].lon, tail.points[i].lat);
                 let h2 = heading(tail.points[i].lon, tail.points[i].lat, plast.lon, plast.lat);
                 if angle_between(h1, h2) <= 55.0 {
@@ -4027,11 +4117,7 @@ fn push_out_of_walls(
 
 /// 点到多边形边界最近距离（km，平面近似）与最近点（度）与内部判定。
 /// 遍历各边取最近；点与边界重合（d≈0）时最近点 ≈ 点本身。
-fn poly_nearest_edge_km(
-    lon: f64,
-    lat: f64,
-    vertices: &[[f64; 2]],
-) -> (f64, f64, f64, bool) {
+fn poly_nearest_edge_km(lon: f64, lat: f64, vertices: &[[f64; 2]]) -> (f64, f64, f64, bool) {
     let lat0 = lat.to_radians();
     let kx = 111.320 * lat0.cos();
     let ky = 111.0;
@@ -4141,27 +4227,42 @@ fn build_cost_field(
         // 外部格式（GeoTIFF/DTED/SRTM）无 BulkPrefetch → 带锁采样回退。
         // P9 T4：传 cell 分辨率给 sample_at_res —— GeoTIFF 大文件带 Overview 时
         // FMM 粗层采样走低分辨率层（省高分辨率解压），verify 精查仍走主层。
-        TerrainHandle::External(t) => build_semantic_cost_field(grid, grid, |r, c| {
-            let (lon, lat) = cell_lonlat(r, c, region, grid);
-            if walled(lon, lat) {
-                return Sample::Forbidden;
-            }
-            t.sample_at_res(lon, lat, cell_deg)
-        }, 5.0),
-        TerrainHandle::MaskedExternal(t) => build_semantic_cost_field(grid, grid, |r, c| {
-            let (lon, lat) = cell_lonlat(r, c, region, grid);
-            if walled(lon, lat) {
-                return Sample::Forbidden;
-            }
-            t.sample_at_res(lon, lat, cell_deg)
-        }, 5.0),
-        TerrainHandle::None => build_semantic_cost_field(grid, grid, |r, c| {
-            let (lon, lat) = cell_lonlat(r, c, region, grid);
-            if walled(lon, lat) {
-                return Sample::Forbidden;
-            }
-            Sample::Land(0.0)
-        }, 5.0),
+        TerrainHandle::External(t) => build_semantic_cost_field(
+            grid,
+            grid,
+            |r, c| {
+                let (lon, lat) = cell_lonlat(r, c, region, grid);
+                if walled(lon, lat) {
+                    return Sample::Forbidden;
+                }
+                t.sample_at_res(lon, lat, cell_deg)
+            },
+            5.0,
+        ),
+        TerrainHandle::MaskedExternal(t) => build_semantic_cost_field(
+            grid,
+            grid,
+            |r, c| {
+                let (lon, lat) = cell_lonlat(r, c, region, grid);
+                if walled(lon, lat) {
+                    return Sample::Forbidden;
+                }
+                t.sample_at_res(lon, lat, cell_deg)
+            },
+            5.0,
+        ),
+        TerrainHandle::None => build_semantic_cost_field(
+            grid,
+            grid,
+            |r, c| {
+                let (lon, lat) = cell_lonlat(r, c, region, grid);
+                if walled(lon, lat) {
+                    return Sample::Forbidden;
+                }
+                Sample::Land(0.0)
+            },
+            5.0,
+        ),
     };
 
     // 5c. 禁飞区墙向外膨胀 + 过渡带软罚（见 apply_inflation_and_band）
@@ -4357,11 +4458,7 @@ mod tests {
             status: "planned".into(),
             path: pts
                 .iter()
-                .map(|&(x, y, alt)| PathPoint {
-                    x,
-                    y,
-                    alt_m: alt,
-                })
+                .map(|&(x, y, alt)| PathPoint { x, y, alt_m: alt })
                 .collect(),
             distance_m: 0.0,
             warnings: Vec::new(),
@@ -4382,8 +4479,16 @@ mod tests {
             vpp(116.5, 39.9, 3000.0),
         ];
         apply_vertical_profile(&mut pts, 3000.0, 8000.0, 3000.0, &[], None, 100.0);
-        assert!((pts[0].alt_m - 3000.0).abs() < 0.5, "start {}", pts[0].alt_m);
-        assert!((pts[1].alt_m - 5500.0).abs() < 200.0, "mid {}", pts[1].alt_m);
+        assert!(
+            (pts[0].alt_m - 3000.0).abs() < 0.5,
+            "start {}",
+            pts[0].alt_m
+        );
+        assert!(
+            (pts[1].alt_m - 5500.0).abs() < 200.0,
+            "mid {}",
+            pts[1].alt_m
+        );
         assert!((pts[2].alt_m - 8000.0).abs() < 0.5, "end {}", pts[2].alt_m);
     }
 
@@ -4403,12 +4508,21 @@ mod tests {
     fn push_out_polygon_point_inside() {
         // 正方形 [115,39]..[115.2,39.2]（中心点距边界 ~8.6km）；点 (115.1,39.1) 在内部，
         // target=10.5km > 8.6km → 外扩出边界 target 距离
-        let z = poly_wall(vec![[115.0, 39.0], [115.2, 39.0], [115.2, 39.2], [115.0, 39.2]]);
+        let z = poly_wall(vec![
+            [115.0, 39.0],
+            [115.2, 39.0],
+            [115.2, 39.2],
+            [115.0, 39.2],
+        ]);
         let p = RouterPoint::new(115.1, 39.1, 1000.0);
         let out = push_out_of_walls(&[p], &[z], 10.0, 0.5);
         let q = out[0];
         // 外扩后：距边界最近距离 ≈ target=10.5km，且在多边形外
-        let (d, _, _, inside) = poly_nearest_edge_km(q.lon, q.lat, &[[115.0, 39.0], [115.2, 39.0], [115.2, 39.2], [115.0, 39.2]]);
+        let (d, _, _, inside) = poly_nearest_edge_km(
+            q.lon,
+            q.lat,
+            &[[115.0, 39.0], [115.2, 39.0], [115.2, 39.2], [115.0, 39.2]],
+        );
         assert!(!inside, "should be outside polygon");
         assert!((d - 10.5).abs() < 0.5, "distance {d} vs target 10.5");
         // 高度保持
@@ -4418,11 +4532,20 @@ mod tests {
     #[test]
     fn push_out_polygon_point_near_outside() {
         // 点在多边形外但距边界 < target → 外扩到 target
-        let z = poly_wall(vec![[115.0, 39.0], [115.2, 39.0], [115.2, 39.2], [115.0, 39.2]]);
+        let z = poly_wall(vec![
+            [115.0, 39.0],
+            [115.2, 39.0],
+            [115.2, 39.2],
+            [115.0, 39.2],
+        ]);
         let p = RouterPoint::new(115.0, 39.02, 1000.0); // 距南边 ~2.2km < 5.5
         let out = push_out_of_walls(&[p], &[z], 5.0, 0.5);
         let q = out[0];
-        let (d, _, _, inside) = poly_nearest_edge_km(q.lon, q.lat, &[[115.0, 39.0], [115.2, 39.0], [115.2, 39.2], [115.0, 39.2]]);
+        let (d, _, _, inside) = poly_nearest_edge_km(
+            q.lon,
+            q.lat,
+            &[[115.0, 39.0], [115.2, 39.0], [115.2, 39.2], [115.0, 39.2]],
+        );
         assert!(!inside);
         assert!((d - 5.5).abs() < 0.5, "distance {d} vs target 5.5");
     }
@@ -4453,7 +4576,10 @@ mod tests {
         let z = Zone {
             id: "c".into(),
             zone_type: ZoneType::NoFly,
-            shape: ZoneShape::Circle { center: [115.0, 39.0], radius_km: 10.0 },
+            shape: ZoneShape::Circle {
+                center: [115.0, 39.0],
+                radius_km: 10.0,
+            },
             alt_min_m: None,
             alt_max_m: None,
             height_semantics: HeightSemantics::Msl,
@@ -4469,7 +4595,12 @@ mod tests {
     #[test]
     fn push_out_far_points_unchanged() {
         // 距离足够远 → 原样返回（含迭代收敛路径）
-        let z = poly_wall(vec![[115.0, 39.0], [115.2, 39.0], [115.2, 39.2], [115.0, 39.2]]);
+        let z = poly_wall(vec![
+            [115.0, 39.0],
+            [115.2, 39.0],
+            [115.2, 39.2],
+            [115.0, 39.2],
+        ]);
         let p = RouterPoint::new(115.5, 39.5, 1000.0);
         let out = push_out_of_walls(&[p], &[z], 5.0, 0.5);
         assert!((out[0].lon - 115.5).abs() < 1e-9 && (out[0].lat - 39.5).abs() < 1e-9);
@@ -4508,11 +4639,27 @@ mod tests {
             vpp(115.75, 39.45, 8000.0),
             vpp(116.5, 39.9, 8000.0),
         ];
-        apply_vertical_profile(&mut pts, 8000.0, 3000.0, 8000.0, &[], Some(&FakeTerrain), 100.0);
-        assert!((pts[0].alt_m - 8000.0).abs() < 0.5, "start {}", pts[0].alt_m);
+        apply_vertical_profile(
+            &mut pts,
+            8000.0,
+            3000.0,
+            8000.0,
+            &[],
+            Some(&FakeTerrain),
+            100.0,
+        );
+        assert!(
+            (pts[0].alt_m - 8000.0).abs() < 0.5,
+            "start {}",
+            pts[0].alt_m
+        );
         assert!(pts[1].alt_m >= 6100.0, "mid floor {}", pts[1].alt_m);
         // 终点 3000 < 地形 6000 → 保底抬到地面 6000（起终点不叠加净空余量）
-        assert!((pts[2].alt_m - 6000.0).abs() < 0.5, "end floor {}", pts[2].alt_m);
+        assert!(
+            (pts[2].alt_m - 6000.0).abs() < 0.5,
+            "end floor {}",
+            pts[2].alt_m
+        );
     }
 
     #[test]
@@ -4526,8 +4673,16 @@ mod tests {
             vpp(116.5, 39.9, 2240.0),
         ];
         apply_vertical_profile(&mut pts, 500.0, 3000.0, 2240.0, &[], None, 100.0);
-        assert!((pts[0].alt_m - 500.0).abs() < 0.5, "start kept {}", pts[0].alt_m);
-        assert!((pts[1].alt_m - 1750.0).abs() < 200.0, "mid interpolated {}", pts[1].alt_m);
+        assert!(
+            (pts[0].alt_m - 500.0).abs() < 0.5,
+            "start kept {}",
+            pts[0].alt_m
+        );
+        assert!(
+            (pts[1].alt_m - 1750.0).abs() < 200.0,
+            "mid interpolated {}",
+            pts[1].alt_m
+        );
         assert!((pts[2].alt_m - 3000.0).abs() < 0.5, "end {}", pts[2].alt_m);
     }
 
@@ -4550,9 +4705,21 @@ mod tests {
             None,
             100.0,
         );
-        assert!((pts[0].alt_m - 500.0).abs() < 0.5, "start kept {}", pts[0].alt_m);
-        assert!((pts[1].alt_m - 2440.0).abs() < 0.5, "mid anchor {}", pts[1].alt_m);
-        assert!((pts[2].alt_m - 500.0).abs() < 0.5, "end kept {}", pts[2].alt_m);
+        assert!(
+            (pts[0].alt_m - 500.0).abs() < 0.5,
+            "start kept {}",
+            pts[0].alt_m
+        );
+        assert!(
+            (pts[1].alt_m - 2440.0).abs() < 0.5,
+            "mid anchor {}",
+            pts[1].alt_m
+        );
+        assert!(
+            (pts[2].alt_m - 500.0).abs() < 0.5,
+            "end kept {}",
+            pts[2].alt_m
+        );
     }
 
     #[test]
@@ -4562,13 +4729,17 @@ mod tests {
         // 2026-08-14 新语义：起终点 = 用户高度（start 1000 / target 1500），
         // 不再被抬升巡航高度覆盖；中间巡航段 = 锚点插值（1000→1500）。
         let mut pts = vec![
-            vpp(115.0, 39.0, 2242.0),   // 巡航段（起点）
-            vpp(115.5, 39.5, 1500.0),   // 剖面段（底部穿行）
-            vpp(116.0, 40.0, 2242.0),   // 巡航段
-            vpp(116.5, 40.5, 2242.0),   // 终点（raw 巡航）
+            vpp(115.0, 39.0, 2242.0), // 巡航段（起点）
+            vpp(115.5, 39.5, 1500.0), // 剖面段（底部穿行）
+            vpp(116.0, 40.0, 2242.0), // 巡航段
+            vpp(116.5, 40.5, 2242.0), // 终点（raw 巡航）
         ];
         apply_vertical_profile(&mut pts, 1000.0, 1500.0, 2242.0, &[], None, 100.0);
-        assert!((pts[0].alt_m - 1000.0).abs() < 0.5, "start kept {}", pts[0].alt_m);
+        assert!(
+            (pts[0].alt_m - 1000.0).abs() < 0.5,
+            "start kept {}",
+            pts[0].alt_m
+        );
         assert!(
             (pts[1].alt_m - 1500.0).abs() < 0.5,
             "profile seg kept {}",
@@ -4602,7 +4773,11 @@ mod tests {
             None,
             100.0,
         );
-        assert!((pts[0].alt_m - 3000.0).abs() < 0.5, "start {}", pts[0].alt_m);
+        assert!(
+            (pts[0].alt_m - 3000.0).abs() < 0.5,
+            "start {}",
+            pts[0].alt_m
+        );
         // p1 位于 start→mid 段中点 → ≈ (3000+6000)/2 = 4500
         assert!((pts[1].alt_m - 4500.0).abs() < 200.0, "p1 {}", pts[1].alt_m);
         // p2 = mid 点 → 6000（锚点本身；插值期望 = 6000）
@@ -4641,7 +4816,11 @@ mod tests {
     fn relaxed_target_cell_finds_nearest_reachable() {
         // P8 ③：目标 cell 不可达（INF）但附近可达 → 返回 T 最小可达 cell
         let grid = 8;
-        let region = Region { min_lon: 0.0, min_lat: 0.0, span_deg: 1.0 };
+        let region = Region {
+            min_lon: 0.0,
+            min_lat: 0.0,
+            span_deg: 1.0,
+        };
         let mut times = vec![f32::INFINITY; grid * grid];
         times[3 * grid + 3] = 10.0;
         times[5 * grid + 5] = 20.0;
@@ -4661,7 +4840,11 @@ mod tests {
     fn relaxed_target_cell_none_when_all_unreachable() {
         // P8 ③：容差内全不可达 → None（几何无解 → no_solution）
         let grid = 8;
-        let region = Region { min_lon: 0.0, min_lat: 0.0, span_deg: 1.0 };
+        let region = Region {
+            min_lon: 0.0,
+            min_lat: 0.0,
+            span_deg: 1.0,
+        };
         let times = vec![f32::INFINITY; grid * grid];
         let res = crate::costfield::FmmResult {
             times,
@@ -4691,7 +4874,11 @@ mod tests {
         }"#;
         let out = solve(&parse(s), &SolveParams::default(), 0).unwrap();
         assert_eq!(out.vehicles[0].status, "planned", "应放宽到达而非无解");
-        let has_relax = out.stats.degradations.iter().any(|d| d.contains("radius relaxed"));
+        let has_relax = out
+            .stats
+            .degradations
+            .iter()
+            .any(|d| d.contains("radius relaxed"));
         assert!(has_relax, "应标注半径放宽: {:?}", out.stats.degradations);
         // 终点在禁飞区外（放宽 cell 在墙外）
         let last = out.vehicles[0].path.last().unwrap();
@@ -4708,7 +4895,10 @@ mod tests {
         let nf = Zone {
             id: "nf".into(),
             zone_type: crate::config::ZoneType::NoFly,
-            shape: ZoneShape::Circle { center: [116.0, 39.5], radius_km: 10.0 },
+            shape: ZoneShape::Circle {
+                center: [116.0, 39.5],
+                radius_km: 10.0,
+            },
             alt_min_m: None,
             alt_max_m: None,
             height_semantics: crate::config::HeightSemantics::Msl,
@@ -4716,7 +4906,10 @@ mod tests {
         let rz = Zone {
             id: "rz".into(),
             zone_type: crate::config::ZoneType::Restricted,
-            shape: ZoneShape::Circle { center: [116.0, 39.45], radius_km: 8.0 },
+            shape: ZoneShape::Circle {
+                center: [116.0, 39.45],
+                radius_km: 8.0,
+            },
             alt_min_m: Some(2000.0),
             alt_max_m: Some(6000.0),
             height_semantics: crate::config::HeightSemantics::Msl,
@@ -4748,7 +4941,8 @@ mod tests {
         );
         assert!(!nw, "不触发画墙（走廊闭合风险）");
         assert!(
-            degs.iter().any(|d| d.contains("fallback straight profile blocked")),
+            degs.iter()
+                .any(|d| d.contains("fallback straight profile blocked")),
             "应显式降级标注: {degs:?}"
         );
     }
@@ -4780,7 +4974,11 @@ mod tests {
                 "ridge".into()
             }
         }
-        let region = Region { min_lon: 0.0, min_lat: 0.0, span_deg: 1.0 };
+        let region = Region {
+            min_lon: 0.0,
+            min_lat: 0.0,
+            span_deg: 1.0,
+        };
         let grid = 8;
         let radars = [crate::config::Radar {
             id: "r1".into(),
@@ -4832,7 +5030,10 @@ mod tests {
             (east_los - 1.0).abs() < 1e-6,
             "遮挡 cell 应无惩罚: {east_los}"
         );
-        assert!(east_nolos > 1.0, "无 LOS 场遮挡 cell 应有惩罚: {east_nolos}");
+        assert!(
+            east_nolos > 1.0,
+            "无 LOS 场遮挡 cell 应有惩罚: {east_nolos}"
+        );
         // 雷达西侧 cell (lat 0.4375, lon 0.0625)：视线无遮挡 → 两场一致有惩罚
         let west_idx = 3 * grid + 0;
         let west_los = field_los.cost[west_idx];
@@ -4955,7 +5156,11 @@ mod tests {
         let v = &out.vehicles[0];
         assert_eq!(v.status, "planned");
         assert!(v.path.len() >= 2, "path 应 ≥2 点，实际 {}", v.path.len());
-        assert!(v.distance_m > 100_000.0, "北京 115E,39N → 116.5E,39.9N ≈ 150km，实际 {}", v.distance_m);
+        assert!(
+            v.distance_m > 100_000.0,
+            "北京 115E,39N → 116.5E,39.9N ≈ 150km，实际 {}",
+            v.distance_m
+        );
         // 起终点在路径内（容差 0.02°≈2km——网格 256 格 1.5°≈210m/格）
         let (x0, y0) = (v.path.first().unwrap().x, v.path.first().unwrap().y);
         let (x1, y1) = (v.path.last().unwrap().x, v.path.last().unwrap().y);
@@ -5107,7 +5312,16 @@ mod tests {
         );
         // 升限 5000m → 顶部 5500 超升限且底部被地形挡 → 两者不可行 → None（画墙绕行）
         assert_eq!(
-            restricted_pass_alt(&z, 3000.0, Some(5000.0), Some(&terr), &start, &target, 15.0, None),
+            restricted_pass_alt(
+                &z,
+                3000.0,
+                Some(5000.0),
+                Some(&terr),
+                &start,
+                &target,
+                15.0,
+                None
+            ),
             None
         );
         // 巡航 1500m（区间外底部通道）→ 不拦截（restricted_blocks_alt false）
@@ -5189,27 +5403,42 @@ mod tests {
             0.0, // 无硬墙 → 外扩不生效
             &mut Vec::new(),
         );
-        assert_eq!(segs.len(), 5, "应切 [首段, desc→in, in→out, out→climb, 尾段]");
+        assert_eq!(
+            segs.len(),
+            5,
+            "应切 [首段, desc→in, in→out, out→climb, 尾段]"
+        );
         assert_eq!(mask, vec![false, true, false, true, false]);
         // 平飞段 = segs[2]（in→out）：穿行高度 = alt_max + 500 = 5500
         let prof = &segs[2].points;
         assert!(
             prof.iter().any(|p| (p.alt_m - 5500.0).abs() < 1.0),
             "顶部平飞高度应为 5500m，实际 {:?}",
-            prof.iter().map(|p| p.alt_m.round() as i64).collect::<Vec<_>>()
+            prof.iter()
+                .map(|p| p.alt_m.round() as i64)
+                .collect::<Vec<_>>()
         );
         assert!(
             prof.iter().all(|p| (p.alt_m - 5500.0).abs() < 1.0),
             "平飞段应全程 5500m，实际 {:?}",
-            prof.iter().map(|p| p.alt_m.round() as i64).collect::<Vec<_>>()
+            prof.iter()
+                .map(|p| p.alt_m.round() as i64)
+                .collect::<Vec<_>>()
         );
         // 过渡段（segs[1] desc→in / segs[3] out→climb）：2 点直线，端点高度 3000/5500
         assert_eq!(segs[1].points.len(), 2, "desc→in 过渡应为 2 点直线");
         assert_eq!(segs[3].points.len(), 2, "out→climb 过渡应为 2 点直线");
         assert!(
-            segs[1].points.iter().all(|p| p.alt_m == 3000.0 || (p.alt_m - 5500.0).abs() < 1.0),
+            segs[1]
+                .points
+                .iter()
+                .all(|p| p.alt_m == 3000.0 || (p.alt_m - 5500.0).abs() < 1.0),
             "desc→in 端点高度应为 3000/5500，实际 {:?}",
-            segs[1].points.iter().map(|p| p.alt_m.round() as i64).collect::<Vec<_>>()
+            segs[1]
+                .points
+                .iter()
+                .map(|p| p.alt_m.round() as i64)
+                .collect::<Vec<_>>()
         );
     }
 
@@ -5279,14 +5508,24 @@ mod tests {
     #[test]
     fn line_polygon_inside_bands_triangle_and_concave() {
         // 三角形（主管 rz_poly 场景）：直线斜穿 → 单个带；带端点应在三角形边上
-        let tri = [[116.90767296501929, 40.99465146600213], [115.36066171773774, 40.05644513239613], [116.34715136271842, 40.336691478802884]];
+        let tri = [
+            [116.90767296501929, 40.99465146600213],
+            [115.36066171773774, 40.05644513239613],
+            [116.34715136271842, 40.336691478802884],
+        ];
         let bands = line_polygon_inside_bands(117.5633, 38.9892, 115.0644, 41.1679, &tri);
         assert_eq!(bands.len(), 1, "三角形穿行应单带，实际 {:?}", bands);
         let (u1, u2) = bands[0];
         assert!(u1 > 0.0 && u1 < 1.0 && u2 > u1 && u2 < 1.0);
         // 带端点（穿行出入口）应落在三角形边上：入口在 BC 边、出口在 AB 边
-        let (lon_in, lat_in) = (117.5633 + (115.0644 - 117.5633) * u1, 38.9892 + (41.1679 - 38.9892) * u1);
-        let (lon_out, lat_out) = (117.5633 + (115.0644 - 117.5633) * u2, 38.9892 + (41.1679 - 38.9892) * u2);
+        let (lon_in, lat_in) = (
+            117.5633 + (115.0644 - 117.5633) * u1,
+            38.9892 + (41.1679 - 38.9892) * u1,
+        );
+        let (lon_out, lat_out) = (
+            117.5633 + (115.0644 - 117.5633) * u2,
+            38.9892 + (41.1679 - 38.9892) * u2,
+        );
         // BC 边：B(115.3607,40.0564)→C(116.3472,40.3367)；AB 边：A(116.9077,40.9947)→B(115.3607,40.0564)
         let on_edge = |lon: f64, lat: f64, a: [f64; 2], b: [f64; 2]| {
             let d = pt_seg_dist_km(a[0], a[1], b[0], b[1], lon, lat);
@@ -5306,17 +5545,38 @@ mod tests {
         );
         // 不穿（直线在多边形外）→ 空
         let no_bands = line_polygon_inside_bands(117.5633, 38.9892, 118.5, 39.0, &tri);
-        assert!(no_bands.is_empty(), "直线不穿三角形应无带，实际 {:?}", no_bands);
+        assert!(
+            no_bands.is_empty(),
+            "直线不穿三角形应无带，实际 {:?}",
+            no_bands
+        );
         // 凹四边形（U 形：底部条带 + 左右柱，中间凹口外部）：水平线 y=5 从 -1→11
         // 穿左柱 [0,4] → 凹口外 → 右柱 [6,10] → 两个带
-        let concave = [[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [6.0, 10.0], [6.0, 4.0], [4.0, 4.0], [4.0, 10.0], [0.0, 10.0]];
+        let concave = [
+            [0.0, 0.0],
+            [10.0, 0.0],
+            [10.0, 10.0],
+            [6.0, 10.0],
+            [6.0, 4.0],
+            [4.0, 4.0],
+            [4.0, 10.0],
+            [0.0, 10.0],
+        ];
         let cb = line_polygon_inside_bands(-1.0, 5.0, 11.0, 5.0, &concave);
         assert_eq!(cb.len(), 2, "凹多边形水平线两次进入应双带，实际 {:?}", cb);
         let (a1, a2) = cb[0];
         let (b1, b2) = cb[1];
         assert!(a1 < a2 && a2 < b1 && b1 < b2, "带序异常 {:?}", cb);
-        assert!((a1 - 1.0 / 12.0).abs() < 1e-3 && (a2 - 5.0 / 12.0).abs() < 1e-3, "左柱带异常 {:?}", cb[0]);
-        assert!((b1 - 7.0 / 12.0).abs() < 1e-3 && (b2 - 11.0 / 12.0).abs() < 1e-3, "右柱带异常 {:?}", cb[1]);
+        assert!(
+            (a1 - 1.0 / 12.0).abs() < 1e-3 && (a2 - 5.0 / 12.0).abs() < 1e-3,
+            "左柱带异常 {:?}",
+            cb[0]
+        );
+        assert!(
+            (b1 - 7.0 / 12.0).abs() < 1e-3 && (b2 - 11.0 / 12.0).abs() < 1e-3,
+            "右柱带异常 {:?}",
+            cb[1]
+        );
     }
 
     #[test]
@@ -5324,7 +5584,10 @@ mod tests {
         let tri = [[0.0, 0.0], [10.0, 0.0], [10.0, 10.0]];
         // 外部点 (11,5)：到直边 x=10 距离 1°（lat≈0 → 1° 经度 ≈ 111.32km）
         let d = pt_polygon_boundary_km(11.0, 5.0, &tri);
-        assert!((d - 111.32).abs() < 0.5, "外部点距直边应 ≈111.32km，实际 {d}");
+        assert!(
+            (d - 111.32).abs() < 0.5,
+            "外部点距直边应 ≈111.32km，实际 {d}"
+        );
         // 内部点 → 0
         let d2 = pt_polygon_boundary_km(5.0, 5.0, &tri);
         assert_eq!(d2, 0.0);
@@ -5344,7 +5607,10 @@ mod tests {
         let bands = segment_polygon_bands_t(117.5625, 38.9921, 115.812, 41.505, &tri);
         assert!(!bands.is_empty(), "穿北端弦应有带，实际 {:?}", bands);
         let (t1, t2) = bands[0];
-        assert!(t1 > 0.9 && t2 > t1, "穿带应在弦末段，实际 ({t1:.4},{t2:.4})");
+        assert!(
+            t1 > 0.9 && t2 > t1,
+            "穿带应在弦末段，实际 ({t1:.4},{t2:.4})"
+        );
         // 北端外水平弦（lat 41.7 > 顶点 41.613）→ 无带
         let outer = segment_polygon_bands_t(116.5, 41.7, 114.0, 41.7, &tri);
         assert!(outer.is_empty(), "多边形上方水平弦应无带，实际 {:?}", outer);
@@ -5380,7 +5646,12 @@ mod tests {
         let s = Geo::new(117.5633, 38.9892).unwrap();
         let t = Geo::new(115.0644, 41.1679).unwrap();
         let pass = restricted_pass_alt(&z, 2282.0, None, None, &s, &t, 15.0, None);
-        assert_eq!(pass, Some(1500.0), "底部穿行应恒优（无地形），实际 {:?}", pass);
+        assert_eq!(
+            pass,
+            Some(1500.0),
+            "底部穿行应恒优（无地形），实际 {:?}",
+            pass
+        );
         // alt_min=0 → 底部 = -500 负高不可行 → 顶部 6500m
         let z0 = Zone {
             id: "rzp0".into(),
@@ -5391,10 +5662,19 @@ mod tests {
             height_semantics: crate::config::HeightSemantics::Msl,
         };
         let pass0 = restricted_pass_alt(&z0, 2282.0, None, None, &s, &t, 15.0, None);
-        assert_eq!(pass0, Some(6500.0), "alt_min=0 底部负高 → 顶部绕飞，实际 {:?}", pass0);
+        assert_eq!(
+            pass0,
+            Some(6500.0),
+            "alt_min=0 底部负高 → 顶部绕飞，实际 {:?}",
+            pass0
+        );
         // 升限低于顶部 → 顶部也不可行 → None（水平绕行兜底）
         let pass_c = restricted_pass_alt(&z0, 2282.0, Some(5000.0), None, &s, &t, 15.0, None);
-        assert_eq!(pass_c, None, "升限 5000 < 顶部 6500 → 不可行，实际 {:?}", pass_c);
+        assert_eq!(
+            pass_c, None,
+            "升限 5000 < 顶部 6500 → 不可行，实际 {:?}",
+            pass_c
+        );
     }
 
     #[test]
@@ -5486,12 +5766,7 @@ mod tests {
             id: "trap".into(),
             zone_type: ZoneType::NoFly,
             shape: ZoneShape::Polygon {
-                vertices: vec![
-                    [116.2, 39.9],
-                    [116.5, 39.9],
-                    [116.5, 40.2],
-                    [116.35, 40.2],
-                ],
+                vertices: vec![[116.2, 39.9], [116.5, 39.9], [116.5, 40.2], [116.35, 40.2]],
             },
             alt_min_m: Some(0.0),
             alt_max_m: Some(12000.0),
@@ -5562,7 +5837,8 @@ mod tests {
     }
 
     #[test]
-    fn m1_detours_around_zone() {        // 挡路禁飞区（圆心在中点）→ 路径绕行（折线长度 > 直线）
+    fn m1_detours_around_zone() {
+        // 挡路禁飞区（圆心在中点）→ 路径绕行（折线长度 > 直线）
         let s = r#"{
             "schema_version":"0.20",
             "mission":{
@@ -5645,15 +5921,22 @@ mod tests {
         let d = out.vehicles[0].distance_m;
         assert!(d > 170_000.0, "40km 雷达应绕行躲避，距离 {}", d);
         // 绕行平滑（Theta* 转角受限 + Catmull-Rom）：不得交付网格锯齿（>50 点）
-        assert!(out.vehicles[0].path.len() <= 50, "绕行应平滑，点数 {}", out.vehicles[0].path.len());
+        assert!(
+            out.vehicles[0].path.len() <= 50,
+            "绕行应平滑，点数 {}",
+            out.vehicles[0].path.len()
+        );
         // 绕行成功 → 累计探测概率低于阈值（不超 P_cross=0.1）
         let over = out.vehicles[0]
             .warnings
             .iter()
             .chain(out.stats.degradations.iter())
             .any(|s| s.contains("radar: cumulative detection p") && s.contains("> threshold"));
-        assert!(!over, "绕行后探测概率应 <0.1: warnings={:?} degradations={:?}",
-            out.vehicles[0].warnings, out.stats.degradations);
+        assert!(
+            !over,
+            "绕行后探测概率应 <0.1: warnings={:?} degradations={:?}",
+            out.vehicles[0].warnings, out.stats.degradations
+        );
     }
 
     #[test]
@@ -5669,7 +5952,10 @@ mod tests {
             }
         }"#;
         let input = parse(s);
-        let params = SolveParams { time_budget_ms: 1, ..SolveParams::default() };
+        let params = SolveParams {
+            time_budget_ms: 1,
+            ..SolveParams::default()
+        };
         match solve(&input, &params, 0) {
             Err(AppError::DegradedTimeout(_)) => {}
             other => panic!("expected DegradedTimeout, got {other:?}"),
@@ -5705,7 +5991,10 @@ mod tests {
             out.vehicles[0].path.len()
         );
         assert!(
-            !out.vehicles[0].warnings.iter().any(|w| w.contains("smoothing_failed")),
+            !out.vehicles[0]
+                .warnings
+                .iter()
+                .any(|w| w.contains("smoothing_failed")),
             "不应 smoothing_failed: {:?}",
             out.vehicles[0].warnings
         );
@@ -5735,8 +6024,11 @@ mod tests {
             .any(|s| s.contains("radar"));
         // 若接近直线（直穿）则必须报告；微绕（>+1.5km）可免
         if d < 165_500.0 {
-            assert!(radar_reported, "直穿应报告雷达概率: warnings={:?} degradations={:?}",
-                out.vehicles[0].warnings, out.stats.degradations);
+            assert!(
+                radar_reported,
+                "直穿应报告雷达概率: warnings={:?} degradations={:?}",
+                out.vehicles[0].warnings, out.stats.degradations
+            );
         }
     }
 
@@ -5759,14 +6051,27 @@ mod tests {
         let out = solve(&parse(s), &SolveParams::default(), 0).unwrap();
         assert_eq!(out.vehicles[0].status, "planned");
         // 经过必经点（格距内 < 0.05°≈5km）
-        let near_mid = out.vehicles[0].path.iter().any(|p| {
-            (p.x - 115.3).abs() < 0.05 && (p.y - 39.8).abs() < 0.05
-        });
-        assert!(near_mid, "应经过必经点 (115.3,39.8): {:?}",
-            out.vehicles[0].path.iter().map(|p| format!("({:.2},{:.2})", p.x, p.y)).take(6).collect::<Vec<_>>());
+        let near_mid = out.vehicles[0]
+            .path
+            .iter()
+            .any(|p| (p.x - 115.3).abs() < 0.05 && (p.y - 39.8).abs() < 0.05);
+        assert!(
+            near_mid,
+            "应经过必经点 (115.3,39.8): {:?}",
+            out.vehicles[0]
+                .path
+                .iter()
+                .map(|p| format!("({:.2},{:.2})", p.x, p.y))
+                .take(6)
+                .collect::<Vec<_>>()
+        );
         // 北侧绕行 → 距离显著大于直线 164km（2026-08-07 Theta* 改大圆口径后
         // 拉直更彻底，4 点 196km；阈值 180km 保留"显著大于直线"语义）
-        assert!(out.vehicles[0].distance_m > 180_000.0, "dist {}", out.vehicles[0].distance_m);
+        assert!(
+            out.vehicles[0].distance_m > 180_000.0,
+            "dist {}",
+            out.vehicles[0].distance_m
+        );
     }
 
     #[test]
@@ -5794,8 +6099,14 @@ mod tests {
             assert_eq!(v.status, "planned");
         }
         // uav1 经 (115.3,39.8)；uav2 经 (116.1,39.2)（各自必经点独立）
-        let u1_near = out.vehicles[0].path.iter().any(|p| (p.x - 115.3).abs() < 0.05 && (p.y - 39.8).abs() < 0.05);
-        let u2_near = out.vehicles[1].path.iter().any(|p| (p.x - 116.1).abs() < 0.05 && (p.y - 39.2).abs() < 0.05);
+        let u1_near = out.vehicles[0]
+            .path
+            .iter()
+            .any(|p| (p.x - 115.3).abs() < 0.05 && (p.y - 39.8).abs() < 0.05);
+        let u2_near = out.vehicles[1]
+            .path
+            .iter()
+            .any(|p| (p.x - 116.1).abs() < 0.05 && (p.y - 39.2).abs() < 0.05);
         assert!(u1_near, "uav1 应经过 (115.3,39.8)");
         assert!(u2_near, "uav2 应经过 (116.1,39.2)");
         // 旋翼机无 smoothing 告警（垂直剖面后可能触发 P6-C 交叉告警——真实行为）
@@ -5832,9 +6143,16 @@ mod tests {
         assert_eq!(out.vehicles[0].status, "planned");
         let p = &out.vehicles[0].path;
         // 两个必经点都经过（格距内）
-        let m1 = p.iter().position(|q| (q.x - 115.3).abs() < 0.05 && (q.y - 39.8).abs() < 0.05);
-        let m2 = p.iter().position(|q| (q.x - 116.0).abs() < 0.05 && (q.y - 39.7).abs() < 0.05);
-        assert!(m1.is_some() && m2.is_some(), "必经点应都经过: m1={m1:?} m2={m2:?}");
+        let m1 = p
+            .iter()
+            .position(|q| (q.x - 115.3).abs() < 0.05 && (q.y - 39.8).abs() < 0.05);
+        let m2 = p
+            .iter()
+            .position(|q| (q.x - 116.0).abs() < 0.05 && (q.y - 39.7).abs() < 0.05);
+        assert!(
+            m1.is_some() && m2.is_some(),
+            "必经点应都经过: m1={m1:?} m2={m2:?}"
+        );
         // 顺序：m1 在 m2 前
         assert!(m1.unwrap() < m2.unwrap(), "顺序应 m1 < m2");
     }
@@ -6233,7 +6551,9 @@ mod tests {
             v2.path.len()
         );
         assert!(
-            v2.warnings.iter().any(|w| w.contains("cruise altitude raised")),
+            v2.warnings
+                .iter()
+                .any(|w| w.contains("cruise altitude raised")),
             "v2 应提示巡航高度抬升，实际 {:?}",
             v2.warnings
         );
@@ -6315,7 +6635,9 @@ mod tests {
         );
         // 抬升提示存在（低空任务被地形抬升）
         assert!(
-            v.warnings.iter().any(|w| w.contains("cruise altitude raised")),
+            v.warnings
+                .iter()
+                .any(|w| w.contains("cruise altitude raised")),
             "应提示巡航高度抬升，实际 {:?}",
             v.warnings
         );
@@ -6522,13 +6844,8 @@ mod tests {
         // 点数 ≤ 20（峰顶捕获 + 起终点 15° 爬升段，避免 62 点密集）
         assert!(v.path.len() <= 20, "应简化交付，实际 {} 点", v.path.len());
         // 起点段坡度 ≤ 15.5°（固定翼爬升率，容忍 0.5° 舍入）
-        let d0 = crate::path::haversine_m(
-            v.path[0].x,
-            v.path[0].y,
-            v.path[1].x,
-            v.path[1].y,
-        )
-        .max(1.0);
+        let d0 =
+            crate::path::haversine_m(v.path[0].x, v.path[0].y, v.path[1].x, v.path[1].y).max(1.0);
         let climb_deg = ((v.path[1].alt_m - v.path[0].alt_m) / d0)
             .atan()
             .to_degrees();
@@ -6562,8 +6879,7 @@ mod tests {
                     || (i == n && b.x == last.x && b.y == last.y);
                 let d_along = cum + seg_len_m * tt;
                 // 起终点各 1km 内 = 起飞/降落段（净空 < 100 允许，主管 2026-08-14 三反）
-                let is_takeoff_landing =
-                    d_along < 1000.0 || (total_len - d_along) < 1000.0;
+                let is_takeoff_landing = d_along < 1000.0 || (total_len - d_along) < 1000.0;
                 if is_endpoint || is_takeoff_landing {
                     continue;
                 }
@@ -6587,7 +6903,10 @@ mod tests {
         );
         // 主管指定穿山位置诊断：打印该处地形 + 路径插值高度 + 净空
         let t = crate::terrain::open_source(&cand).unwrap();
-        for (plon, plat) in [(110.1095464514442, 34.54625076296954), (110.17114075373888, 34.55149067388675)] {
+        for (plon, plat) in [
+            (110.1095464514442, 34.54625076296954),
+            (110.17114075373888, 34.55149067388675),
+        ] {
             let terr = match t.sample_at(plon, plat) {
                 crate::terrain::Sample::Land(h) => h,
                 _ => f64::NAN,
@@ -6684,7 +7003,9 @@ mod tests {
         let v2 = &out.vehicles[1];
         let (mlon, mlat) = (116.44919168873186_f64, 39.56474547305474_f64);
         assert!(
-            v2.path.iter().any(|p| (p.x - mlon).abs() < 0.05 && (p.y - mlat).abs() < 0.05),
+            v2.path
+                .iter()
+                .any(|p| (p.x - mlon).abs() < 0.05 && (p.y - mlat).abs() < 0.05),
             "v2 路径应经过必经点邻域，实际 {:?}",
             v2.path
         );
@@ -6754,7 +7075,9 @@ mod tests {
         ];
         for (mi, (mlon, mlat)) in mids.iter().enumerate() {
             assert!(
-                v.path.iter().any(|p| (p.x - mlon).abs() < 0.05 && (p.y - mlat).abs() < 0.05),
+                v.path
+                    .iter()
+                    .any(|p| (p.x - mlon).abs() < 0.05 && (p.y - mlat).abs() < 0.05),
                 "wp{} 必经点应经过邻域，实际 {:?}",
                 mi + 1,
                 v.path
@@ -6841,7 +7164,9 @@ mod tests {
         ];
         for (mi, (mlon, mlat)) in mids.iter().enumerate() {
             assert!(
-                v.path.iter().any(|p| (p.x - mlon).abs() < 0.05 && (p.y - mlat).abs() < 0.05),
+                v.path
+                    .iter()
+                    .any(|p| (p.x - mlon).abs() < 0.05 && (p.y - mlat).abs() < 0.05),
                 "wp{} 必经点应经过邻域，实际 {:?}",
                 mi + 1,
                 v.path
@@ -7320,7 +7645,10 @@ mod tests {
             (116.04302827980699, 40.30245861424856),
             (116.87502139486968, 40.43880896740148),
         ] {
-            let near = v.path.iter().any(|p| crate::path::haversine_m(p.x, p.y, lo, la) <= 5_500.0);
+            let near = v
+                .path
+                .iter()
+                .any(|p| crate::path::haversine_m(p.x, p.y, lo, la) <= 5_500.0);
             assert!(near, "必经点 ({lo},{la}) 应经过邻域，实际 {:?}", v.path);
         }
     }
@@ -7390,7 +7718,10 @@ mod tests {
             (116.30222159303027, 40.52501663038863),
             (116.5195046089279, 40.00372676035467),
         ] {
-            let near = v.path.iter().any(|p| crate::path::haversine_m(p.x, p.y, lo, la) <= 5_500.0);
+            let near = v
+                .path
+                .iter()
+                .any(|p| crate::path::haversine_m(p.x, p.y, lo, la) <= 5_500.0);
             assert!(near, "必经点 ({lo},{la}) 应经过邻域，实际 {:?}", v.path);
         }
     }
@@ -7405,7 +7736,10 @@ mod tests {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
         let cand = root.join("data/east_asia_7p5as.arpack");
         if !cand.exists() {
-            eprintln!("skip oob_input_point: real terrain missing ({})", cand.display());
+            eprintln!(
+                "skip oob_input_point: real terrain missing ({})",
+                cand.display()
+            );
             return;
         }
         let s = r#"{
@@ -7429,7 +7763,9 @@ mod tests {
         if v.status == "planned" {
             assert!(!v.path.is_empty(), "planned 路径不应为空");
             assert!(
-                v.warnings.iter().any(|w| w.contains("out of terrain bounds")),
+                v.warnings
+                    .iter()
+                    .any(|w| w.contains("out of terrain bounds")),
                 "应带 OOB 降级警告，实际 {:?}",
                 v.warnings
             );
@@ -7469,7 +7805,11 @@ mod tests {
         let input = parse(s);
         let out = solve(&input, &SolveParams::default(), 0).unwrap();
         let v = &out.vehicles[0];
-        assert_eq!(v.status, "no_solution", "平滑全失败应 no_solution，实际 {:?}", v.status);
+        assert_eq!(
+            v.status, "no_solution",
+            "平滑全失败应 no_solution，实际 {:?}",
+            v.status
+        );
         assert!(v.path.is_empty(), "no_solution 不应携带 raw 路径");
         assert!(
             v.warnings
@@ -7514,7 +7854,8 @@ mod tests {
         let v = &out.vehicles[0];
         assert_eq!(v.status, "no_solution");
         assert!(
-            out.stats.degradations
+            out.stats
+                .degradations
                 .iter()
                 .any(|d| d == "classified: fitting_defect"),
             "degradations 应有 classified 汇总，实际 {:?}",
@@ -7547,7 +7888,8 @@ mod tests {
         let out = solve(&input, &SolveParams::default(), 0).unwrap();
         assert_eq!(out.vehicles[0].status, "no_solution");
         assert!(
-            out.stats.degradations
+            out.stats
+                .degradations
                 .iter()
                 .any(|d| d == "classified: geometrically_impossible"),
             "degradations 应有 geometrically_impossible 分类，实际 {:?}",
@@ -7560,15 +7902,21 @@ mod tests {
         // P3 归因映射（docs/12 §3.4 C3 决策树）：patch 归因标注 → 分类类别。
         assert_eq!(category_from_degradations(&[]), "fitting_defect");
         assert_eq!(
-            category_from_degradations(&["patch: geometrically_impossible (docs/12 §13.1 C3)".into()]),
+            category_from_degradations(&[
+                "patch: geometrically_impossible (docs/12 §13.1 C3)".into()
+            ]),
             "geometrically_impossible"
         );
         assert_eq!(
-            category_from_degradations(&["patch: search_truncated (visible-graph cap, docs/12 §13.1 C2)".into()]),
+            category_from_degradations(&[
+                "patch: search_truncated (visible-graph cap, docs/12 §13.1 C2)".into()
+            ]),
             "search_truncated"
         );
         assert_eq!(
-            category_from_degradations(&["patch: fitting_defect (turn margin, docs/12 §13.1 C3)".into()]),
+            category_from_degradations(&[
+                "patch: fitting_defect (turn margin, docs/12 §13.1 C3)".into()
+            ]),
             "fitting_defect"
         );
     }
@@ -7614,7 +7962,11 @@ mod tests {
         let input = parse(&s);
         let out = solve(&input, &SolveParams::default(), 0).unwrap();
         let v = &out.vehicles[0];
-        assert_eq!(v.status, "planned", "窄带多边形不应误报 no_solution，实际 {:?}", v.status);
+        assert_eq!(
+            v.status, "planned",
+            "窄带多边形不应误报 no_solution，实际 {:?}",
+            v.status
+        );
         assert!(
             v.path.len() <= 30,
             "应平滑交付（修复前 423 点网格楼梯 + no_solution），实际 {} 点",
@@ -7629,11 +7981,16 @@ mod tests {
         // 三角形近邻（用 zone_segment_clearance_km 复验，与 verify 同口径）。
         let zone = &input.mission.no_fly_zones[0];
         for w in v.path.windows(2) {
-            let clr = crate::config::zone_segment_clearance_km(w[0].x, w[0].y, w[1].x, w[1].y, zone);
+            let clr =
+                crate::config::zone_segment_clearance_km(w[0].x, w[0].y, w[1].x, w[1].y, zone);
             assert!(
                 clr >= 2.0 - 1e-6,
                 "路径段应离禁飞区 ≥2km，实际 {:.3}km ({},{})->({},{})",
-                clr, w[0].x, w[0].y, w[1].x, w[1].y
+                clr,
+                w[0].x,
+                w[0].y,
+                w[1].x,
+                w[1].y
             );
         }
     }
@@ -7700,16 +8057,22 @@ mod tests {
         assert!(
             y_min < 39.65 - 0.005 || y_max > 41.6 + 0.005,
             "路径应绕出墙 bbox（南绕 y<39.65 或北绕 y>41.6），实际 y∈[{:.3},{:.3}]",
-            y_min, y_max
+            y_min,
+            y_max
         );
         // 硬约束复验：路径段不得穿入禁飞区（与 verify 同口径 clearance ≥ 2km）。
         let zone = &input.mission.no_fly_zones[0];
         for w in v.path.windows(2) {
-            let clr = crate::config::zone_segment_clearance_km(w[0].x, w[0].y, w[1].x, w[1].y, zone);
+            let clr =
+                crate::config::zone_segment_clearance_km(w[0].x, w[0].y, w[1].x, w[1].y, zone);
             assert!(
                 clr >= 2.0 - 1e-6,
                 "路径段应离禁飞区 ≥2km，实际 {:.3}km ({},{})->({},{})",
-                clr, w[0].x, w[0].y, w[1].x, w[1].y
+                clr,
+                w[0].x,
+                w[0].y,
+                w[1].x,
+                w[1].y
             );
         }
     }
@@ -7936,7 +8299,10 @@ mod tests {
         let n = v.path.len();
         assert!(n >= 2, "路径至少 2 点");
         let h_last = crate::path::bearing_deg(
-            v.path[n - 2].x, v.path[n - 2].y, v.path[n - 1].x, v.path[n - 1].y,
+            v.path[n - 2].x,
+            v.path[n - 2].y,
+            v.path[n - 1].x,
+            v.path[n - 1].y,
         );
         assert!(
             heading_in_window(h_last, 20.0, 50.0),

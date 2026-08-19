@@ -10,7 +10,9 @@ use std::time::Instant;
 use aircraft_router_planner_cli::terrain::mask::{GeoMask, MaskClass};
 
 fn main() {
-    let path = std::env::args().nth(1).unwrap_or_else(|| "data/mask_10as.mask".into());
+    let path = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "data/mask_10as.mask".into());
     let t0 = Instant::now();
     let m = match GeoMask::open(std::path::Path::new(&path)) {
         Ok(m) => m,

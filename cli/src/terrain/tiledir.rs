@@ -26,8 +26,7 @@ pub struct TileMeta {
 }
 
 /// 片打开工厂（DTED/SRTM 各自实现）。
-pub type TileOpener =
-    Box<dyn Fn(&Path) -> Result<Box<dyn TerrainSource>, AppError> + Send + Sync>;
+pub type TileOpener = Box<dyn Fn(&Path) -> Result<Box<dyn TerrainSource>, AppError> + Send + Sync>;
 
 /// 片级目录源。
 pub struct TileDirSource {
@@ -81,7 +80,9 @@ impl TileDirSource {
 
     /// 定位含 (lon, lat) 的片（O(1) floor 键；无片 → None）。
     pub fn locate(&self, lon: f64, lat: f64) -> Option<usize> {
-        self.lookup.get(&(lon.floor() as i32, lat.floor() as i32)).copied()
+        self.lookup
+            .get(&(lon.floor() as i32, lat.floor() as i32))
+            .copied()
     }
 
     /// 取片源（Arc；缓存命中 clone Arc；未命中锁外 open + 双检插入）。
@@ -161,7 +162,12 @@ impl TileDirSource {
             max_lon = max_lon.max(t.min_lon + 1.0);
             max_lat = max_lat.max(t.min_lat + 1.0);
         }
-        GeoBounds { min_lon, min_lat, max_lon, max_lat }
+        GeoBounds {
+            min_lon,
+            min_lat,
+            max_lon,
+            max_lat,
+        }
     }
 }
 
@@ -191,7 +197,10 @@ mod tests {
     }
     impl TerrainSource for FakeTile {
         fn height_at(&self, lon: f64, lat: f64) -> Option<f64> {
-            if lon >= self.lon0 && lon <= self.lon0 + 1.0 && lat >= self.lat0 && lat <= self.lat0 + 1.0
+            if lon >= self.lon0
+                && lon <= self.lon0 + 1.0
+                && lat >= self.lat0
+                && lat <= self.lat0 + 1.0
             {
                 Some(self.val)
             } else {
@@ -213,8 +222,20 @@ mod tests {
 
     fn build_dir() -> TileDirSource {
         let tiles = vec![
-            TileMeta { path: PathBuf::from("t0"), min_lon: 116.0, min_lat: 39.0, cell_lon_deg: 1.0 / 1200.0, cell_lat_deg: 1.0 / 1200.0 },
-            TileMeta { path: PathBuf::from("t1"), min_lon: 117.0, min_lat: 39.0, cell_lon_deg: 1.0 / 1200.0, cell_lat_deg: 1.0 / 1200.0 },
+            TileMeta {
+                path: PathBuf::from("t0"),
+                min_lon: 116.0,
+                min_lat: 39.0,
+                cell_lon_deg: 1.0 / 1200.0,
+                cell_lat_deg: 1.0 / 1200.0,
+            },
+            TileMeta {
+                path: PathBuf::from("t1"),
+                min_lon: 117.0,
+                min_lat: 39.0,
+                cell_lon_deg: 1.0 / 1200.0,
+                cell_lat_deg: 1.0 / 1200.0,
+            },
         ];
         let opener: TileOpener = Box::new(|p| {
             let (lon0, lat0, val) = match p.to_str().unwrap() {

@@ -28,7 +28,9 @@ const DET_EPS: f64 = 1e-12;
 
 /// C6：patch 功能默认关；环境变量 `ARP_PATCH=1` 开启（验收 flag-on 全量）。
 pub fn patch_enabled() -> bool {
-    std::env::var("ARP_PATCH").map(|v| v == "1").unwrap_or(false)
+    std::env::var("ARP_PATCH")
+        .map(|v| v == "1")
+        .unwrap_or(false)
 }
 
 /// P4 可应用性判定（触发前的排除项检查）。
@@ -287,12 +289,18 @@ pub fn plan_patch(
 ) -> PatchOutcome {
     // 零障碍 / 退化障碍：直接直线（P1 无地形无限飞区，直线必然合法）。
     if obstacle_poly.is_empty() {
-        return PatchOutcome::Path(vec![start, target], crate::path::haversine_m(start[0], start[1], target[0], target[1]) / 1000.0);
+        return PatchOutcome::Path(
+            vec![start, target],
+            crate::path::haversine_m(start[0], start[1], target[0], target[1]) / 1000.0,
+        );
     }
     let hull = convex_hull(obstacle_poly);
     if hull.len() < 3 {
         // <3 顶点凸化（共线/单点）→ 不构成障碍 → 直线。
-        return PatchOutcome::Path(vec![start, target], crate::path::haversine_m(start[0], start[1], target[0], target[1]) / 1000.0);
+        return PatchOutcome::Path(
+            vec![start, target],
+            crate::path::haversine_m(start[0], start[1], target[0], target[1]) / 1000.0,
+        );
     }
     let inflated = inflate_convex(&hull, inflation_m / 111_320.0);
     if inflated.len() < 3 {
@@ -316,7 +324,9 @@ pub fn plan_patch(
     };
 
     // 起点/终点被膨胀后障碍吞入 → 无机动空间，几何无解（P1 明确归因）。
-    if point_in_convex(start, &inflated, GEOM_EPS_DEG) || point_in_convex(target, &inflated, GEOM_EPS_DEG) {
+    if point_in_convex(start, &inflated, GEOM_EPS_DEG)
+        || point_in_convex(target, &inflated, GEOM_EPS_DEG)
+    {
         return PatchOutcome::GeometricImpossible;
     }
 
@@ -349,7 +359,10 @@ pub fn plan_patch(
         }
         for &(nid, w) in &adj[id] {
             let nc = cost + w;
-            if nc < dist[nid] || (nc.to_bits() == dist[nid].to_bits() && nid < prev.iter().position(|&p| p == id).unwrap_or(usize::MAX)) {
+            if nc < dist[nid]
+                || (nc.to_bits() == dist[nid].to_bits()
+                    && nid < prev.iter().position(|&p| p == id).unwrap_or(usize::MAX))
+            {
                 // 相等时按整数 id 序保确定性（prev 相同则跳过）
             }
             if nc < dist[nid] {
@@ -446,7 +459,9 @@ pub fn extract_issue_coord(s: &str) -> Option<(f64, f64)> {
     let find = |key: &str| -> Option<f64> {
         let idx = s.find(key)?;
         let tail = &s[idx + key.len()..];
-        let end = tail.find(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-' || c == '+' || c == 'e' || c == 'E'));
+        let end = tail.find(|c: char| {
+            !(c.is_ascii_digit() || c == '.' || c == '-' || c == '+' || c == 'e' || c == 'E')
+        });
         let num = match end {
             Some(e) => &tail[..e],
             None => tail,
@@ -478,7 +493,14 @@ mod tests {
 
     #[test]
     fn convex_hull_dedup_and_collinear() {
-        let pts = [[116.0, 39.0], [116.0, 39.0], [116.5, 39.0], [117.0, 39.0], [117.0, 40.0], [116.0, 40.0]];
+        let pts = [
+            [116.0, 39.0],
+            [116.0, 39.0],
+            [116.5, 39.0],
+            [117.0, 39.0],
+            [117.0, 40.0],
+            [116.0, 40.0],
+        ];
         let hull = convex_hull(&pts);
         assert_eq!(hull.len(), 4);
     }
@@ -490,7 +512,10 @@ mod tests {
         assert_eq!(inf.len(), 4);
         // 原顶点在膨胀多边形内部
         for p in &poly {
-            assert!(point_in_convex(*p, &inf, 1e-9), "{p:?} should be inside inflated");
+            assert!(
+                point_in_convex(*p, &inf, 1e-9),
+                "{p:?} should be inside inflated"
+            );
         }
     }
 
@@ -505,14 +530,34 @@ mod tests {
     fn seg_intersects_convex_crossing() {
         let poly = [[116.0, 39.0], [117.0, 39.0], [117.0, 40.0], [116.0, 40.0]];
         // 穿越内部
-        assert!(seg_intersects_convex([115.5, 39.5], [117.5, 39.5], &poly, GEOM_EPS_DEG));
+        assert!(seg_intersects_convex(
+            [115.5, 39.5],
+            [117.5, 39.5],
+            &poly,
+            GEOM_EPS_DEG
+        ));
         // 不穿
-        assert!(!seg_intersects_convex([115.0, 38.0], [115.5, 38.5], &poly, GEOM_EPS_DEG));
+        assert!(!seg_intersects_convex(
+            [115.0, 38.0],
+            [115.5, 38.5],
+            &poly,
+            GEOM_EPS_DEG
+        ));
         // 贴边（沿边界 y=39.0 行走）= 边界接触，不穿入内部 → 放行（可见图语义：
         // 膨胀后边界行走合法，机动空间已含）
-        assert!(!seg_intersects_convex([115.5, 39.0], [117.5, 39.0], &poly, GEOM_EPS_DEG));
+        assert!(!seg_intersects_convex(
+            [115.5, 39.0],
+            [117.5, 39.0],
+            &poly,
+            GEOM_EPS_DEG
+        ));
         // 起点在多边形内部 → 必穿内部 → 相交
-        assert!(seg_intersects_convex([115.5, 39.5], [116.5, 39.0], &poly, GEOM_EPS_DEG));
+        assert!(seg_intersects_convex(
+            [115.5, 39.5],
+            [116.5, 39.0],
+            &poly,
+            GEOM_EPS_DEG
+        ));
     }
 
     #[test]
@@ -536,12 +581,18 @@ mod tests {
             PatchOutcome::Path(p, d) => {
                 assert!(p.len() >= 3, "should detour around obstacle: {p:?}");
                 let straight = crate::path::haversine_m(116.0, 39.0, 117.0, 40.0) / 1000.0;
-                assert!(d > straight, "detour longer than straight: {d} vs {straight}");
+                assert!(
+                    d > straight,
+                    "detour longer than straight: {d} vs {straight}"
+                );
                 // 路径不穿障碍（膨胀后）
                 let hull = convex_hull(&obs);
                 let inf = inflate_convex(&hull, 5_000.0 / 111_320.0);
                 for w in p.windows(2) {
-                    assert!(!seg_intersects_convex(w[0], w[1], &inf, GEOM_EPS_DEG), "edge crosses inflated");
+                    assert!(
+                        !seg_intersects_convex(w[0], w[1], &inf, GEOM_EPS_DEG),
+                        "edge crosses inflated"
+                    );
                 }
             }
             other => panic!("expected path, got {other:?}"),
@@ -622,12 +673,21 @@ mod tests {
         let no_circles: &[CircleObs] = &[];
         // 失败点在转折顶点邻域 → FittingDefect
         let issues = vec!["sample (lon=116.599,lat=39.701) clearance fail".to_string()];
-        assert_eq!(classify_verify_failure(&path, &issues, &inf, no_circles, 0.01), PatchFailureClass::FittingDefect);
+        assert_eq!(
+            classify_verify_failure(&path, &issues, &inf, no_circles, 0.01),
+            PatchFailureClass::FittingDefect
+        );
         // 失败点远离转折 → GeometricImpossible
         let issues2 = vec!["sample (lon=116.2,lat=39.1) clearance fail".to_string()];
-        assert_eq!(classify_verify_failure(&path, &issues2, &inf, no_circles, 0.01), PatchFailureClass::GeometricImpossible);
+        assert_eq!(
+            classify_verify_failure(&path, &issues2, &inf, no_circles, 0.01),
+            PatchFailureClass::GeometricImpossible
+        );
         // P5-M4：失败点贴圆墙（距圆心 ≤ r_eff + 余量）→ GeometricImpossible
-        let circle_wall = CircleObs { center: [116.6, 39.5], r_eff_m: 10_000.0 };
+        let circle_wall = CircleObs {
+            center: [116.6, 39.5],
+            r_eff_m: 10_000.0,
+        };
         let issues3 = vec!["sample (lon=116.645,lat=39.540) clearance fail".to_string()];
         assert_eq!(
             classify_verify_failure(&path, &issues3, &inf, &[circle_wall], 0.01),
@@ -652,9 +712,25 @@ mod tests {
             alt_max_m: Some(10000.0),
             height_semantics: Default::default(),
         };
-        let poly_wall = mk(ZoneType::NoFly, ZoneShape::Polygon { vertices: vec![[116.0, 39.0], [117.0, 39.0], [117.0, 40.0]] });
-        let circle_wall = mk(ZoneType::NoFly, ZoneShape::Circle { center: [116.5, 39.5], radius_km: 10.0 });
-        let restricted = mk(ZoneType::Restricted, ZoneShape::Polygon { vertices: vec![[116.0, 39.0], [117.0, 39.0], [117.0, 40.0]] });
+        let poly_wall = mk(
+            ZoneType::NoFly,
+            ZoneShape::Polygon {
+                vertices: vec![[116.0, 39.0], [117.0, 39.0], [117.0, 40.0]],
+            },
+        );
+        let circle_wall = mk(
+            ZoneType::NoFly,
+            ZoneShape::Circle {
+                center: [116.5, 39.5],
+                radius_km: 10.0,
+            },
+        );
+        let restricted = mk(
+            ZoneType::Restricted,
+            ZoneShape::Polygon {
+                vertices: vec![[116.0, 39.0], [117.0, 39.0], [117.0, 40.0]],
+            },
+        );
         // 纯多边形硬墙 → 适用
         assert!(patch_applicable(&[poly_wall.clone()], false));
         // 圆障碍 → 适用（P4 放开：切点锚点 2D 水平绕行）
@@ -706,9 +782,9 @@ mod tests {
         let rect = PatchRect::from_center([116.5, 39.5], PATCH_R_DEG);
         let skel = [
             [116.0, 39.0],
-            [116.5, 39.0],  // 进入 patch（x 方向）
+            [116.5, 39.0], // 进入 patch（x 方向）
             [116.5, 39.5],
-            [116.5, 40.0],  // 离开 patch
+            [116.5, 40.0], // 离开 patch
             [117.0, 40.0],
         ];
         let (ein, eout) = boundary_anchors(&skel, &rect);
@@ -717,21 +793,50 @@ mod tests {
         let ein = ein.unwrap();
         let eout = eout.unwrap();
         // 进入点在下边界（y = c - half）：骨架从 y=39.0 进入矩形（x=116.5 已居中）
-        assert!((ein[1] - (39.5 - PATCH_R_DEG)).abs() < 1e-6, "enter on bottom edge: {ein:?}");
+        assert!(
+            (ein[1] - (39.5 - PATCH_R_DEG)).abs() < 1e-6,
+            "enter on bottom edge: {ein:?}"
+        );
         // 离开点在上边界（y = c + half）：骨架沿 x=116.5 从 y=40.0 方向离开矩形
-        assert!((eout[1] - (39.5 + PATCH_R_DEG)).abs() < 1e-6, "exit on top edge: {eout:?}");
+        assert!(
+            (eout[1] - (39.5 + PATCH_R_DEG)).abs() < 1e-6,
+            "exit on top edge: {eout:?}"
+        );
     }
 
     #[test]
     fn plan_patch_multi_two_obstacles() {
-        let obs1 = [[116.30, 39.30], [116.50, 39.30], [116.50, 39.70], [116.30, 39.70]];
-        let obs2 = [[116.70, 39.30], [116.90, 39.30], [116.90, 39.70], [116.70, 39.70]];
-        let out = plan_patch_multi([116.0, 39.0], [117.0, 40.0], &[obs1.to_vec(), obs2.to_vec()], &[], &[], 5_000.0, 3000.0, None, None);
+        let obs1 = [
+            [116.30, 39.30],
+            [116.50, 39.30],
+            [116.50, 39.70],
+            [116.30, 39.70],
+        ];
+        let obs2 = [
+            [116.70, 39.30],
+            [116.90, 39.30],
+            [116.90, 39.70],
+            [116.70, 39.70],
+        ];
+        let out = plan_patch_multi(
+            [116.0, 39.0],
+            [117.0, 40.0],
+            &[obs1.to_vec(), obs2.to_vec()],
+            &[],
+            &[],
+            5_000.0,
+            3000.0,
+            None,
+            None,
+        );
         match out {
             PatchOutcome::Path(p, d) => {
                 assert!(p.len() >= 3, "should detour two obstacles: {p:?}");
                 let straight = crate::path::haversine_m(116.0, 39.0, 117.0, 40.0) / 1000.0;
-                assert!(d > straight, "detour longer than straight: {d} vs {straight}");
+                assert!(
+                    d > straight,
+                    "detour longer than straight: {d} vs {straight}"
+                );
             }
             other => panic!("expected path, got {other:?}"),
         }
@@ -745,7 +850,14 @@ mod tests {
         let z = Zone {
             id: "rz".into(),
             zone_type: ZoneType::Restricted,
-            shape: ZoneShape::Polygon { vertices: vec![[116.30, 39.30], [116.70, 39.30], [116.70, 39.70], [116.30, 39.70]] },
+            shape: ZoneShape::Polygon {
+                vertices: vec![
+                    [116.30, 39.30],
+                    [116.70, 39.30],
+                    [116.70, 39.70],
+                    [116.30, 39.70],
+                ],
+            },
             alt_min_m: Some(2000.0),
             alt_max_m: Some(4000.0),
             height_semantics: Default::default(),
@@ -806,18 +918,39 @@ mod tests {
         // 骨架全程在矩形内 → 无进入/离开锚点
         let inside = [[116.5, 39.4], [116.5, 39.5], [116.5, 39.6]];
         let (ein, eout) = boundary_anchors(&inside, &rect);
-        assert!(ein.is_none() && eout.is_none(), "fully inside -> no anchors: {ein:?} {eout:?}");
+        assert!(
+            ein.is_none() && eout.is_none(),
+            "fully inside -> no anchors: {ein:?} {eout:?}"
+        );
         // 骨架全程在矩形外 → 无锚点
         let outside = [[116.0, 39.0], [116.0, 39.1], [116.0, 39.2]];
         let (ein, eout) = boundary_anchors(&outside, &rect);
-        assert!(ein.is_none() && eout.is_none(), "fully outside -> no anchors: {ein:?} {eout:?}");
+        assert!(
+            ein.is_none() && eout.is_none(),
+            "fully outside -> no anchors: {ein:?} {eout:?}"
+        );
     }
 
     #[test]
     fn plan_patch_multi_anchor_in_obstacle_impossible() {
         // start/target 被障碍吞入（膨胀后）→ 无机动空间 → 几何无解
-        let obs = [[116.30, 39.30], [116.70, 39.30], [116.70, 39.70], [116.30, 39.70]];
-        let out = plan_patch_multi([116.5, 39.5], [117.0, 40.0], &[obs.to_vec()], &[], &[], 10_000.0, 3000.0, None, None);
+        let obs = [
+            [116.30, 39.30],
+            [116.70, 39.30],
+            [116.70, 39.70],
+            [116.30, 39.70],
+        ];
+        let out = plan_patch_multi(
+            [116.5, 39.5],
+            [117.0, 40.0],
+            &[obs.to_vec()],
+            &[],
+            &[],
+            10_000.0,
+            3000.0,
+            None,
+            None,
+        );
         assert!(
             matches!(out, PatchOutcome::GeometricImpossible),
             "anchor swallowed by obstacle -> impossible: {out:?}"
@@ -850,7 +983,13 @@ mod tests {
     #[test]
     fn multi_patch_stitch_two_clusters() {
         // 多 patch 串接（§11.2）：两簇独立 patch 依次拼入骨架，首尾锚点保留
-        let skel = [[116.0, 38.0], [116.5, 38.5], [116.5, 39.0], [116.5, 39.5], [117.0, 40.0]];
+        let skel = [
+            [116.0, 38.0],
+            [116.5, 38.5],
+            [116.5, 39.0],
+            [116.5, 39.5],
+            [117.0, 40.0],
+        ];
         let rect1 = PatchRect::from_center([116.5, 38.5], PATCH_R_DEG);
         let rect2 = PatchRect::from_center([116.5, 39.5], PATCH_R_DEG);
         let (ein1, eout1) = boundary_anchors(&skel, &rect1);
@@ -881,9 +1020,24 @@ mod tests {
             .collect();
         let centers = [[116.30, 38.30], [116.60, 38.60], [116.90, 38.90]];
         let obs_all = [
-            [[116.28, 38.28], [116.38, 38.28], [116.38, 38.38], [116.28, 38.38]],
-            [[116.58, 38.58], [116.68, 38.58], [116.68, 38.68], [116.58, 38.68]],
-            [[116.88, 38.88], [116.98, 38.88], [116.98, 38.98], [116.88, 38.98]],
+            [
+                [116.28, 38.28],
+                [116.38, 38.28],
+                [116.38, 38.38],
+                [116.28, 38.38],
+            ],
+            [
+                [116.58, 38.58],
+                [116.68, 38.58],
+                [116.68, 38.68],
+                [116.58, 38.68],
+            ],
+            [
+                [116.88, 38.88],
+                [116.98, 38.88],
+                [116.98, 38.98],
+                [116.88, 38.98],
+            ],
         ];
         let mut current = skel.clone();
         let mut patches = 0;
@@ -896,10 +1050,11 @@ mod tests {
                     .filter(|o| o.iter().any(|v| rect.contains(*v)))
                     .map(|o| o.to_vec())
                     .collect();
-                assert!(!obs_in_rect.is_empty(), "cluster {ci} rect should contain its obstacle");
-                match plan_patch_multi(
-                    a, b, &obs_in_rect, &[], &[], 5_000.0, 3000.0, None, None,
-                ) {
+                assert!(
+                    !obs_in_rect.is_empty(),
+                    "cluster {ci} rect should contain its obstacle"
+                );
+                match plan_patch_multi(a, b, &obs_in_rect, &[], &[], 5_000.0, 3000.0, None, None) {
                     PatchOutcome::Path(p, _) => {
                         current = stitch(&current, &p, a, b);
                         patches += 1;
@@ -934,12 +1089,30 @@ mod tests {
         let params = ThreatParams::default();
         let threat = SphericalRadarThreat::new(std::slice::from_ref(&radar), params);
         // 穿雷达中心线段（中点距雷达 0）→ 代价显著高于远离线
-        let w_center = edge_weight([116.0, 39.5], [117.0, 39.5], Some((&threat, 200.0)), 3000.0, None);
-        let w_far = edge_weight([116.0, 38.0], [117.0, 38.0], Some((&threat, 200.0)), 3000.0, None);
-        assert!(w_center > w_far, "center pass should cost more: {w_center} vs {w_far}");
+        let w_center = edge_weight(
+            [116.0, 39.5],
+            [117.0, 39.5],
+            Some((&threat, 200.0)),
+            3000.0,
+            None,
+        );
+        let w_far = edge_weight(
+            [116.0, 38.0],
+            [117.0, 38.0],
+            Some((&threat, 200.0)),
+            3000.0,
+            None,
+        );
+        assert!(
+            w_center > w_far,
+            "center pass should cost more: {w_center} vs {w_far}"
+        );
         // 无雷达 → 纯几何
         let w_plain = edge_weight([116.0, 39.5], [117.0, 39.5], None, 3000.0, None);
-        assert_eq!(w_plain.to_bits(), (crate::path::haversine_m(116.0, 39.5, 117.0, 39.5) / 1000.0).to_bits());
+        assert_eq!(
+            w_plain.to_bits(),
+            (crate::path::haversine_m(116.0, 39.5, 117.0, 39.5) / 1000.0).to_bits()
+        );
     }
 
     // ==================== P4：圆障碍切点锚点 + 地形边权（docs/12 §8 排除项解除） ====================
@@ -947,12 +1120,18 @@ mod tests {
     #[test]
     fn circle_tangent_points_lie_on_circle() {
         // 点到圆切点：几何正确性（切点在圆上）
-        let c = CircleObs { center: [116.5, 39.5], r_eff_m: 55_000.0 };
+        let c = CircleObs {
+            center: [116.5, 39.5],
+            r_eff_m: 55_000.0,
+        };
         let ts = point_circle_tangents([116.0, 39.5], &c).expect("d > r -> 2 tangents");
         let r_deg = 55_000.0 / 111_320.0;
         for t in ts {
             let d = ((t[0] - 116.5).powi(2) + (t[1] - 39.5).powi(2)).sqrt();
-            assert!((d - r_deg).abs() < 1e-9, "tangent must lie on circle: d={d}");
+            assert!(
+                (d - r_deg).abs() < 1e-9,
+                "tangent must lie on circle: d={d}"
+            );
         }
         // 点在圆内 → 无切点
         assert!(point_circle_tangents([116.5, 39.5], &c).is_none());
@@ -960,18 +1139,30 @@ mod tests {
 
     #[test]
     fn circle_circle_tangents_geometry() {
-        let c1 = CircleObs { center: [116.0, 39.0], r_eff_m: 20_000.0 };
-        let c2 = CircleObs { center: [116.5, 39.0], r_eff_m: 20_000.0 };
+        let c1 = CircleObs {
+            center: [116.0, 39.0],
+            r_eff_m: 20_000.0,
+        };
+        let c2 = CircleObs {
+            center: [116.5, 39.0],
+            r_eff_m: 20_000.0,
+        };
         let ts = circle_circle_tangents(&c1, &c2);
         assert_eq!(ts.len(), 8, "外 2 组 + 内 2 组，每组 2 切点（每圆 4 个）");
         for (pt, ci) in &ts {
             let c = if *ci == 0 { &c1 } else { &c2 };
             let r_deg = c.r_eff_m / 111_320.0;
             let d = ((pt[0] - c.center[0]).powi(2) + (pt[1] - c.center[1]).powi(2)).sqrt();
-            assert!((d - r_deg).abs() < 1e-9, "tangent must lie on its circle: d={d}");
+            assert!(
+                (d - r_deg).abs() < 1e-9,
+                "tangent must lie on its circle: d={d}"
+            );
         }
         // 重叠圆（d < r1+r2）→ 内公切无解，只剩外公切（外 2 组 × 2 = 4 点）
-        let c3 = CircleObs { center: [116.2, 39.0], r_eff_m: 20_000.0 };
+        let c3 = CircleObs {
+            center: [116.2, 39.0],
+            r_eff_m: 20_000.0,
+        };
         let ts2 = circle_circle_tangents(&c1, &c3);
         assert_eq!(ts2.len(), 4, "overlap -> only external tangents");
     }
@@ -981,15 +1172,31 @@ mod tests {
         // 直线穿圆（NoFly 圆 r=40km，inflation 5km → r_eff=45km）→ 切点 + 圆弧绕行；
         // 起点距圆心 55.7km > 45km ✓ 切点存在。路径全部在膨胀圆外（禁飞区绝对禁入：
         // 水平绕行合法，不进入圆内）。
-        let c = CircleObs { center: [116.5, 39.5], r_eff_m: 45_000.0 };
-        let out = plan_patch_multi([116.0, 39.5], [117.0, 39.5], &[], &[c], &[], 5_000.0, 3000.0, None, None);
+        let c = CircleObs {
+            center: [116.5, 39.5],
+            r_eff_m: 45_000.0,
+        };
+        let out = plan_patch_multi(
+            [116.0, 39.5],
+            [117.0, 39.5],
+            &[],
+            &[c],
+            &[],
+            5_000.0,
+            3000.0,
+            None,
+            None,
+        );
         match out {
             PatchOutcome::Path(p, _d) => {
                 assert!(p.len() > 2, "circle bypass should be an arc, got {p:?}");
                 let r_deg = 45_000.0 / 111_320.0;
                 for pt in &p {
                     let d = ((pt[0] - 116.5).powi(2) + (pt[1] - 39.5).powi(2)).sqrt();
-                    assert!(d >= r_deg - 1e-6, "path point inside inflated circle: {pt:?} d={d}");
+                    assert!(
+                        d >= r_deg - 1e-6,
+                        "path point inside inflated circle: {pt:?} d={d}"
+                    );
                 }
                 assert_eq!(p.first().unwrap()[1], 39.5);
                 assert_eq!(p.last().unwrap()[1], 39.5);
@@ -1001,9 +1208,25 @@ mod tests {
     #[test]
     fn plan_patch_two_circles_detour() {
         // 双圆错位挡路（各自穿直线）→ 路径绕行（长度 > 直线），且不进入任一圆
-        let c1 = CircleObs { center: [116.30, 39.70], r_eff_m: 23_000.0 };
-        let c2 = CircleObs { center: [116.70, 39.30], r_eff_m: 23_000.0 };
-        let out = plan_patch_multi([116.0, 39.5], [117.0, 39.5], &[], &[c1, c2], &[], 5_000.0, 3000.0, None, None);
+        let c1 = CircleObs {
+            center: [116.30, 39.70],
+            r_eff_m: 23_000.0,
+        };
+        let c2 = CircleObs {
+            center: [116.70, 39.30],
+            r_eff_m: 23_000.0,
+        };
+        let out = plan_patch_multi(
+            [116.0, 39.5],
+            [117.0, 39.5],
+            &[],
+            &[c1, c2],
+            &[],
+            5_000.0,
+            3000.0,
+            None,
+            None,
+        );
         match out {
             PatchOutcome::Path(p, d) => {
                 assert!(p.len() > 2, "detour expected: {p:?}");
@@ -1011,7 +1234,10 @@ mod tests {
                 for pt in &p {
                     let d1 = ((pt[0] - 116.30).powi(2) + (pt[1] - 39.70).powi(2)).sqrt();
                     let d2 = ((pt[0] - 116.70).powi(2) + (pt[1] - 39.30).powi(2)).sqrt();
-                    assert!(d1 >= r_deg - 1e-6 && d2 >= r_deg - 1e-6, "point inside circle: {pt:?}");
+                    assert!(
+                        d1 >= r_deg - 1e-6 && d2 >= r_deg - 1e-6,
+                        "point inside circle: {pt:?}"
+                    );
                 }
                 // 绕行距离 > 直线（116E→117E @39.5N ≈ 85.9km）
                 assert!(d > 86.0, "detour length {d} should exceed straight 85.9km");
@@ -1023,8 +1249,21 @@ mod tests {
     #[test]
     fn plan_patch_circle_anchor_inside_impossible() {
         // 起点在膨胀圆内 → 无机动空间 → 几何无解
-        let c = CircleObs { center: [116.5, 39.5], r_eff_m: 60_000.0 };
-        let out = plan_patch_multi([116.45, 39.5], [117.0, 39.5], &[], &[c], &[], 5_000.0, 3000.0, None, None);
+        let c = CircleObs {
+            center: [116.5, 39.5],
+            r_eff_m: 60_000.0,
+        };
+        let out = plan_patch_multi(
+            [116.45, 39.5],
+            [117.0, 39.5],
+            &[],
+            &[c],
+            &[],
+            5_000.0,
+            3000.0,
+            None,
+            None,
+        );
         assert!(
             matches!(out, PatchOutcome::GeometricImpossible),
             "anchor inside inflated circle -> impossible: {out:?}"
@@ -1046,9 +1285,19 @@ mod tests {
                 "mock".into()
             }
         }
-        let w = edge_weight([116.0, 39.0], [117.0, 39.0], None, 3000.0, Some((&NoDataTerrain, 100.0)));
+        let w = edge_weight(
+            [116.0, 39.0],
+            [117.0, 39.0],
+            None,
+            3000.0,
+            Some((&NoDataTerrain, 100.0)),
+        );
         let base = crate::path::haversine_m(116.0, 39.0, 117.0, 39.0) / 1000.0;
-        assert_eq!(w.to_bits(), (base * 5.0).to_bits(), "NoData edge cost must be 5x");
+        assert_eq!(
+            w.to_bits(),
+            (base * 5.0).to_bits(),
+            "NoData edge cost must be 5x"
+        );
     }
 
     #[test]
@@ -1173,7 +1422,10 @@ fn seg_rect_crossings(a: [f64; 2], b: [f64; 2], rect: &PatchRect) -> Vec<(f64, [
 
 /// 边界锚点（§3.2/§7）：骨架与 patch 矩形边界的交点——进入锚点（外→内首个）与
 /// 离开锚点（内→外最后一个）。平局按骨架点索引序（遍历序即索引序，显式确定）。
-pub fn boundary_anchors(skeleton: &[[f64; 2]], rect: &PatchRect) -> (Option<[f64; 2]>, Option<[f64; 2]>) {
+pub fn boundary_anchors(
+    skeleton: &[[f64; 2]],
+    rect: &PatchRect,
+) -> (Option<[f64; 2]>, Option<[f64; 2]>) {
     let mut in_anchor: Option<[f64; 2]> = None;
     let mut out_anchor: Option<[f64; 2]> = None;
     for w in skeleton.windows(2) {
@@ -1288,7 +1540,9 @@ pub fn plan_patch_multi(
         }
     }
     for c in circles {
-        if point_circle_inside(start, c, GEOM_EPS_DEG) || point_circle_inside(target, c, GEOM_EPS_DEG) {
+        if point_circle_inside(start, c, GEOM_EPS_DEG)
+            || point_circle_inside(target, c, GEOM_EPS_DEG)
+        {
             return PatchOutcome::GeometricImpossible;
         }
     }
@@ -1453,12 +1707,14 @@ fn arc_edge_weight(
     let r = c.r_eff_m / 111_320.0;
     let ang_a = (a[1] - c.center[1]).atan2(a[0] - c.center[0]);
     let ang_b = (b[1] - c.center[1]).atan2(b[0] - c.center[0]);
-    let d_ang = (ang_b - ang_a + 3.0 * std::f64::consts::PI)
-        .rem_euclid(2.0 * std::f64::consts::PI)
+    let d_ang = (ang_b - ang_a + 3.0 * std::f64::consts::PI).rem_euclid(2.0 * std::f64::consts::PI)
         - std::f64::consts::PI; // 归一化到 [-π, π]（短弧方向）
     let arc_km = r * 111_320.0 * d_ang.abs() / 1000.0;
     let mid_ang = ang_a + d_ang / 2.0;
-    let mid = [c.center[0] + r * mid_ang.cos(), c.center[1] + r * mid_ang.sin()];
+    let mid = [
+        c.center[0] + r * mid_ang.cos(),
+        c.center[1] + r * mid_ang.sin(),
+    ];
     let nodata_mult = if let Some((t, _)) = terrain {
         if matches!(
             t.sample_at(mid[0], mid[1]),
@@ -1491,8 +1747,7 @@ fn arc_points(a: [f64; 2], b: [f64; 2], c: &CircleObs) -> Vec<[f64; 2]> {
     let r = c.r_eff_m / 111_320.0;
     let ang_a = (a[1] - c.center[1]).atan2(a[0] - c.center[0]);
     let ang_b = (b[1] - c.center[1]).atan2(b[0] - c.center[0]);
-    let d_ang = (ang_b - ang_a + 3.0 * std::f64::consts::PI)
-        .rem_euclid(2.0 * std::f64::consts::PI)
+    let d_ang = (ang_b - ang_a + 3.0 * std::f64::consts::PI).rem_euclid(2.0 * std::f64::consts::PI)
         - std::f64::consts::PI;
     let n = ((r * d_ang.abs() / (5.0 / 111_320.0)).ceil() as usize).max(1);
     (0..=n)
@@ -1516,7 +1771,11 @@ fn edge_terrain_ok(
         let len = crate::path::haversine_m(a[0], a[1], b[0], b[1]);
         let n = crate::smooth::terrain_sample_count(len, 8, 1024);
         for k in 0..n {
-            let tt = if n == 1 { 0.0 } else { k as f64 / (n - 1) as f64 };
+            let tt = if n == 1 {
+                0.0
+            } else {
+                k as f64 / (n - 1) as f64
+            };
             let lon = a[0] + (b[0] - a[0]) * tt;
             let lat = a[1] + (b[1] - a[1]) * tt;
             if matches!(
@@ -1604,7 +1863,11 @@ fn edge_weight(
         let n = crate::smooth::terrain_sample_count(base_km * 1000.0, 8, 1024);
         let mut nodata = false;
         for k in 0..n {
-            let tt = if n == 1 { 0.0 } else { k as f64 / (n - 1) as f64 };
+            let tt = if n == 1 {
+                0.0
+            } else {
+                k as f64 / (n - 1) as f64
+            };
             let lon = a[0] + (b[0] - a[0]) * tt;
             let lat = a[1] + (b[1] - a[1]) * tt;
             if matches!(
@@ -1615,11 +1878,7 @@ fn edge_weight(
                 break;
             }
         }
-        if nodata {
-            5.0
-        } else {
-            1.0
-        }
+        if nodata { 5.0 } else { 1.0 }
     } else {
         1.0
     };
@@ -1691,7 +1950,9 @@ pub fn stitch(
     }
     // 去重接缝：patch 首点若与骨架尾点重合则跳过
     let start_skip = patch.first().map_or(0, |p| {
-        if out.last().map_or(false, |q| q[0].to_bits() == p[0].to_bits() && q[1].to_bits() == p[1].to_bits()) {
+        if out.last().map_or(false, |q| {
+            q[0].to_bits() == p[0].to_bits() && q[1].to_bits() == p[1].to_bits()
+        }) {
             1
         } else {
             0
@@ -1699,7 +1960,9 @@ pub fn stitch(
     });
     out.extend_from_slice(&patch[start_skip..]);
     let end_skip = patch.last().map_or(0, |p| {
-        if skeleton.get(j_idx).map_or(false, |q| q[0].to_bits() == p[0].to_bits() && q[1].to_bits() == p[1].to_bits()) {
+        if skeleton.get(j_idx).map_or(false, |q| {
+            q[0].to_bits() == p[0].to_bits() && q[1].to_bits() == p[1].to_bits()
+        }) {
             1
         } else {
             0

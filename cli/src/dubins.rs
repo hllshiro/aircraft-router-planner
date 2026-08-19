@@ -17,11 +17,7 @@
 fn norm_angle(a: f64) -> f64 {
     let tau = std::f64::consts::TAU;
     let m = a % tau;
-    if m < 0.0 {
-        m + tau
-    } else {
-        m
-    }
+    if m < 0.0 { m + tau } else { m }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -51,9 +47,9 @@ fn arc_angle(from: f64, to: f64, t: Turn) -> f64 {
 pub struct DubinsPath {
     pub t1: Turn,
     pub t2: Turn,
-    pub a1: f64,     // 首弧角（rad）
+    pub a1: f64, // 首弧角（rad）
     pub straight: f64,
-    pub a2: f64,     // 末弧角（rad；CCC 时 = 中弧角）
+    pub a2: f64, // 末弧角（rad；CCC 时 = 中弧角）
     pub c1: (f64, f64),
     pub c2: (f64, f64),
     pub n1: (f64, f64),
@@ -464,8 +460,14 @@ mod tests {
         let pts = path.sample(200);
         let (sx, sy) = pts[0];
         let (ex, ey) = *pts.last().unwrap();
-        assert!((sx - 0.0).abs() < 1e-6 && (sy - 0.0).abs() < 1e-6, "start {sx},{sy}");
-        assert!((ex - 0.0).abs() < 1e-6 && (ey - 10.0).abs() < 1e-6, "end {ex},{ey}");
+        assert!(
+            (sx - 0.0).abs() < 1e-6 && (sy - 0.0).abs() < 1e-6,
+            "start {sx},{sy}"
+        );
+        assert!(
+            (ex - 0.0).abs() < 1e-6 && (ey - 10.0).abs() < 1e-6,
+            "end {ex},{ey}"
+        );
         // 末航向：末两点方向 ≈ 0（+x）
         let n = pts.len();
         let (x1, y1) = pts[n - 2];
@@ -496,20 +498,35 @@ mod tests {
     fn ccc_close_path_valid() {
         // 近距 0.1 < 2R=2 且转向 90°：4 个 CSC 类型圆心距全 < 2R 无解 → CCC 三圆弧；
         // 采样路径端点/末航向验证
-        let path = dubins_path((0.0, 0.0), 0.0, (0.1, 0.0), std::f64::consts::FRAC_PI_2, 1.0)
-            .expect("CCC solution");
+        let path = dubins_path(
+            (0.0, 0.0),
+            0.0,
+            (0.1, 0.0),
+            std::f64::consts::FRAC_PI_2,
+            1.0,
+        )
+        .expect("CCC solution");
         assert!(path.ccc.is_some(), "should be CCC path");
         let pts = path.sample(600);
         let (sx, sy) = pts[0];
         let (ex, ey) = *pts.last().unwrap();
-        assert!((sx - 0.0).abs() < 1e-6 && (sy - 0.0).abs() < 1e-6, "start {sx},{sy}");
-        assert!((ex - 0.1).abs() < 1e-3 && (ey - 0.0).abs() < 1e-3, "end {ex},{ey}");
+        assert!(
+            (sx - 0.0).abs() < 1e-6 && (sy - 0.0).abs() < 1e-6,
+            "start {sx},{sy}"
+        );
+        assert!(
+            (ex - 0.1).abs() < 1e-3 && (ey - 0.0).abs() < 1e-3,
+            "end {ex},{ey}"
+        );
         // 末航向 ≈ 90°（+y）：末两点方向
         let n = pts.len();
         let (x1, y1) = pts[n - 2];
         let (x2, y2) = pts[n - 1];
         let heading = (y2 - y1).atan2(x2 - x1);
-        assert!((heading - std::f64::consts::FRAC_PI_2).abs() < 0.05, "final heading {heading}");
+        assert!(
+            (heading - std::f64::consts::FRAC_PI_2).abs() < 0.05,
+            "final heading {heading}"
+        );
         // 路径长度：三圆弧 > 单圆周长下限（R=1 至少转 > π 弧度）
         assert!(path.len() > std::f64::consts::PI, "got {}", path.len());
     }
@@ -517,35 +534,54 @@ mod tests {
     #[test]
     fn ccc_close_vertical_heading() {
         // 近距掉头（0.1，0→π/2）：4 CSC 全败 → CCC 有解且末点正确（含中弧 > π 的大转角）
-        let path = dubins_path((0.0, 0.0), 0.0, (0.1, 0.0), std::f64::consts::FRAC_PI_2, 1.0)
-            .expect("CCC solution");
+        let path = dubins_path(
+            (0.0, 0.0),
+            0.0,
+            (0.1, 0.0),
+            std::f64::consts::FRAC_PI_2,
+            1.0,
+        )
+        .expect("CCC solution");
         assert!(path.ccc.is_some());
-        assert!(path.a2 > std::f64::consts::PI, "mid arc should exceed π, got {}", path.a2);
+        assert!(
+            path.a2 > std::f64::consts::PI,
+            "mid arc should exceed π, got {}",
+            path.a2
+        );
         let pts = path.sample(600);
         let (ex, ey) = *pts.last().unwrap();
-        assert!((ex - 0.1).abs() < 1e-3 && (ey - 0.0).abs() < 1e-3, "end {ex},{ey}");
+        assert!(
+            (ex - 0.1).abs() < 1e-3 && (ey - 0.0).abs() < 1e-3,
+            "end {ex},{ey}"
+        );
     }
 
     #[test]
     fn same_point_different_heading_single_arc() {
         // 同点不同向：(0,0) 0 → (0,0) π/2：单圆弧最小转角 π/2·R
-        let len = dubins_shortest_len((0.0, 0.0), 0.0, (0.0, 0.0), std::f64::consts::FRAC_PI_2, 1.0)
-            .expect("single arc");
-        assert!((len - std::f64::consts::FRAC_PI_2).abs() < 1e-6, "got {len}");
+        let len = dubins_shortest_len(
+            (0.0, 0.0),
+            0.0,
+            (0.0, 0.0),
+            std::f64::consts::FRAC_PI_2,
+            1.0,
+        )
+        .expect("single arc");
+        assert!(
+            (len - std::f64::consts::FRAC_PI_2).abs() < 1e-6,
+            "got {len}"
+        );
         // 反向：(0,0) 0 → (0,0) π：最小转角 π
         let len = dubins_shortest_len((0.0, 0.0), 0.0, (0.0, 0.0), std::f64::consts::PI, 1.0)
             .expect("half arc");
         assert!((len - std::f64::consts::PI).abs() < 1e-6, "got {len}");
         // 大转角：(0,0) 0 → (0,0) 3π/2：反向往回转 π/2
-        let len = dubins_shortest_len(
-            (0.0, 0.0),
-            0.0,
-            (0.0, 0.0),
-            1.5 * std::f64::consts::PI,
-            1.0,
-        )
-        .expect("reverse arc");
-        assert!((len - std::f64::consts::FRAC_PI_2).abs() < 1e-6, "got {len}");
+        let len = dubins_shortest_len((0.0, 0.0), 0.0, (0.0, 0.0), 1.5 * std::f64::consts::PI, 1.0)
+            .expect("reverse arc");
+        assert!(
+            (len - std::f64::consts::FRAC_PI_2).abs() < 1e-6,
+            "got {len}"
+        );
     }
 
     #[test]

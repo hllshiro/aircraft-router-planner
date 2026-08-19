@@ -280,11 +280,14 @@ mod tests {
     #[test]
     fn point_probability_linear_decay() {
         let rs = [radar(0.0, 0.0, 100.0)];
-        let t = SphericalRadarThreat::new(&rs, ThreatParams {
-            detection_curve: DetectionCurve::Linear,
-            radar_inflation: 1.0,
-            ..Default::default()
-        });
+        let t = SphericalRadarThreat::new(
+            &rs,
+            ThreatParams {
+                detection_curve: DetectionCurve::Linear,
+                radar_inflation: 1.0,
+                ..Default::default()
+            },
+        );
         // 距离 0 → p = base（0.9，2026-08-13 标定）
         let p0 = t.point_probability(0.0, 0.0, 3000.0, None);
         assert!((p0 - 0.9).abs() < 1e-9);
@@ -296,24 +299,33 @@ mod tests {
         let d = haversine_m(0.0, 0.0, lon, 0.0);
         let expect = 0.9 * (1.0 - d / 100_000.0);
         let pm = t.point_probability(lon, 0.0, 3000.0, None);
-        assert!((pm - expect).abs() < 1e-6, "p at half range = {pm} vs {expect}");
+        assert!(
+            (pm - expect).abs() < 1e-6,
+            "p at half range = {pm} vs {expect}"
+        );
     }
 
     #[test]
     fn point_probability_exponential_decay() {
         let rs = [radar(0.0, 0.0, 100.0)];
-        let t = SphericalRadarThreat::new(&rs, ThreatParams {
-            detection_curve: DetectionCurve::Exponential,
-            radar_inflation: 1.0,
-            ..Default::default()
-        });
+        let t = SphericalRadarThreat::new(
+            &rs,
+            ThreatParams {
+                detection_curve: DetectionCurve::Exponential,
+                radar_inflation: 1.0,
+                ..Default::default()
+            },
+        );
         let p0 = t.point_probability(0.0, 0.0, 3000.0, None);
         assert!((p0 - 0.9).abs() < 1e-9);
         let lon = 0.45;
         let d = haversine_m(0.0, 0.0, lon, 0.0);
         let expect = 0.9 * (-4.0 * d / 100_000.0).exp();
         let pm = t.point_probability(lon, 0.0, 3000.0, None);
-        assert!((pm - expect).abs() < 1e-6, "p at half range = {pm} vs {expect}");
+        assert!(
+            (pm - expect).abs() < 1e-6,
+            "p at half range = {pm} vs {expect}"
+        );
     }
 
     #[test]
@@ -322,11 +334,14 @@ mod tests {
             radar(0.0, 0.0, 100.0),
             radar(0.0, 0.1, 100.0), // 同一点第二雷达（0.1°≈11km）
         ];
-        let t = SphericalRadarThreat::new(&rs, ThreatParams {
-            detection_curve: DetectionCurve::Linear,
-            radar_inflation: 1.0,
-            ..Default::default()
-        });
+        let t = SphericalRadarThreat::new(
+            &rs,
+            ThreatParams {
+                detection_curve: DetectionCurve::Linear,
+                radar_inflation: 1.0,
+                ..Default::default()
+            },
+        );
         // 第二雷达在 (0, 0.1°≈11.1km)：p2 = 0.9×(1−11.1/100) ≈ 0.8
         // 并集 = 1−(1−0.9)(1−0.8) ≈ 0.98
         let p = t.point_probability(0.0, 0.0, 3000.0, None);
@@ -340,11 +355,14 @@ mod tests {
         let mut r = radar(0.0, 0.0, 100.0);
         r.suppression_post_range_km = Some(50.0);
         let rs = [r];
-        let t = SphericalRadarThreat::new(&rs, ThreatParams {
-            detection_curve: DetectionCurve::Linear,
-            radar_inflation: 1.0,
-            ..Default::default()
-        });
+        let t = SphericalRadarThreat::new(
+            &rs,
+            ThreatParams {
+                detection_curve: DetectionCurve::Linear,
+                radar_inflation: 1.0,
+                ..Default::default()
+            },
+        );
         // 0.45° ≈ 50km 边界外 → p≈0；0.3° ≈ 33.4km 内 → p ≈ 0.1×(1−0.67) ≈ 0.033
         let p_edge = t.point_probability(0.45, 0.0, 3000.0, None);
         assert!(p_edge < 1e-9);
@@ -358,7 +376,11 @@ mod tests {
         struct Hill;
         impl crate::terrain::TerrainSource for Hill {
             fn height_at(&self, _lon: f64, _lat: f64) -> Option<f64> {
-                Some(if _lat.abs() < 0.01 && _lon > 0.1 && _lon < 0.9 { 5000.0 } else { 0.0 })
+                Some(if _lat.abs() < 0.01 && _lon > 0.1 && _lon < 0.9 {
+                    5000.0
+                } else {
+                    0.0
+                })
             }
             fn bounds(&self) -> Option<crate::terrain::GeoBounds> {
                 None
@@ -368,11 +390,14 @@ mod tests {
             }
         }
         let rs = [radar(0.0, 0.0, 200.0)];
-        let t = SphericalRadarThreat::new(&rs, ThreatParams {
-            detection_curve: DetectionCurve::Linear,
-            radar_inflation: 1.0,
-            ..Default::default()
-        });
+        let t = SphericalRadarThreat::new(
+            &rs,
+            ThreatParams {
+                detection_curve: DetectionCurve::Linear,
+                radar_inflation: 1.0,
+                ..Default::default()
+            },
+        );
         let p_blocked = t.point_probability(1.0, 0.0, 3000.0, Some(&Hill));
         assert!(p_blocked < 1e-9, "山脊应遮挡: {p_blocked}");
         // 无地形（平地）→ 可见（1°≈111km < 200km → p ≈ 0.1×(1−0.56) ≈ 0.044）
@@ -384,11 +409,14 @@ mod tests {
     fn point_probability_swerling1() {
         // 2026-08-13 标定方案 A：Swerling I，Pfa=1e-6，R_eff = 90% 探测距离（base_p=0.9）
         let rs = [radar(0.0, 0.0, 100.0)];
-        let t = SphericalRadarThreat::new(&rs, ThreatParams {
-            detection_curve: DetectionCurve::Swerling1,
-            radar_inflation: 1.0,
-            ..Default::default()
-        });
+        let t = SphericalRadarThreat::new(
+            &rs,
+            ThreatParams {
+                detection_curve: DetectionCurve::Swerling1,
+                radar_inflation: 1.0,
+                ..Default::default()
+            },
+        );
         let vt = 1e6_f64.ln();
         let snr0 = vt / (-0.9_f64.ln()) - 1.0;
         let model = |u: f64| (-vt / (1.0 + snr0 / (u * u * u * u))).exp();
@@ -399,7 +427,10 @@ mod tests {
         let pr = t.point_probability(0.89, 0.0, 3000.0, None);
         let d_r = haversine_m(0.0, 0.0, 0.89, 0.0);
         let expect_r = model(d_r / 100_000.0);
-        assert!((pr - expect_r).abs() < 1e-9, "p near R = {pr} vs {expect_r}");
+        assert!(
+            (pr - expect_r).abs() < 1e-9,
+            "p near R = {pr} vs {expect_r}"
+        );
         assert!(pr > 0.9 && pr < 0.95, "p near R in typical band = {pr}");
         // 0.5R：与公式一致（SNR₀×16 ≈ 2082，exp(−13.8155/2083) ≈ 0.9934）
         let pm = t.point_probability(0.45, 0.0, 3000.0, None);
@@ -415,12 +446,15 @@ mod tests {
     #[test]
     fn evaluate_path_reports_union_and_threshold() {
         let rs = [radar(0.5, 0.0, 100.0)];
-        let t = SphericalRadarThreat::new(&rs, ThreatParams {
-            detection_curve: DetectionCurve::Linear,
-            radar_inflation: 1.0,
-            p_cross: 0.05,
-            ..Default::default()
-        });
+        let t = SphericalRadarThreat::new(
+            &rs,
+            ThreatParams {
+                detection_curve: DetectionCurve::Linear,
+                radar_inflation: 1.0,
+                p_cross: 0.05,
+                ..Default::default()
+            },
+        );
         // 路径直穿雷达上方（0.0→1.0 经 0.5,0）→ 累计探测概率高 → 超阈值
         let path = Path::new(vec![
             PathPoint::new(0.0, 0.0, 3000.0),

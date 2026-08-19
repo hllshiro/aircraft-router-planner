@@ -90,7 +90,12 @@ pub struct Geo {
 
 impl Geo {
     pub fn new(lon: f64, lat: f64) -> Result<Self, InputInvalidReason> {
-        if !lon.is_finite() || !lat.is_finite() || lon < -180.0 || lon > 180.0 || lat < -90.0 || lat > 90.0
+        if !lon.is_finite()
+            || !lat.is_finite()
+            || lon < -180.0
+            || lon > 180.0
+            || lat < -90.0
+            || lat > 90.0
         {
             return Err(InputInvalidReason::IllegalCoordinate);
         }
@@ -162,21 +167,24 @@ impl TransverseMercator {
         // 子午线弧长 M
         let m = a
             * ((1.0 - e2 / 4.0 - 3.0 * e2 * e2 / 64.0 - 5.0 * e2 * e2 * e2 / 256.0) * phi
-                - (3.0 * e2 / 8.0 + 3.0 * e2 * e2 / 32.0 + 45.0 * e2 * e2 * e2 / 1024.0) * (2.0 * phi).sin()
+                - (3.0 * e2 / 8.0 + 3.0 * e2 * e2 / 32.0 + 45.0 * e2 * e2 * e2 / 1024.0)
+                    * (2.0 * phi).sin()
                 + (15.0 * e2 * e2 / 256.0 + 45.0 * e2 * e2 * e2 / 1024.0) * (4.0 * phi).sin()
                 - (35.0 * e2 * e2 * e2 / 3072.0) * (6.0 * phi).sin());
 
-        let x = k0 * n * (a_coef
-            + (1.0 - t + c) * a_coef.powi(3) / 6.0
-            + (5.0 - 18.0 * t + t * t + 72.0 * c - 58.0 * e_prime2) * a_coef.powi(5) / 120.0)
+        let x = k0
+            * n
+            * (a_coef
+                + (1.0 - t + c) * a_coef.powi(3) / 6.0
+                + (5.0 - 18.0 * t + t * t + 72.0 * c - 58.0 * e_prime2) * a_coef.powi(5) / 120.0)
             + self.false_easting;
         let y = k0
-            * (m
-                + n * tan_phi
-                    * (a_coef * a_coef / 2.0
-                        + (5.0 - t + 9.0 * c + 4.0 * c * c) * a_coef.powi(4) / 24.0
-                        + (61.0 - 58.0 * t + t * t + 600.0 * c - 330.0 * e_prime2) * a_coef.powi(6)
-                            / 720.0))
+            * (m + n
+                * tan_phi
+                * (a_coef * a_coef / 2.0
+                    + (5.0 - t + 9.0 * c + 4.0 * c * c) * a_coef.powi(4) / 24.0
+                    + (61.0 - 58.0 * t + t * t + 600.0 * c - 330.0 * e_prime2) * a_coef.powi(6)
+                        / 720.0))
             + self.false_northing;
         (x, y)
     }
@@ -219,12 +227,12 @@ impl TransverseMercator {
                 * (d * d / 2.0
                     - (5.0 + 3.0 * t1 + 10.0 * c1 - 4.0 * c1 * c1 - 9.0 * e_prime2) * d.powi(4)
                         / 24.0
-                    + (61.0 + 90.0 * t1 + 298.0 * c1 + 45.0 * t1 * t1 - 252.0 * e_prime2
+                    + (61.0 + 90.0 * t1 + 298.0 * c1 + 45.0 * t1 * t1
+                        - 252.0 * e_prime2
                         - 3.0 * c1 * c1)
                         * d.powi(6)
                         / 720.0);
-        let lam = (d
-            - (1.0 + 2.0 * t1 + c1) * d.powi(3) / 6.0
+        let lam = (d - (1.0 + 2.0 * t1 + c1) * d.powi(3) / 6.0
             + (5.0 - 2.0 * c1 + 28.0 * t1 - 3.0 * c1 * c1 + 8.0 * e_prime2 + 24.0 * t1 * t1)
                 * d.powi(5)
                 / 120.0)
@@ -306,7 +314,8 @@ impl EnuFrame {
     /// 地理 → ENU (east, north) 米（球面近似，近场）
     pub fn to_enu(&self, p: &Geo) -> (f64, f64) {
         let north = (p.lat - self.origin.lat).to_radians() * Self::R;
-        let east = (p.lon - self.origin.lon).to_radians() * Self::R * self.origin.lat.to_radians().cos();
+        let east =
+            (p.lon - self.origin.lon).to_radians() * Self::R * self.origin.lat.to_radians().cos();
         (east, north)
     }
 
@@ -396,16 +405,33 @@ mod tests {
     #[test]
     fn geo_rejects_invalid() {
         assert!(Geo::new(116.0, 39.0).is_ok());
-        assert_eq!(Geo::new(f64::NAN, 39.0), Err(InputInvalidReason::IllegalCoordinate));
-        assert_eq!(Geo::new(181.0, 39.0), Err(InputInvalidReason::IllegalCoordinate));
-        assert_eq!(Geo::new(116.0, -91.0), Err(InputInvalidReason::IllegalCoordinate));
-        assert_eq!(Geo::new(116.0, f64::INFINITY), Err(InputInvalidReason::IllegalCoordinate));
+        assert_eq!(
+            Geo::new(f64::NAN, 39.0),
+            Err(InputInvalidReason::IllegalCoordinate)
+        );
+        assert_eq!(
+            Geo::new(181.0, 39.0),
+            Err(InputInvalidReason::IllegalCoordinate)
+        );
+        assert_eq!(
+            Geo::new(116.0, -91.0),
+            Err(InputInvalidReason::IllegalCoordinate)
+        );
+        assert_eq!(
+            Geo::new(116.0, f64::INFINITY),
+            Err(InputInvalidReason::IllegalCoordinate)
+        );
     }
 
     #[test]
     fn tm_forward_inverse_roundtrip() {
         let tm = TransverseMercator::utm(Ellipsoid::WGS84, 116.0); // zone 50, cm=117
-        for (lon, lat) in [(116.397, 39.909), (113.5, 30.0), (120.0, 45.0), (116.397, 40.221)] {
+        for (lon, lat) in [
+            (116.397, 39.909),
+            (113.5, 30.0),
+            (120.0, 45.0),
+            (116.397, 40.221),
+        ] {
             let (x, y) = tm.forward(lon, lat);
             let (lon2, lat2) = tm.inverse(x, y);
             // Krüger 级数截断误差 mm 级；1e-7 度 ≈ 1.1cm 弧长，满足米级契约
@@ -465,7 +491,15 @@ mod tests {
         let p = Geo::new(116.50, 40.0).unwrap();
         let (e, n) = frame.to_enu(&p);
         let back = frame.from_enu(e, n);
-        assert!((back.lon - p.lon).abs() < 1e-7, "lon drift {}", back.lon - p.lon);
-        assert!((back.lat - p.lat).abs() < 1e-7, "lat drift {}", back.lat - p.lat);
+        assert!(
+            (back.lon - p.lon).abs() < 1e-7,
+            "lon drift {}",
+            back.lon - p.lon
+        );
+        assert!(
+            (back.lat - p.lat).abs() < 1e-7,
+            "lat drift {}",
+            back.lat - p.lat
+        );
     }
 }

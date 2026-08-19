@@ -6,9 +6,13 @@
 //!   北京全有效区 / China 空洞区（NODATA 5x）→ 可达率 + 耗时。
 //! 用法: cargo run --release --example real_data_phase2 -- <gmted.arpack> <china.arpack>
 
-use aircraft_router_planner_cli::costfield::{backtrack_path, build_semantic_cost_field, fmm_propagate};
+use aircraft_router_planner_cli::costfield::{
+    backtrack_path, build_semantic_cost_field, fmm_propagate,
+};
 use aircraft_router_planner_cli::terrain::builtin::BuiltinSource;
-use aircraft_router_planner_cli::terrain::{los_blocked, semantic_degradation_ratios, Sample, TerrainSource};
+use aircraft_router_planner_cli::terrain::{
+    Sample, TerrainSource, los_blocked, semantic_degradation_ratios,
+};
 use rand::{RngExt, SeedableRng};
 use std::hint::black_box;
 use std::time::Instant;
@@ -18,7 +22,13 @@ const N_RAYS: usize = 500;
 const N_SAMPLES: usize = 1000;
 
 /// 低空相对射线集合（北京有效区起点，ground+[500,3000]m，水平方向随机）。
-fn gen_low_rays<T: TerrainSource + ?Sized>(src: &T, lon_c: f64, lat_c: f64, half_deg: f64, seed: u64) -> Vec<([f64; 3], [f64; 3])> {
+fn gen_low_rays<T: TerrainSource + ?Sized>(
+    src: &T,
+    lon_c: f64,
+    lat_c: f64,
+    half_deg: f64,
+    seed: u64,
+) -> Vec<([f64; 3], [f64; 3])> {
     let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
     let mut rays = Vec::with_capacity(N_RAYS);
     let mut attempts = 0u32;
@@ -26,7 +36,9 @@ fn gen_low_rays<T: TerrainSource + ?Sized>(src: &T, lon_c: f64, lat_c: f64, half
         attempts += 1;
         let lon = lon_c + rng.random_range(-half_deg..half_deg);
         let lat = lat_c + rng.random_range(-half_deg..half_deg);
-        let Some(ground) = src.height_at(lon, lat) else { continue };
+        let Some(ground) = src.height_at(lon, lat) else {
+            continue;
+        };
         let oz = ground + rng.random_range(500.0..3_000.0);
         let theta = rng.random_range(0.0..std::f64::consts::TAU);
         rays.push(([lon, lat, oz], [theta.cos(), theta.sin(), 0.0]));
@@ -46,27 +58,40 @@ fn count_blocked<T: TerrainSource + ?Sized>(src: &T, rays: &[([f64; 3], [f64; 3]
 }
 
 /// 区域代价场 + FMM 可达率。
-fn bench_region<T: TerrainSource>(src: &T, label: &str, lon_c: f64, lat_c: f64, half_deg: f64, grid: usize, nodata_mult: f32) {
+fn bench_region<T: TerrainSource>(
+    src: &T,
+    label: &str,
+    lon_c: f64,
+    lat_c: f64,
+    half_deg: f64,
+    grid: usize,
+    nodata_mult: f32,
+) {
     let mut land = 0usize;
     let mut water = 0usize;
     let mut nodata = 0usize;
     let mut oob = 0usize;
     let t0 = Instant::now();
-    let field = build_semantic_cost_field(grid, grid, |r, c| {
-        let u = (c as f64 + 0.5) / grid as f64;
-        let v = (r as f64 + 0.5) / grid as f64;
-        let lon = lon_c - half_deg + 2.0 * half_deg * u;
-        let lat = lat_c - half_deg + 2.0 * half_deg * v;
-        let s = src.sample_at(lon, lat);
-        match s {
-            Sample::Land(_) => land += 1,
-            Sample::Water | Sample::Lake(_) => water += 1,
-            Sample::NoData => nodata += 1,
-            Sample::OutOfBounds => oob += 1,
-            Sample::Forbidden => {} // 地形源不产生硬墙（示例不统计）
-        }
-        s
-    }, nodata_mult);
+    let field = build_semantic_cost_field(
+        grid,
+        grid,
+        |r, c| {
+            let u = (c as f64 + 0.5) / grid as f64;
+            let v = (r as f64 + 0.5) / grid as f64;
+            let lon = lon_c - half_deg + 2.0 * half_deg * u;
+            let lat = lat_c - half_deg + 2.0 * half_deg * v;
+            let s = src.sample_at(lon, lat);
+            match s {
+                Sample::Land(_) => land += 1,
+                Sample::Water | Sample::Lake(_) => water += 1,
+                Sample::NoData => nodata += 1,
+                Sample::OutOfBounds => oob += 1,
+                Sample::Forbidden => {} // 地形源不产生硬墙（示例不统计）
+            }
+            s
+        },
+        nodata_mult,
+    );
     let build_ms = t0.elapsed().as_secs_f64() * 1000.0;
     // 单源 FMM（中心出发）
     let t1 = Instant::now();
@@ -77,7 +102,12 @@ fn bench_region<T: TerrainSource>(src: &T, label: &str, lon_c: f64, lat_c: f64, 
     let t2 = Instant::now();
     let mut bt = 0usize;
     let (sr, sc) = (grid / 2, grid / 2);
-    for &(dr, dc) in &[(0usize, 0usize), (0, grid - 1), (grid - 1, 0), (grid - 1, grid - 1)] {
+    for &(dr, dc) in &[
+        (0usize, 0usize),
+        (0, grid - 1),
+        (grid - 1, 0),
+        (grid - 1, grid - 1),
+    ] {
         if backtrack_path(&field, &res, dr, dc, sr, sc).is_some() {
             bt += 1;
         }
@@ -103,7 +133,11 @@ fn main() {
     // 1) 语义退化统计
     for (src, name) in [(&g as &dyn TerrainSource, "GMTED2010"), (&c, "China")] {
         let (nd, oob) = semantic_degradation_ratios(src, 256);
-        println!("[degrad] {name}: NoData {:.1}% OOB {:.1}%", nd * 100.0, oob * 100.0);
+        println!(
+            "[degrad] {name}: NoData {:.1}% OOB {:.1}%",
+            nd * 100.0,
+            oob * 100.0
+        );
     }
     // 北京 1°x1° 区域（两数据都应全 Land）
     let (nd, _) = semantic_degradation_ratios(&BeijingSrc(&g), 256);
@@ -134,7 +168,15 @@ fn main() {
     bench_region(&c, "Hole@W.Tibet", 80.0, 32.0, 0.5, 256, 5.0);
     // NODATA 5x 敏感性：南海空洞区 1x vs 5x vs INF（禁行）——影响路径可用性
     for mult in [1.0f32, 5.0, f32::INFINITY] {
-        bench_region(&c, &format!("SouthChinaSea mult={mult}"), 113.0, 17.0, 0.5, 256, mult);
+        bench_region(
+            &c,
+            &format!("SouthChinaSea mult={mult}"),
+            113.0,
+            17.0,
+            0.5,
+            256,
+            mult,
+        );
     }
 }
 

@@ -166,7 +166,9 @@ fn parse_header_index(
         )));
     }
     if bytes[0..8] != MAGIC {
-        return Err(AppError::Data("arpack magic mismatch (not an ARPACK1 file)".into()));
+        return Err(AppError::Data(
+            "arpack magic mismatch (not an ARPACK1 file)".into(),
+        ));
     }
     let le = |i: usize| -> u32 {
         u32::from_le_bytes([bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]])
@@ -210,8 +212,15 @@ fn parse_header_index(
     let blocks_x = le(72) as usize;
     let blocks_y = le(76) as usize;
     let no_data = i16::from_le_bytes([bytes[80], bytes[81]]);
-    let source = String::from_utf8_lossy(&bytes[82..256]).trim_end_matches('\0').to_string();
-    if rows == 0 || cols == 0 || blocks_x == 0 || blocks_y == 0 || cell_lon_deg <= 0.0 || cell_lat_deg <= 0.0
+    let source = String::from_utf8_lossy(&bytes[82..256])
+        .trim_end_matches('\0')
+        .to_string();
+    if rows == 0
+        || cols == 0
+        || blocks_x == 0
+        || blocks_y == 0
+        || cell_lon_deg <= 0.0
+        || cell_lat_deg <= 0.0
     {
         return Err(AppError::Data("arpack degenerate header".into()));
     }
@@ -223,7 +232,9 @@ fn parse_header_index(
     let idx_start = HEADER_SIZE + 32;
     let idx_bytes = n_blocks * 12;
     if bytes.len() < idx_start + idx_bytes {
-        return Err(AppError::Data("arpack truncated: block index out of range".into()));
+        return Err(AppError::Data(
+            "arpack truncated: block index out of range".into(),
+        ));
     }
     let mut index = Vec::with_capacity(n_blocks);
     for b in 0..n_blocks {
@@ -240,7 +251,9 @@ fn parse_header_index(
         ]);
         let len = u32::from_le_bytes([bytes[p + 8], bytes[p + 9], bytes[p + 10], bytes[p + 11]]);
         if offset as usize + len as usize > data_end {
-            return Err(AppError::Data("arpack truncated: block data out of range".into()));
+            return Err(AppError::Data(
+                "arpack truncated: block data out of range".into(),
+            ));
         }
         index.push((offset, len));
     }
@@ -282,11 +295,12 @@ impl BuiltinSource {
         // 读头部（含 sha 字段）→ 解析 blocks_x/y → 读块索引区 → 结构校验（O(1)）
         let mut hdr = [0u8; HEADER_SIZE + 32];
         file.read_exact(&mut hdr)?;
-        let le = |i: usize| -> u32 {
-            u32::from_le_bytes([hdr[i], hdr[i + 1], hdr[i + 2], hdr[i + 3]])
-        };
+        let le =
+            |i: usize| -> u32 { u32::from_le_bytes([hdr[i], hdr[i + 1], hdr[i + 2], hdr[i + 3]]) };
         if hdr[0..8] != MAGIC {
-            return Err(AppError::Data("arpack magic mismatch (not an ARPACK1 file)".into()));
+            return Err(AppError::Data(
+                "arpack magic mismatch (not an ARPACK1 file)".into(),
+            ));
         }
         if le(8) != FORMAT_VERSION {
             return Err(AppError::Data(format!(
@@ -296,7 +310,11 @@ impl BuiltinSource {
         }
         let blocks_x = le(72) as usize;
         let blocks_y = le(76) as usize;
-        let idx_bytes = blocks_x.checked_mul(blocks_y).unwrap_or(0).checked_mul(12).unwrap_or(0);
+        let idx_bytes = blocks_x
+            .checked_mul(blocks_y)
+            .unwrap_or(0)
+            .checked_mul(12)
+            .unwrap_or(0);
         let mut hdr_index = vec![0u8; HEADER_SIZE + 32 + idx_bytes];
         hdr_index[..HEADER_SIZE + 32].copy_from_slice(&hdr);
         if idx_bytes > 0 {
@@ -339,7 +357,9 @@ impl BuiltinSource {
         hasher.update(&bytes[idx_start..]);
         let digest = hasher.finalize();
         if digest.as_slice() != &bytes[HEADER_SIZE..HEADER_SIZE + 32] {
-            return Err(AppError::Data("arpack sha256 mismatch (corrupt data)".into()));
+            return Err(AppError::Data(
+                "arpack sha256 mismatch (corrupt data)".into(),
+            ));
         }
 
         Ok(Self {
@@ -376,7 +396,9 @@ impl BuiltinSource {
         }
         let digest = hasher.finalize();
         if digest.as_slice() != self.sha_expected {
-            return Err(AppError::Data("arpack sha256 mismatch (corrupt data)".into()));
+            return Err(AppError::Data(
+                "arpack sha256 mismatch (corrupt data)".into(),
+            ));
         }
         Ok(())
     }
@@ -408,7 +430,10 @@ impl BuiltinSource {
         // 快速路径：缓存命中（锁内仅查表，不解压）
         let v = {
             let cache = lock_cache(&self.cache);
-            cache.map.get(&bidx).map(|b| b[lr * BLOCK_SIZE as usize + lc])
+            cache
+                .map
+                .get(&bidx)
+                .map(|b| b[lr * BLOCK_SIZE as usize + lc])
         };
         if let Some(v) = v {
             return if v == self.no_data { None } else { Some(v) };
@@ -422,11 +447,7 @@ impl BuiltinSource {
         if !cache.map.contains_key(&bidx) {
             cache.insert(bidx, block);
         }
-        if v == self.no_data {
-            None
-        } else {
-            Some(v)
-        }
+        if v == self.no_data { None } else { Some(v) }
     }
 
     /// 加载并还原一个块（raw / zstd）。块数据按需从 store（mmap/内存）读取。
@@ -543,7 +564,13 @@ impl BuiltinSource {
     /// 锁外加载 [r0..=r1]×[c0..=c1]（地形行列）覆盖的全部块。
     /// 优先复用全局缓存（clone），未命中锁外解压并双检插入全局缓存（后续 FMM 阶段仍可用）。
     /// 返回局部块表（与 `cell()` 同数值；配合 `sample_local` 无锁访问）。
-    fn prefetch_rect(&self, r0: usize, r1: usize, c0: usize, c1: usize) -> HashMap<usize, Vec<i16>> {
+    fn prefetch_rect(
+        &self,
+        r0: usize,
+        r1: usize,
+        c0: usize,
+        c1: usize,
+    ) -> HashMap<usize, Vec<i16>> {
         let mut local = HashMap::new();
         if r0 > r1 || c0 > c1 {
             return local;
@@ -567,7 +594,9 @@ impl BuiltinSource {
                     Some(b) => b,
                     None => {
                         // 未命中：锁外解压，双检插入全局（后续 FMM 阶段仍可用）
-                        let Some(b) = self.load_block(bidx) else { continue };
+                        let Some(b) = self.load_block(bidx) else {
+                            continue;
+                        };
                         let mut cache = lock_cache(&self.cache);
                         if !cache.map.contains_key(&bidx) {
                             cache.insert(bidx, b.clone());
@@ -619,11 +648,7 @@ impl BuiltinSource {
         match local.get(&bidx) {
             Some(b) => {
                 let v = b[lr * BLOCK_SIZE as usize + lc];
-                if v == self.no_data {
-                    None
-                } else {
-                    Some(v)
-                }
+                if v == self.no_data { None } else { Some(v) }
             }
             None => self.cell(r, c),
         }
@@ -659,8 +684,16 @@ impl TerrainSource for BuiltinSource {
             self.cell_lon_deg,
             self.cell_lat_deg,
             self.z_resolution_m,
-            if self.vertical_datum == VDATUM_ELLIPSOID { "ellipsoid" } else { "egm96" },
-            if self.resolution_semantics == SEMANTICS_EQUIANGULAR { "equiangular" } else { "equidistant" },
+            if self.vertical_datum == VDATUM_ELLIPSOID {
+                "ellipsoid"
+            } else {
+                "egm96"
+            },
+            if self.resolution_semantics == SEMANTICS_EQUIANGULAR {
+                "equiangular"
+            } else {
+                "equidistant"
+            },
             self.source
         )
     }
@@ -700,7 +733,11 @@ pub fn write_pack_raw(
     put_f64(&mut out, 40, cell_lon_deg);
     put_f64(&mut out, 48, cell_lat_deg);
     put_f64(&mut out, 56, z_resolution_m);
-    out[64] = if vertical_datum_ellipsoid { VDATUM_ELLIPSOID } else { VDATUM_EGM96 };
+    out[64] = if vertical_datum_ellipsoid {
+        VDATUM_ELLIPSOID
+    } else {
+        VDATUM_EGM96
+    };
     out[65] = SEMANTICS_EQUIANGULAR;
     out[66] = COMPRESSION_RAW;
     out[67] = 0;
@@ -807,7 +844,19 @@ mod tests {
         let cols = 200;
         let mut h = vec![500i16; rows * cols];
         h[rows * cols - 1] = -32768; // 空洞
-        let bytes = write_pack_raw(rows, cols, 116.0, 39.0, 0.001, 0.001, 50.0, true, -32768, "test fixture", &h);
+        let bytes = write_pack_raw(
+            rows,
+            cols,
+            116.0,
+            39.0,
+            0.001,
+            0.001,
+            50.0,
+            true,
+            -32768,
+            "test fixture",
+            &h,
+        );
         (bytes, h)
     }
 
@@ -905,7 +954,11 @@ mod tests {
                 for c in 0..s.cols {
                     let lon = s.origin_lon + c as f64 * s.cell_lon_deg + s.cell_lon_deg / 2.0;
                     let lat = s.origin_lat + r as f64 * s.cell_lat_deg + s.cell_lat_deg / 2.0;
-                    assert_eq!(s.sample(lon, lat), p.sample(lon, lat), "mismatch r={r} c={c}");
+                    assert_eq!(
+                        s.sample(lon, lat),
+                        p.sample(lon, lat),
+                        "mismatch r={r} c={c}"
+                    );
                 }
             }
             // 越界 / 空洞语义一致

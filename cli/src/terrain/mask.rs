@@ -14,8 +14,8 @@
 //! - 1 = 陆地（含南极内陆补全：-85.15°S 以南 + 东南极 -75..-85.15°S 0..160°E）
 //! - 2 = 内陆湖（湖面高程由 DEM 提供，一般高于海平面）
 
-use crate::error::AppError;
 use super::{BulkPrefetch, GeoBounds, Sample, TerrainSource};
+use crate::error::AppError;
 
 /// 掩膜类别。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,7 +92,9 @@ impl GeoMask {
         let idx_bytes = (rows + 1) * 8;
         let need = HEADER_SIZE + idx_bytes;
         if bytes.len() < need {
-            return Err(AppError::Data("mask truncated: row index out of range".into()));
+            return Err(AppError::Data(
+                "mask truncated: row index out of range".into(),
+            ));
         }
         // 行索引表（绝对偏移，应单调不减）
         let mut row_offsets = Vec::with_capacity(rows + 1);
@@ -116,7 +118,9 @@ impl GeoMask {
             prev = off;
         }
         if row_offsets[rows] > bytes.len() as u64 {
-            return Err(AppError::Data("mask truncated: row data out of range".into()));
+            return Err(AppError::Data(
+                "mask truncated: row data out of range".into(),
+            ));
         }
         let data = bytes[need..].to_vec();
         Ok(Self {
@@ -145,7 +149,10 @@ impl GeoMask {
         self.cols
     }
     pub fn resolution_desc(&self) -> String {
-        format!("gshhg mask {}as {}x{} cell {:.6}deg", self.arcsec, self.rows, self.cols, self.res_deg)
+        format!(
+            "gshhg mask {}as {}x{} cell {:.6}deg",
+            self.arcsec, self.rows, self.cols, self.res_deg
+        )
     }
 
     /// 查询类别（经纬度，度；lon ∈ [-180, 180]）。
@@ -191,8 +198,18 @@ impl GeoMask {
                 break;
             }
             let cls = self.data[p];
-            let c0 = u32::from_be_bytes([self.data[p + 1], self.data[p + 2], self.data[p + 3], self.data[p + 4]]);
-            let c1 = u32::from_be_bytes([self.data[p + 5], self.data[p + 6], self.data[p + 7], self.data[p + 8]]);
+            let c0 = u32::from_be_bytes([
+                self.data[p + 1],
+                self.data[p + 2],
+                self.data[p + 3],
+                self.data[p + 4],
+            ]);
+            let c1 = u32::from_be_bytes([
+                self.data[p + 5],
+                self.data[p + 6],
+                self.data[p + 7],
+                self.data[p + 8],
+            ]);
             if (c0 as usize) <= c && c < c1 as usize {
                 return match cls {
                     1 => MaskClass::Land,
@@ -233,15 +250,30 @@ impl GeoMask {
             if s + 4 > e || e > self.data.len() {
                 continue;
             }
-            let nseg = u32::from_be_bytes([self.data[s], self.data[s + 1], self.data[s + 2], self.data[s + 3]]);
+            let nseg = u32::from_be_bytes([
+                self.data[s],
+                self.data[s + 1],
+                self.data[s + 2],
+                self.data[s + 3],
+            ]);
             let mut p = s + 4;
             for _ in 0..nseg {
                 if p + 9 > e {
                     break;
                 }
                 let cls = self.data[p];
-                let c0 = u32::from_be_bytes([self.data[p + 1], self.data[p + 2], self.data[p + 3], self.data[p + 4]]);
-                let c1 = u32::from_be_bytes([self.data[p + 5], self.data[p + 6], self.data[p + 7], self.data[p + 8]]);
+                let c0 = u32::from_be_bytes([
+                    self.data[p + 1],
+                    self.data[p + 2],
+                    self.data[p + 3],
+                    self.data[p + 4],
+                ]);
+                let c1 = u32::from_be_bytes([
+                    self.data[p + 5],
+                    self.data[p + 6],
+                    self.data[p + 7],
+                    self.data[p + 8],
+                ]);
                 let n = (c1 - c0) as u64;
                 if cls == 1 {
                     land += n;
@@ -321,7 +353,8 @@ impl<T: BulkPrefetch> BulkPrefetch for MaskedSource<T> {
         max_lon: f64,
         max_lat: f64,
     ) -> std::collections::HashMap<usize, Vec<i16>> {
-        self.inner.prefetch_lonlat(min_lon, min_lat, max_lon, max_lat)
+        self.inner
+            .prefetch_lonlat(min_lon, min_lat, max_lon, max_lat)
     }
 
     fn sample_local(
@@ -362,8 +395,8 @@ mod tests {
         // 行索引：段区自 64 + 3*8 = 88
         let seg_base = 88u64;
         let rows_off = [
-            seg_base,            // 行 0 起点
-            seg_base + 4 + 9,    // 行 1 起点（行 0 = nseg 4B + 1 段 9B）
+            seg_base,                 // 行 0 起点
+            seg_base + 4 + 9,         // 行 1 起点（行 0 = nseg 4B + 1 段 9B）
             seg_base + 4 + 9 + 4 + 9, // 行 2（结束）
         ];
         for o in rows_off {

@@ -15,13 +15,13 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
-use axum::Json;
+use axum::body::Body;
 use axum::extract::Query;
 use axum::http::header;
 use axum::response::Response;
-use axum::body::Body;
-use base64::Engine;
+use axum::Json;
 use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine;
 use serde::Deserialize;
 use serde_json::Value;
 use tiff::decoder::{Decoder, DecodingResult};
@@ -137,13 +137,8 @@ fn mask_basemap(req: &BasemapReq, nx: usize, ny: usize) -> Value {
         Err(e) => return serde_json::json!({ "error": format!("open mask: {e}") }),
     };
     // 掩膜为全球 7.5as（GSHHG）；bbox 缺省 → 全球范围
-    let [min_lon, min_lat, max_lon, max_lat] = req
-        .bbox
-        .unwrap_or([-180.0, -90.0, 180.0, 90.0]);
-    if !(min_lon.is_finite()
-        && min_lat.is_finite()
-        && max_lon.is_finite()
-        && max_lat.is_finite())
+    let [min_lon, min_lat, max_lon, max_lat] = req.bbox.unwrap_or([-180.0, -90.0, 180.0, 90.0]);
+    if !(min_lon.is_finite() && min_lat.is_finite() && max_lon.is_finite() && max_lat.is_finite())
         || min_lon >= max_lon
         || min_lat >= max_lat
     {
@@ -240,8 +235,12 @@ fn geokey_projection(dec: &mut Decoder<BufReader<File>>) -> Result<Option<Projec
         if base + 3 >= shorts.len() {
             break;
         }
-        let (key_id, loc, count, val) =
-            (shorts[base], shorts[base + 1], shorts[base + 2], shorts[base + 3]);
+        let (key_id, loc, count, val) = (
+            shorts[base],
+            shorts[base + 1],
+            shorts[base + 2],
+            shorts[base + 3],
+        );
         if loc != 0 || count != 1 {
             continue;
         }
@@ -311,8 +310,7 @@ fn read_main_meta(path: &Path, fallback: Option<Projection>) -> Result<TiffMeta,
                     Projection::P4326
                 } else {
                     return Err(
-                        "GeoTIFF 投影未知（无 GeoKey 或非 4326/3857），请在前端显式指定投影"
-                            .into(),
+                        "GeoTIFF 投影未知（无 GeoKey 或非 4326/3857），请在前端显式指定投影".into(),
                     );
                 }
             }
@@ -416,10 +414,9 @@ fn decode_current_rgba(dec: &mut Decoder<BufReader<File>>) -> Result<Vec<u8>, St
     let result = dec.read_image().map_err(|e| format!("tiff decode: {e}"))?;
     let to8 = |v: u16| (v >> 8) as u8;
     let out: Vec<u8> = match (ct, result) {
-        (ColorType::Gray(8), DecodingResult::U8(v)) => v
-            .iter()
-            .flat_map(|x| [*x, *x, *x, 255])
-            .collect(),
+        (ColorType::Gray(8), DecodingResult::U8(v)) => {
+            v.iter().flat_map(|x| [*x, *x, *x, 255]).collect()
+        }
         (ColorType::Gray(16), DecodingResult::U16(v)) => v
             .iter()
             .flat_map(|x| {
@@ -478,9 +475,7 @@ fn read_ovr_best(
         let rgba = decode_current_rgba(&mut dec)?;
         // 分层选择：IFD0 是 .ovr 最大层（先遍历），else-if 保证同一层只进一个分支——
         // 语义等价于「≥target 取最小」+「全 <target 取最大」（最大层恒先见）。
-        if pixels >= target_pixels
-            && (best_ge.is_none() || pixels < best_ge.as_ref().unwrap().0)
-        {
+        if pixels >= target_pixels && (best_ge.is_none() || pixels < best_ge.as_ref().unwrap().0) {
             best_ge = Some((pixels, w, h, rgba));
         } else if best_max.is_none() || pixels > best_max.as_ref().unwrap().0 {
             best_max = Some((pixels, w, h, rgba));
@@ -546,7 +541,11 @@ fn tiff_basemap(req: &BasemapReq, nx: usize, ny: usize) -> Value {
         "[tiff] path={:?} len={} first_chars={:?}",
         req.path,
         req.path.len(),
-        req.path.chars().take(8).map(|c| c as u32).collect::<Vec<_>>()
+        req.path
+            .chars()
+            .take(8)
+            .map(|c| c as u32)
+            .collect::<Vec<_>>()
     );
     let key = match crate::resolve_terrain_path(&req.path) {
         Ok(p) => p,
@@ -589,10 +588,7 @@ fn tiff_basemap(req: &BasemapReq, nx: usize, ny: usize) -> Value {
             }
         }
     };
-    if !(min_lon.is_finite()
-        && min_lat.is_finite()
-        && max_lon.is_finite()
-        && max_lat.is_finite())
+    if !(min_lon.is_finite() && min_lat.is_finite() && max_lon.is_finite() && max_lat.is_finite())
         || min_lon >= max_lon
         || min_lat >= max_lat
     {
@@ -908,7 +904,13 @@ pub async fn wms_proxy(Query(q): Query<WmsReq>) -> Response {
             match resp.bytes().await {
                 Ok(bytes) => {
                     if !status.is_success() {
-                        return json_error(&format!("GeoServer HTTP {status}: {}", String::from_utf8_lossy(&bytes).chars().take(300).collect::<String>()));
+                        return json_error(&format!(
+                            "GeoServer HTTP {status}: {}",
+                            String::from_utf8_lossy(&bytes)
+                                .chars()
+                                .take(300)
+                                .collect::<String>()
+                        ));
                     }
                     Response::builder()
                         .status(status)

@@ -91,7 +91,9 @@ impl Path {
         let p = self.points.get(idx)?;
         let a = self.points.get(a_idx)?;
         let b = self.points.get(b_idx)?;
-        Some(point_seg_distance_m(p.lon, p.lat, a.lon, a.lat, b.lon, b.lat))
+        Some(point_seg_distance_m(
+            p.lon, p.lat, a.lon, a.lat, b.lon, b.lat,
+        ))
     }
 }
 
@@ -116,11 +118,7 @@ pub fn bearing_deg(lon1: f64, lat1: f64, lon2: f64, lat2: f64) -> f64 {
     let y = (l2 - l1).sin() * p2.cos();
     let x = p1.cos() * p2.sin() - p1.sin() * p2.cos() * (l2 - l1).cos();
     let deg = y.atan2(x).to_degrees();
-    if deg < 0.0 {
-        deg + 360.0
-    } else {
-        deg
-    }
+    if deg < 0.0 { deg + 360.0 } else { deg }
 }
 
 /// 点到线段距离（米；等距平面近似：经度按 cos(lat) 缩放）。
@@ -172,7 +170,10 @@ mod tests {
         assert!((b - 90.0).abs() < 0.01, "b={b}");
         // 北向 = 0
         let b2 = bearing_deg(0.0, 0.0, 0.0, 1.0);
-        assert!((b2 - 0.0).abs() < 0.01 || (b2 - 360.0).abs() < 0.01, "b2={b2}");
+        assert!(
+            (b2 - 0.0).abs() < 0.01 || (b2 - 360.0).abs() < 0.01,
+            "b2={b2}"
+        );
     }
 
     #[test]

@@ -31,7 +31,10 @@ const INPUT_ZONE_NO_TERRAIN: &str = r#"{
 
 /// 逐字节门禁：JSON 输出除运行时时间戳（elapsed_ms / stats.fmm_ms 天然受缓存
 /// 热影响）外必须完全一致。时间字段清零后比较（其余字段仍要求字节级相等）。
-fn assert_identical(out1: &aircraft_router_planner_cli::config::Output, out2: &aircraft_router_planner_cli::config::Output) {
+fn assert_identical(
+    out1: &aircraft_router_planner_cli::config::Output,
+    out2: &aircraft_router_planner_cli::config::Output,
+) {
     let j1 = serde_json::to_string_pretty(out1).unwrap();
     let j2 = serde_json::to_string_pretty(out2).unwrap();
     let mut v1: serde_json::Value = serde_json::from_str(&j1).unwrap();
@@ -40,7 +43,10 @@ fn assert_identical(out1: &aircraft_router_planner_cli::config::Output, out2: &a
     v2["elapsed_ms"] = 0.into();
     v1["stats"]["fmm_ms"] = 0.into();
     v2["stats"]["fmm_ms"] = 0.into();
-    assert_eq!(v1, v2, "determinism gate: double run must be identical (except timestamps)");
+    assert_eq!(
+        v1, v2,
+        "determinism gate: double run must be identical (except timestamps)"
+    );
 }
 
 #[test]

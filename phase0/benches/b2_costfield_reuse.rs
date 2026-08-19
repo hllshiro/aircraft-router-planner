@@ -6,7 +6,7 @@
 //!
 //! 产出：摊薄系数（独立总耗时 / 共享总耗时）、内存对比 → 落多机契约。
 
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 use phase0::fmm::{self, CostField};
 use rand::{RngExt, SeedableRng};
 use std::hint::black_box;

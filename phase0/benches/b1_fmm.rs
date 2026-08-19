@@ -5,7 +5,7 @@
 //! - 100 组随机起止（128²）：每次迭代跑 100 个随机源传播（统计样本）；
 //! - 走廊质量统计（一次性，100 组随机起止）：可达率 / 平均路径步数 / 绕行比。
 
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 use phase0::fmm::{self, CostField};
 use rand::{RngExt, SeedableRng};
 use std::hint::black_box;
@@ -50,7 +50,10 @@ fn corridor_quality_stats(grid: usize) {
             worst_ratio = worst_ratio.max(ratio);
         }
     }
-    println!("\n[corridor-quality] grid={} 100 random start->dst pairs", grid);
+    println!(
+        "\n[corridor-quality] grid={} 100 random start->dst pairs",
+        grid
+    );
     println!("  reachable: {}/100", reachable);
     println!("  avg path steps: {:.1}", total_steps / reachable as f64);
     println!("  avg detour ratio: {:.3}", total_ratio / reachable as f64);
@@ -77,7 +80,9 @@ fn criterion_benchmark(c: &mut Criterion) {
                 let mut acc = 0u64;
                 for &(sr, sc) in &sources {
                     let res = fmm::fmm_propagate(black_box(&field), sr, sc);
-                    acc = acc.wrapping_add(res.times[field.idx((sr + 1) % grid, (sc + 1) % grid)] as u64);
+                    acc = acc.wrapping_add(
+                        res.times[field.idx((sr + 1) % grid, (sc + 1) % grid)] as u64,
+                    );
                 }
                 black_box(acc)
             })

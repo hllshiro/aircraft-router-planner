@@ -5,7 +5,7 @@
 //! - LOD 对比：2x（305.7m）/ 4x（611.5m）网格 → 单射线耗时 + 遮挡判定一致性；
 //! - 产出：单射线耗时、LOD/降采样策略取舍依据。
 
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 use phase0::terrain::{self, Terrain};
 use rand::{RngExt, SeedableRng};
 use std::hint::black_box;
@@ -31,9 +31,7 @@ fn gen_rays(seed: u64) -> Vec<([f64; 3], [f64; 3])> {
 
 fn count_blocked(t: &Terrain, rays: &[([f64; 3], [f64; 3])]) -> usize {
     rays.iter()
-        .filter(|(o, d)| {
-            t.ray_blocked(o[0], o[1], o[2], d[0], d[1], d[2], RAY_LEN_M, N_SAMPLES)
-        })
+        .filter(|(o, d)| t.ray_blocked(o[0], o[1], o[2], d[0], d[1], d[2], RAY_LEN_M, N_SAMPLES))
         .count()
 }
 
@@ -61,13 +59,7 @@ fn criterion_benchmark(c: &mut Criterion) {
 
     println!(
         "\n[terrain] full {}x{} @{:.2}m ; 2x {}x{} ; 4x {}x{}",
-        t_full.rows,
-        t_full.cols,
-        cell_full,
-        t_2x.rows,
-        t_2x.cols,
-        t_4x.rows,
-        t_4x.cols
+        t_full.rows, t_full.cols, cell_full, t_2x.rows, t_2x.cols, t_4x.rows, t_4x.cols
     );
 
     c.bench_function("b4_ray_terrain/1000_rays_full_res_1000samples", |b| {
@@ -98,8 +90,14 @@ fn criterion_benchmark(c: &mut Criterion) {
                 == t_4x.ray_blocked(o[0], o[1], o[2], d[0], d[1], d[2], RAY_LEN_M, N_SAMPLES)
         })
         .count();
-    println!("\n[LOS consistency] full blocked={} ; lod2x blocked={} agree={:.1}% ; lod4x blocked={} agree={:.1}%",
-        full, lod2, 100.0 * agree2 as f64 / N_RAYS as f64, lod4, 100.0 * agree4 as f64 / N_RAYS as f64);
+    println!(
+        "\n[LOS consistency] full blocked={} ; lod2x blocked={} agree={:.1}% ; lod4x blocked={} agree={:.1}%",
+        full,
+        lod2,
+        100.0 * agree2 as f64 / N_RAYS as f64,
+        lod4,
+        100.0 * agree4 as f64 / N_RAYS as f64
+    );
 }
 
 criterion_group!(benches, criterion_benchmark);

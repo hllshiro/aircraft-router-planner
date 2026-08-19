@@ -14,9 +14,11 @@
 use std::path::Path;
 use std::time::Instant;
 
-use aircraft_router_planner_cli::costfield::{build_semantic_cost_field, build_semantic_cost_field_par, CostField};
-use aircraft_router_planner_cli::terrain::builtin::{write_pack_raw, BuiltinSource};
-use aircraft_router_planner_cli::terrain::mask::{GeoMask, MaskedSource, MAGIC as MASK_MAGIC};
+use aircraft_router_planner_cli::costfield::{
+    CostField, build_semantic_cost_field, build_semantic_cost_field_par,
+};
+use aircraft_router_planner_cli::terrain::builtin::{BuiltinSource, write_pack_raw};
+use aircraft_router_planner_cli::terrain::mask::{GeoMask, MAGIC as MASK_MAGIC, MaskedSource};
 use aircraft_router_planner_cli::terrain::{BulkPrefetch, Sample, TerrainSource};
 
 /// zigzag11 区域（同 solver::region_of：start/target 包围盒 + 0.15° 缓冲，方形 span）。
@@ -27,7 +29,8 @@ fn zigzag11_region() -> (f64, f64, f64) {
     let target_lat: f64 = 43.82628474871892;
     let min_lon = start_lon.min(target_lon) - 0.15;
     let min_lat = start_lat.min(target_lat) - 0.15;
-    let span = (start_lon.max(target_lon) - min_lon).max(start_lat.max(target_lat) - min_lat) + 0.15;
+    let span =
+        (start_lon.max(target_lon) - min_lon).max(start_lat.max(target_lat) - min_lat) + 0.15;
     (min_lon, min_lat, span)
 }
 
@@ -224,14 +227,20 @@ fn all_land_mask() -> GeoMask {
 fn build_serial<F: Fn(usize, usize) -> Sample>(s: &F, grid: usize) -> CostField {
     let t = Instant::now();
     let f = build_semantic_cost_field(grid, grid, s, 5.0);
-    eprintln!("[compare] serial {grid}x{grid}: {:.1}ms", t.elapsed().as_secs_f64() * 1000.0);
+    eprintln!(
+        "[compare] serial {grid}x{grid}: {:.1}ms",
+        t.elapsed().as_secs_f64() * 1000.0
+    );
     f
 }
 
 fn build_parallel<F: Fn(usize, usize) -> Sample + Sync + Send>(s: &F, grid: usize) -> CostField {
     let t = Instant::now();
     let f = build_semantic_cost_field_par(grid, grid, s, 5.0);
-    eprintln!("[compare] parallel {grid}x{grid}: {:.1}ms", t.elapsed().as_secs_f64() * 1000.0);
+    eprintln!(
+        "[compare] parallel {grid}x{grid}: {:.1}ms",
+        t.elapsed().as_secs_f64() * 1000.0
+    );
     f
 }
 
@@ -301,7 +310,10 @@ fn field_build_bit_exact_synthetic() {
             "masked local mismatch at idx {i}"
         );
     }
-    eprintln!("[compare] OK: MaskedSource sample_at == sample_local ({})", serial.cost.len());
+    eprintln!(
+        "[compare] OK: MaskedSource sample_at == sample_local ({})",
+        serial.cost.len()
+    );
 }
 
 #[test]
@@ -320,7 +332,9 @@ fn field_build_real_data() {
     // 每轮交替 A/B 各用新解析实例（cache 空），取各自 min——消除预热/顺序偏差。
     let (min_lon, min_lat, span) = zigzag11_region();
     let bytes = std::fs::read(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("data/east_asia_7p5as.arpack"),
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("data/east_asia_7p5as.arpack"),
     )
     .expect("re-read real arpack");
     let mut s_best = f64::INFINITY;

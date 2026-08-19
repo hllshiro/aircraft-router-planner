@@ -52,7 +52,7 @@ impl SrtmSource {
             n => {
                 return Err(AppError::Data(format!(
                     "unexpected .hgt size {n} bytes (expect 1201² or 3601² samples)"
-                )))
+                )));
             }
         };
         // 大端 i16 解码
@@ -113,8 +113,12 @@ fn parse_hgt_filename(fname: &str) -> Result<(f64, f64), AppError> {
     if !matches!(ns, 'N' | 'n' | 'S' | 's') || !matches!(we, 'E' | 'e' | 'W' | 'w') {
         return Err(AppError::Data(format!("bad .hgt name: {fname}")));
     }
-    let lat: f64 = stem[1..3].parse().map_err(|_| AppError::Data(format!("bad .hgt name: {fname}")))?;
-    let lon: f64 = stem[4..7].parse().map_err(|_| AppError::Data(format!("bad .hgt name: {fname}")))?;
+    let lat: f64 = stem[1..3]
+        .parse()
+        .map_err(|_| AppError::Data(format!("bad .hgt name: {fname}")))?;
+    let lon: f64 = stem[4..7]
+        .parse()
+        .map_err(|_| AppError::Data(format!("bad .hgt name: {fname}")))?;
     let lat0 = if matches!(ns, 'N' | 'n') { lat } else { -lat };
     let lon0 = if matches!(we, 'E' | 'e') { lon } else { -lon };
     Ok((lat0, lon0))
@@ -145,9 +149,13 @@ pub fn open_dir(dir: &Path) -> Result<TileDirSource, AppError> {
             Some(f) => f.to_string(),
             None => continue,
         };
-        let Ok((lat0, lon0)) = parse_hgt_filename(&fname) else { continue };
+        let Ok((lat0, lon0)) = parse_hgt_filename(&fname) else {
+            continue;
+        };
         // 尺寸 → 网格边长 → cell（与 SrtmSource::open 同一判定）
-        let Ok(len) = std::fs::metadata(&p).map(|m| m.len()) else { continue };
+        let Ok(len) = std::fs::metadata(&p).map(|m| m.len()) else {
+            continue;
+        };
         let size = match len {
             2_884_802 => 1201,
             25_934_402 => 3601,
@@ -201,7 +209,11 @@ mod tests {
         let mut f = std::fs::File::create(path)?;
         let mut buf = Vec::with_capacity(1201 * 1201 * 2);
         for i in 0..1201 * 1201 {
-            let v = if i == 1201 * 600 + 600 { -32768i16 } else { 500i16 };
+            let v = if i == 1201 * 600 + 600 {
+                -32768i16
+            } else {
+                500i16
+            };
             buf.extend_from_slice(&v.to_be_bytes());
         }
         f.write_all(&buf)

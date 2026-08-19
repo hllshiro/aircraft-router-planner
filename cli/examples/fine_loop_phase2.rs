@@ -8,12 +8,14 @@
 //! 用法: cargo run --release --example fine_loop_phase2 -- <gmted.arpack> <china.arpack>
 
 use aircraft_router_planner_cli::config::DefaultParams;
-use aircraft_router_planner_cli::costfield::{backtrack_path, build_semantic_cost_field, fmm_propagate};
+use aircraft_router_planner_cli::costfield::{
+    backtrack_path, build_semantic_cost_field, fmm_propagate,
+};
 use aircraft_router_planner_cli::smooth::{
-    default_chain, smooth_path_chain, SmoothOptions, VerifyContext,
+    SmoothOptions, VerifyContext, default_chain, smooth_path_chain,
 };
 use aircraft_router_planner_cli::terrain::builtin::BuiltinSource;
-use aircraft_router_planner_cli::terrain::{los_blocked, Sample, TerrainSource};
+use aircraft_router_planner_cli::terrain::{Sample, TerrainSource, los_blocked};
 use rand::{RngExt, SeedableRng};
 use sha2::{Digest, Sha256};
 use std::hint::black_box;
@@ -24,19 +26,31 @@ const N_TRIALS: usize = 100;
 
 /// 北京区 256² 语义代价场（Land/NoData；NODATA 5x）。
 fn beijing_field<T: TerrainSource>(src: &T) -> aircraft_router_planner_cli::costfield::CostField {
-    build_semantic_cost_field(GRID, GRID, |r, c| {
-        let lon = 115.9 + (c as f64 + 0.5) / GRID as f64 * 1.0;
-        let lat = 39.4 + (r as f64 + 0.5) / GRID as f64 * 1.0;
-        src.sample_at(lon, lat)
-    }, 5.0)
+    build_semantic_cost_field(
+        GRID,
+        GRID,
+        |r, c| {
+            let lon = 115.9 + (c as f64 + 0.5) / GRID as f64 * 1.0;
+            let lat = 39.4 + (r as f64 + 0.5) / GRID as f64 * 1.0;
+            src.sample_at(lon, lat)
+        },
+        5.0,
+    )
 }
 
 fn lonlat_of(r: usize, c: usize) -> (f64, f64) {
-    (115.9 + (c as f64 + 0.5) / GRID as f64 * 1.0, 39.4 + (r as f64 + 0.5) / GRID as f64 * 1.0)
+    (
+        115.9 + (c as f64 + 0.5) / GRID as f64 * 1.0,
+        39.4 + (r as f64 + 0.5) / GRID as f64 * 1.0,
+    )
 }
 
 /// 随机 Land 起止对（种子固定，可复现）。
-fn gen_pairs<T: TerrainSource>(src: &T, n: usize, seed: u64) -> Vec<((usize, usize), (usize, usize))> {
+fn gen_pairs<T: TerrainSource>(
+    src: &T,
+    n: usize,
+    seed: u64,
+) -> Vec<((usize, usize), (usize, usize))> {
     let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
     let mut out = Vec::new();
     let mut guard = 0u32;
@@ -57,7 +71,13 @@ fn gen_pairs<T: TerrainSource>(src: &T, n: usize, seed: u64) -> Vec<((usize, usi
 }
 
 /// 粗层回溯路径 → Path（经纬度 + 固定飞行高度）。
-fn coarse_path(field: &aircraft_router_planner_cli::costfield::CostField, res: &aircraft_router_planner_cli::costfield::FmmResult, src: (usize, usize), dst: (usize, usize), alt: f64) -> Option<aircraft_router_planner_cli::path::Path> {
+fn coarse_path(
+    field: &aircraft_router_planner_cli::costfield::CostField,
+    res: &aircraft_router_planner_cli::costfield::FmmResult,
+    src: (usize, usize),
+    dst: (usize, usize),
+    alt: f64,
+) -> Option<aircraft_router_planner_cli::path::Path> {
     let pts = backtrack_path(field, res, dst.0, dst.1, src.0, src.1)?;
     Some(aircraft_router_planner_cli::path::Path::new(
         pts.iter()
@@ -82,7 +102,9 @@ fn main() {
     }
     // 契约校验：默认 turn_radius 5000m 自洽到 v_max ≈ sqrt(5000*g*tan30) ≈ 168 m/s
     let v_max = (5000.0f64 * 9.80665 * 30f64.to_radians().tan()).sqrt();
-    println!("[A6] 默认 turn_radius 5000m 自洽 v_max ≈ {v_max:.0} m/s（超过需配置更大 min_turn_radius）");
+    println!(
+        "[A6] 默认 turn_radius 5000m 自洽 v_max ≈ {v_max:.0} m/s（超过需配置更大 min_turn_radius）"
+    );
     assert!(v_max > 150.0 && v_max < 200.0, "v_max 应在典型速度区间内");
 
     // ============ 2) 细层闭环：100 组随机起止（含确定性路径哈希） ============
@@ -101,7 +123,13 @@ fn main() {
         };
         let opts = SmoothOptions::default();
         let check = |_: f64, _: f64, _: f64, _: f64, _: f64, _: f64| true; // 无地形/禁飞限制的纯几何链
-        let ctx = VerifyContext { terrain: None, nofly: None, zones: None, threat: None, zone_inflation_m: 0.0 };
+        let ctx = VerifyContext {
+            terrain: None,
+            nofly: None,
+            zones: None,
+            threat: None,
+            zone_inflation_m: 0.0,
+        };
         let chain = default_chain(&opts, &check, None, 95.0);
         let result = smooth_path_chain(&p, &chain, &opts, &ctx, None);
         if result.path.len() >= 2 {
@@ -126,11 +154,16 @@ fn main() {
 
     // ============ 3) FNR/FPR（真实数据：粗 256² vs 细 1024²，真值=细） ============
     let fine_src = &c;
-    let fine = build_semantic_cost_field(1024, 1024, |r, c| {
-        let lon = 115.9 + (c as f64 + 0.5) / 1024.0 * 1.0;
-        let lat = 39.4 + (r as f64 + 0.5) / 1024.0 * 1.0;
-        fine_src.sample_at(lon, lat)
-    }, 5.0);
+    let fine = build_semantic_cost_field(
+        1024,
+        1024,
+        |r, c| {
+            let lon = 115.9 + (c as f64 + 0.5) / 1024.0 * 1.0;
+            let lat = 39.4 + (r as f64 + 0.5) / 1024.0 * 1.0;
+            fine_src.sample_at(lon, lat)
+        },
+        5.0,
+    );
     let mut both = 0usize;
     let mut coarse_only = 0usize; // FNR 分子：粗可达 & 细不可达
     let mut fine_only = 0usize; // FPR 分子：粗不可达 & 细可达
@@ -153,12 +186,37 @@ fn main() {
     let coarse_negative = fine_only + none; // 粗层不可达总数
     println!(
         "[FNR/FPR] both {both} coarse-only {coarse_only} fine-only {fine_only} none {none} | FNR {:.1}% ({coarse_only}/{fine_positive}) FPR {:.1}% ({fine_only}/{coarse_negative})",
-        if fine_positive > 0 { 100.0 * coarse_only as f64 / fine_positive as f64 } else { f64::NAN },
-        if coarse_negative > 0 { 100.0 * fine_only as f64 / coarse_negative as f64 } else { f64::NAN }
+        if fine_positive > 0 {
+            100.0 * coarse_only as f64 / fine_positive as f64
+        } else {
+            f64::NAN
+        },
+        if coarse_negative > 0 {
+            100.0 * fine_only as f64 / coarse_negative as f64
+        } else {
+            f64::NAN
+        }
     );
 
     // ============ 4) 多机线性预算：一次 FMM 多目标回溯 vs 每机独立 FMM ============
-    let centers = [(128usize, 128usize), (96, 160), (160, 96), (96, 96), (160, 160), (64, 128), (128, 64), (192, 128), (128, 192), (64, 64), (192, 192), (64, 192), (192, 64), (32, 128), (128, 32), (224, 128)];
+    let centers = [
+        (128usize, 128usize),
+        (96, 160),
+        (160, 96),
+        (96, 96),
+        (160, 160),
+        (64, 128),
+        (128, 64),
+        (192, 128),
+        (128, 192),
+        (64, 64),
+        (192, 192),
+        (64, 192),
+        (192, 64),
+        (32, 128),
+        (128, 32),
+        (224, 128),
+    ];
     for n in [1usize, 4, 8, 16] {
         let t0 = Instant::now();
         let res = fmm_propagate(&field, centers[0].0, centers[0].1);
@@ -194,7 +252,9 @@ fn main() {
         attempts += 1;
         let lon = m_lon + rng.random_range(-0.5..0.5);
         let lat = m_lat + rng.random_range(-0.5..0.5);
-        let Some(ground) = c.height_at(lon, lat) else { continue };
+        let Some(ground) = c.height_at(lon, lat) else {
+            continue;
+        };
         let oz = ground + rng.random_range(500.0..3_000.0);
         let theta = rng.random_range(0.0..std::f64::consts::TAU);
         rays.push(([lon, lat, oz], [theta.cos(), theta.sin(), 0.0]));
@@ -212,16 +272,26 @@ fn main() {
     );
     // 5b) 山地 FNR/FPR（粗 256² vs 细 1024²，真值=细）——遮蔽地形下粗层漏检
     let m_src = &c;
-    let mfield = build_semantic_cost_field(GRID, GRID, |r, cc| {
-        let lon = m_lon - 0.5 + (cc as f64 + 0.5) / GRID as f64 * 1.0;
-        let lat = m_lat - 0.5 + (r as f64 + 0.5) / GRID as f64 * 1.0;
-        m_src.sample_at(lon, lat)
-    }, 5.0);
-    let mfine = build_semantic_cost_field(1024, 1024, |r, cc| {
-        let lon = m_lon - 0.5 + (cc as f64 + 0.5) / 1024.0 * 1.0;
-        let lat = m_lat - 0.5 + (r as f64 + 0.5) / 1024.0 * 1.0;
-        m_src.sample_at(lon, lat)
-    }, 5.0);
+    let mfield = build_semantic_cost_field(
+        GRID,
+        GRID,
+        |r, cc| {
+            let lon = m_lon - 0.5 + (cc as f64 + 0.5) / GRID as f64 * 1.0;
+            let lat = m_lat - 0.5 + (r as f64 + 0.5) / GRID as f64 * 1.0;
+            m_src.sample_at(lon, lat)
+        },
+        5.0,
+    );
+    let mfine = build_semantic_cost_field(
+        1024,
+        1024,
+        |r, cc| {
+            let lon = m_lon - 0.5 + (cc as f64 + 0.5) / 1024.0 * 1.0;
+            let lat = m_lat - 0.5 + (r as f64 + 0.5) / 1024.0 * 1.0;
+            m_src.sample_at(lon, lat)
+        },
+        5.0,
+    );
     let mut mboth = 0usize;
     let mut mcoarse_only = 0usize;
     let mut mfine_only = 0usize;
@@ -251,8 +321,16 @@ fn main() {
     let m_coarse_neg = mfine_only + mnone;
     println!(
         "[A7-mt] Sichuan FNR/FPR: both {mboth} coarse-only {mcoarse_only} fine-only {mfine_only} none {mnone} | FNR {:.1}% ({mcoarse_only}/{m_fine_pos}) FPR {:.1}% ({mfine_only}/{m_coarse_neg})",
-        if m_fine_pos > 0 { 100.0 * mcoarse_only as f64 / m_fine_pos as f64 } else { f64::NAN },
-        if m_coarse_neg > 0 { 100.0 * mfine_only as f64 / m_coarse_neg as f64 } else { f64::NAN }
+        if m_fine_pos > 0 {
+            100.0 * mcoarse_only as f64 / m_fine_pos as f64
+        } else {
+            f64::NAN
+        },
+        if m_coarse_neg > 0 {
+            100.0 * mfine_only as f64 / m_coarse_neg as f64
+        } else {
+            f64::NAN
+        }
     );
     black_box(&field);
 }
