@@ -494,7 +494,7 @@ export function Scene3D({
         infiniteGrid
       />
 
-      {/* 每机独立起点 marker（vehicles[].start_pose；多机时各自位置/航向） */}
+      {/* 每机独立起点 marker（vehicles[].start_pose；v0.21 起输入无 heading_deg，机头朝向为固定 45° 占位） */}
       {vehicles.map((v) => (
         <StartMarker
           key={v.id}

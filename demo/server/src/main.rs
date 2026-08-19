@@ -1,7 +1,7 @@
 //! AircraftRouterPlanner Demo 后端（开发期工具 + 独立可运行 Demo）。
 //!
 //! 端点：
-//! - `POST /api/plan` —— 接收完整 Input JSON（技术方案 4.2.1，schema 0.20），
+//! - `POST /api/plan` —— 接收完整 Input JSON（技术方案 4.2.1），
 //!   以 stdin/stdout 管道调用核心 CLI 二进制（aircraft-router-planner-cli），透传其 Output JSON。
 //! - `POST /api/terrain` —— 直接复用核心 lib 地形源，对指定 ARPK1 文件在 bbox 内
 //!   采样 nx×ny 高度网格，供前端 3D 地形可视化。
