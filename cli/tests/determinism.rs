@@ -9,7 +9,6 @@ use aircraft_router_planner_cli::config::Input;
 use aircraft_router_planner_cli::solver::{self, SolveParams};
 
 const INPUT_NO_TERRAIN: &str = r#"{
-  "schema_version": "0.20",
   "mission": {
     "start": {"lon": 115.0, "lat": 39.0, "alt_m": 3000},
     "target": {"lon": 116.5, "lat": 39.9, "alt_m": 3000}
@@ -17,7 +16,6 @@ const INPUT_NO_TERRAIN: &str = r#"{
 }"#;
 
 const INPUT_ZONE_NO_TERRAIN: &str = r#"{
-  "schema_version": "0.20",
   "mission": {
     "start": {"lon": 115.0, "lat": 39.0, "alt_m": 3000},
     "target": {"lon": 116.5, "lat": 39.9, "alt_m": 3000},

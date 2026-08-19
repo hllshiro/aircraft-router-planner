@@ -1,5 +1,4 @@
 {
-  "schema_version": "0.20",
   "mission": {
     "start": {
       "lon": 115.9,
@@ -23,8 +22,7 @@
         "start_pose": {
           "lon": 116.92977366719182,
           "lat": 40.4410563361943,
-          "alt_m": 300,
-          "heading_deg": 45
+          "alt_m": 300
         },
         "mid_waypoints": [
           {
@@ -46,8 +44,7 @@
         "start_pose": {
           "lon": 116.63273135458661,
           "lat": 40.66380307890914,
-          "alt_m": 300,
-          "heading_deg": 45
+          "alt_m": 300
         },
         "mid_waypoints": [
           {
@@ -65,7 +62,6 @@
           "id": "radar_1786332337392",
           "lon": 116.76131203011676,
           "lat": 39.93279959421326,
-          "radar_type": "tracking",
           "radius_km": 50,
           "alt_m": 10
         }

@@ -1,5 +1,4 @@
 {
-  "schema_version": "0.20",
   "mission": {
     "start": {"lon": 115.9, "lat": 39.8, "alt_m": 3000},
     "target": {"lon": 116.8, "lat": 40.3, "alt_m": 3000},
@@ -7,7 +6,7 @@
       {
         "id": "v1",
         "profile": {"aircraft_type": "FIXED_WING", "cruise_speed_mps": 250, "min_turn_radius_m": 442, "max_climb_angle_deg": 15},
-        "start_pose": {"lon": 117.56330714245705, "lat": 38.98919664864976, "alt_m": 1000, "heading_deg": 45},
+        "start_pose": {"lon": 117.56330714245705, "lat": 38.98919664864976, "alt_m": 1000},
         "mid_waypoints": [],
         "target_ref": "115.0643644570711,41.16789261835432,3000"
       }
@@ -21,8 +20,7 @@
         "shape": "polygon",
         "geometry": {"vertices": [[116.11516863940805,41.612788219567264],[114.56815739212651,40.67458188596126],[115.55464703710719,40.954828232368016]]},
         "alt_min_m": 2000,
-        "alt_max_m": 6000,
-        "height_semantics": "msl"
+        "alt_max_m": 6000
       }
     ],
     "obstacles": [],

@@ -32,20 +32,20 @@ fn null_json_is_malformed() {
 
 #[test]
 fn wrong_types_are_malformed() {
-    // schema_version 应为字符串
-    let s = r#"{"schema_version": 123, "mission": {"start": {"lon": 1, "lat": 2, "alt_m": 0}, "target": {"lon": 3, "lat": 4, "alt_m": 0}}}"#;
+    // mission 应为对象
+    let s = r#"{"mission": 123}"#;
     assert!(Input::from_json_str(s).is_err());
 }
 
 #[test]
 fn missing_required_fields_are_malformed() {
-    let s = r#"{"schema_version": "0.20"}"#; // 缺 mission
+    let s = r#"{}"#; // 缺 mission
     assert!(Input::from_json_str(s).is_err());
 }
 
 #[test]
 fn nan_coordinates_rejected() {
-    let s = r#"{"schema_version":"0.20","mission":{"start":{"lon":NaN,"lat":39.0,"alt_m":0},"target":{"lon":3,"lat":4,"alt_m":0}}}"#;
+    let s = r#"{"mission":{"start":{"lon":NaN,"lat":39.0,"alt_m":0},"target":{"lon":3,"lat":4,"alt_m":0}}}"#;
     // serde 对 NaN 默认拒绝（非有限数不合法 JSON number 语义？serde_json 允许 NaN）
     // 无论 parse 或 validate 层拦截，最终都应 input_invalid
     match Input::from_json_str(&s) {
@@ -59,7 +59,7 @@ fn nan_coordinates_rejected() {
 
 #[test]
 fn huge_lat_rejected() {
-    let s = r#"{"schema_version":"0.20","mission":{"start":{"lon":116.0,"lat":91.0,"alt_m":0},"target":{"lon":3,"lat":4,"alt_m":0}}}"#;
+    let s = r#"{"mission":{"start":{"lon":116.0,"lat":91.0,"alt_m":0},"target":{"lon":3,"lat":4,"alt_m":0}}}"#;
     let i = Input::from_json_str(&s).unwrap();
     match config::validate(&i) {
         Err(AppError::InputInvalid(InputInvalidReason::IllegalCoordinate)) => {}
@@ -69,7 +69,7 @@ fn huge_lat_rejected() {
 
 #[test]
 fn negative_radar_radius_rejected() {
-    let s = r#"{"schema_version":"0.20","mission":{"start":{"lon":115.0,"lat":39.0,"alt_m":0},"target":{"lon":117.0,"lat":40.0,"alt_m":0},"red_forces":{"radars":[{"id":"r1","lon":116.0,"lat":39.5,"radar_type":"tracking","radius_km":-5}]}}}"#;
+    let s = r#"{"mission":{"start":{"lon":115.0,"lat":39.0,"alt_m":0},"target":{"lon":117.0,"lat":40.0,"alt_m":0},"red_forces":{"radars":[{"id":"r1","lon":116.0,"lat":39.5,"radius_km":-5}]}}}"#;
     let i = Input::from_json_str(&s).unwrap();
     match config::validate(&i) {
         Err(AppError::InputInvalid(InputInvalidReason::OutOfBounds)) => {}
@@ -539,7 +539,6 @@ fn smooth_chain_degenerate_no_panic() {
 fn invalid_radar_params_recorded_as_degradations() {
     // 无外部参数或参数无效 → 使用默认值，且回落事实记入 stats.degradations。
     let s = r#"{
-        "schema_version":"0.20",
         "mission":{
             "start":{"lon":115.0,"lat":39.0,"alt_m":3000},
             "target":{"lon":116.5,"lat":39.9,"alt_m":3000},

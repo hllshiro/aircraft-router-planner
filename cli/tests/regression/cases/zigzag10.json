@@ -1,5 +1,4 @@
 {
-  "schema_version": "0.20",
   "mission": {
     "start": {
       "lon": 124.08488491093874,
@@ -23,8 +22,7 @@
         "start_pose": {
           "lon": 124.08488491093874,
           "lat": 34.66470606380233,
-          "alt_m": 3000,
-          "heading_deg": 45
+          "alt_m": 3000
         },
         "mid_waypoints": []
       }
@@ -35,7 +33,6 @@
           "id": "radar_1786063356956",
           "lon": 115.6498350771603,
           "lat": 37.68989197419215,
-          "radar_type": "early_warning",
           "radius_km": 100,
           "alt_m": 10
         },
@@ -43,7 +40,6 @@
           "id": "radar_1786063384876",
           "lon": 110.52918130809387,
           "lat": 44.003539599684515,
-          "radar_type": "early_warning",
           "radius_km": 100,
           "alt_m": 10
         }
@@ -75,8 +71,7 @@
           ]
         },
         "alt_min_m": 0,
-        "alt_max_m": 12000,
-        "height_semantics": "msl"
+        "alt_max_m": 12000
       },
       {
         "id": "zone_1786063230260",
@@ -90,8 +85,7 @@
           "radius_km": 50
         },
         "alt_min_m": 0,
-        "alt_max_m": 12000,
-        "height_semantics": "msl"
+        "alt_max_m": 12000
       }
     ],
     "restricted_zones": [
@@ -107,8 +101,7 @@
           "radius_km": 50
         },
         "alt_min_m": 0,
-        "alt_max_m": 5000,
-        "height_semantics": "msl"
+        "alt_max_m": 5000
       },
       {
         "id": "rz_1786063238380",
@@ -122,8 +115,7 @@
           "radius_km": 50
         },
         "alt_min_m": 6000,
-        "alt_max_m": 12000,
-        "height_semantics": "msl"
+        "alt_max_m": 12000
       }
     ],
     "obstacles": [],

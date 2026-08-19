@@ -1,5 +1,4 @@
 {
-  "schema_version": "0.20",
   "mission": {
     "start": {"lon": 115.0, "lat": 39.0, "alt_m": 3000},
     "target": {"lon": 116.5, "lat": 39.9, "alt_m": 3000},

@@ -1,5 +1,4 @@
 {
-  "schema_version": "0.20",
   "mission": {
     "start": {"lon": 115.9, "lat": 39.8, "alt_m": 3000},
     "target": {"lon": 116.8, "lat": 40.3, "alt_m": 3000},
@@ -7,7 +6,7 @@
       {
         "id": "v1",
         "profile": {"aircraft_type": "FIXED_WING", "cruise_speed_mps": 250, "min_turn_radius_m": 442, "max_climb_angle_deg": 15},
-        "start_pose": {"lon": 115.9, "lat": 39.8, "alt_m": 3000, "heading_deg": 45},
+        "start_pose": {"lon": 115.9, "lat": 39.8, "alt_m": 3000},
         "mid_waypoints": []
       }
     ],
