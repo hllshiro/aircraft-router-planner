@@ -2614,7 +2614,7 @@ fn region_of(specs: &[VehicleSpec], target: &Geo) -> Region {
 }
 
 /// P3 分类结论出口（docs/12 §3.4/§12.4 拍板）：stderr 分类 JSON + stdout
-/// stats.degradations 汇总；不升 schema 0.20（零 schema 负担）。
+/// stats.degradations 汇总（v0.21 起契约无 schema 版本字段）。
 /// 类别（C2/C3 决策树）：geometrically_impossible（真无解）/ search_truncated
 /// （可见图上限截断，≠几何无解）/ fitting_defect（拟合缺陷，可迭代）。
 pub(crate) fn emit_classified(
