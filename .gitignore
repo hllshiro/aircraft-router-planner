@@ -42,3 +42,6 @@ e2e_*.json
 
 # 本地工具缓存（gh CLI 日志缓存等，勿入库）
 .ghcache/
+
+# Agent
+superpowers/

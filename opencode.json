@@ -1,0 +1,21 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "command": {
+    "commit": {
+      "description": "提交更改（遵循Conventional Commits规范，自动更新CHANGELOG）",
+      "template": "1. 分析更改内容，判断是否需要拆分提交：\n   - 如果修改涉及多个独立的功能/修复/重构，分多次提交\n   - 如果修改是单一功能，直接提交\n2. 提交时使用规范格式：\n   - 首行：<type>(<scope>): <简洁描述>\n   - 空一行后写正文（如有必要）\n   - 如有 breaking change，在脚注中添加 BREAKING CHANGE:\n3. commit message 使用用户语言（中文描述，英文 type/scope）\n4. 提交前必须更新 CHANGELOG.md：\n   - 读取当前 CHANGELOG.md 的 [Unreleased] 部分\n   - 将本次变更添加到 [Unreleased] 下对应的分类（Added/Changed/Fixed/Removed 等）\n   - 如果 [Unreleased] 中已有类似项目，酌情合并而非重复添加\n   - 非写不可：如果修改对用户无感，可省略\n   - 编写风格：\n     * 从用户角度描述影响，避免技术细节\n     * 使用简洁动词开头：新增、优化、修复、移除\n     * 一行一条，控制在 20 字以内\n     * ✅ 优化设置界面控件交互体验\n     * ❌ 开关和下拉菜单添加手型光标\n5. 将 CHANGELOG.md 与代码变更一并提交\n6. 提交并推送后，询问用户是否需要执行发版操作。如用户确认，按 release 命令流程执行发版"
+    },
+    "push": {
+      "description": "推送本地提交到远程仓库",
+      "template": "执行 git push 将本地提交推送到远程仓库。如果推送失败，检查错误信息并尝试解决常见问题（如需要先 pull）。"
+    },
+    "sync-changes": {
+      "description": "同步远程更改并推送本地未推送的提交",
+      "template": "1. 执行 git status 检查是否有未推送的本地提交\n2. 如果有未推送的提交，先执行 git push 推送\n3. 执行 git pull 同步远程更改\n4. 执行 git status 检查最终状态\n5. 如果有冲突，列出冲突文件并提示用户解决"
+    },
+    "release": {
+      "description": "发布新版本（自动分析变更、推荐版本号、更新 CHANGELOG、创建 git tag）",
+      "template": "1. 读取 CHANGELOG.md 的 [Unreleased] 部分\n2. 如果 [Unreleased] 为空或仅有微小改动，告知用户不建议发版，流程终止。否则分析变更内容，判断发版类型：\n   - MAJOR：存在 BREAKING CHANGE 或重大功能变更\n   - MINOR：新增功能、较大优化\n   - PATCH：仅 Bug 修复、小幅优化\n3. 向用户展示分析结果，给出明确的发版建议（包含推荐的版本号），由用户确认\n4. 用户确认后，执行以下操作：\n   a. 更新 package.json 中的 version 字段\n   b. 整理 CHANGELOG.md：\n      - 将 [Unreleased] 内容移到新版本标题下（如 ## [1.2.0] - 2026-06-17）\n      - 添加版本号和发布日期\n      - 在顶部创建新的空 [Unreleased] 部分\n   c. 提交变更：git add . && git commit -m \"chore(release): vX.Y.Z\"\n   d. 创建 git tag：git tag vX.Y.Z\n   e. 推送：git push && git push --tags\n5. 展示发版完成信息，包含版本号和变更摘要"
+    }
+  }
+}
