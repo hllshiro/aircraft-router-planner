@@ -3,12 +3,13 @@
 //! 核心功能只有一条：**路径规划**（`plan` 子命令）——stdin/`--input` 读任务 JSON →
 //! stdout/`--output` 写结果 JSON（status 四态契约）。
 //!
-//! help 风格（2026 起约定）：不使用 `--help`/`-h` 标志；直接 `arp-cli` 或 `arp-cli help`
-//! 显示顶层帮助，`arp-cli help <command>` 显示子命令帮助。
+//! help 风格（2026 起约定）：不使用 `--help`/`-h`/`--version` 标志；直接执行文件或
+//! `执行文件 help` 显示顶层帮助（首行为 `执行文件名 v版本 - Aircraft Route Planner`），
+//! `执行文件 help <command>` 显示子命令帮助。可执行文件引用一律使用当前执行文件名。
 //!
 //! 子命令：
-//!   - `plan`   路径规划（核心）
-//!   - `schema` 输出输入/输出 JSON Schema（schemars 动态生成，代码即事实）
+//!   - `plan`   路径规划
+//!   - `schema` 输出输入/输出 JSON Schema
 
 use std::io::{Read, Write};
 use std::path::PathBuf;
@@ -16,21 +17,19 @@ use std::path::PathBuf;
 use aircraft_router_planner_cli::config::{self, Input, Output};
 use aircraft_router_planner_cli::error::{AppError, ErrorBody, InputInvalidReason};
 use aircraft_router_planner_cli::solver::{self, SolveParams};
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 
 #[derive(Parser, Debug)]
 #[command(
     name = "arp-cli",
-    version,
-    about = "AircraftRouterPlanner 核心 CLI：航路路径规划",
-    long_about = "核心功能只有一条：路径规划（plan）。\
-                  \n任务 JSON → 结果 JSON（status 四态契约：success / degraded_timeout / \
-                  \nno_solution / input_invalid）。",
-    after_help = "JSON Schema：`arp-cli schema` 查看输入/输出 schema（schemars 动态生成，代码即事实）。\n子命令帮助：`arp-cli help <command>`。",
-    // 不使用 --help/-h 标志：用 `arp-cli` / `arp-cli help` / `arp-cli help <command>`
+    // 版本信息直接显示在 help 首行，不提供 --version/-V 命令
+    disable_version_flag = true,
+    // 不使用 --help/-h 标志：用 `{bin}` / `{bin} help` / `{bin} help <command>`
     disable_help_flag = true,
-    // 无任何参数 → 显示顶层 help（即 `arp-cli` == `arp-cli help`）
-    arg_required_else_help = true
+    // 无任何参数 → 显示顶层 help（即 `{bin}` == `{bin} help`）
+    arg_required_else_help = true,
+    // Usage 行子命令占位符用小写：<command>
+    subcommand_value_name = "command"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -39,33 +38,27 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// 路径规划（核心）：stdin 或 --input 读任务 JSON → stdout 或 --output 写结果 JSON
+    /// Path planning
     Plan {
-        /// 任务 JSON 文件（缺省读 stdin）
+        /// Task JSON file (default: read from stdin)
         #[arg(short, long)]
         input: Option<PathBuf>,
-        /// 结果 JSON 文件（缺省写 stdout）
+        /// Result JSON file (default: write to stdout)
         #[arg(short, long)]
         output: Option<PathBuf>,
-        /// 随机种子（确定性：相同种子逐位一致；当前为保留字段）
-        #[arg(long)]
-        seed: Option<u64>,
-        /// 默认参数表覆盖文件（JSON；当前为保留字段）
-        #[arg(short, long)]
-        config: Option<PathBuf>,
-        /// 地形文件（ARPK1；缺省用输入 terrain.path；none 源不加载）
+        /// Terrain file (ARPK1; default: input terrain.path)
         #[arg(long)]
         terrain: Option<PathBuf>,
-        /// 海岸掩膜文件（GSHHG 3 态；缺省自动探测默认掩膜）
+        /// Coastline mask file (GSHHG; default: auto-detect)
         #[arg(long)]
         mask: Option<PathBuf>,
-        /// 粗网格分辨率（缺省 256；任务区域自适应）
+        /// Coarse grid resolution
         #[arg(long, default_value_t = 256)]
         grid: usize,
     },
-    /// 输出输入/输出 JSON Schema（schemars 动态生成，代码即事实）
+    /// Output input/output JSON Schema
     Schema {
-        /// 输出哪个 schema（缺省 all）
+        /// Which schema to output (default: all)
         #[arg(value_enum, default_value_t = SchemaTarget::All)]
         target: SchemaTarget,
     },
@@ -73,11 +66,11 @@ enum Command {
 
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
 enum SchemaTarget {
-    /// 仅输入 schema（任务 JSON）
+    /// Input schema only (task JSON)
     Input,
-    /// 仅输出 schema（结果 JSON）
+    /// Output schema only (result JSON)
     Output,
-    /// 输入 + 输出（默认）
+    /// Input and output (default)
     All,
 }
 
@@ -85,21 +78,28 @@ enum SchemaTarget {
 struct PlanArgs {
     input: Option<PathBuf>,
     output: Option<PathBuf>,
-    seed: Option<u64>,
-    config: Option<PathBuf>,
     terrain: Option<PathBuf>,
     mask: Option<PathBuf>,
     grid: usize,
 }
 
 fn main() {
-    let cli = Cli::parse();
+    let bin = executable_name();
+    let version = env!("CARGO_PKG_VERSION");
+
+    // 动态注入可执行文件名与版本：help 首行 / Usage / 示例统一使用当前执行文件名。
+    let matches = Cli::command()
+        .about(format!("{bin} v{version} - Aircraft Route Planner"))
+        .after_help(format!(
+            "Examples:\n  {bin} plan < task.json\n  {bin} plan --input task.json --output result.json\n  {bin} schema"
+        ))
+        .get_matches();
+    let cli = Cli::from_arg_matches(&matches).expect("参数已由 clap 校验");
+
     match cli.command {
         Command::Plan {
             input,
             output,
-            seed,
-            config,
             terrain,
             mask,
             grid,
@@ -107,20 +107,30 @@ fn main() {
             let args = PlanArgs {
                 input,
                 output,
-                seed,
-                config,
                 terrain,
                 mask,
                 grid,
             };
             if let Err(e) = run_plan(&args) {
                 // 硬故障（IO/内部）：stderr + 非零退出（不静默）
-                eprintln!("arp-cli plan: hard failure: {e}");
+                eprintln!("{bin} plan: hard failure: {e}");
                 std::process::exit(2);
             }
         }
         Command::Schema { target } => run_schema(target),
     }
+}
+
+/// 当前执行文件名（argv[0] 的 basename），help/错误信息中引用可执行文件时使用。
+fn executable_name() -> String {
+    std::env::args()
+        .next()
+        .as_deref()
+        .map(std::path::Path::new)
+        .and_then(std::path::Path::file_name)
+        .and_then(std::ffi::OsStr::to_str)
+        .unwrap_or("arp-cli")
+        .to_string()
 }
 
 /// `schema` 子命令：用 schemars 动态生成输入/输出 JSON Schema（代码即事实，零漂移）。
@@ -154,9 +164,6 @@ fn run_schema(target: SchemaTarget) {
 }
 
 fn run_plan(args: &PlanArgs) -> Result<(), AppError> {
-    // seed/config 为保留字段（当前解算路径暂未消费），显式忽略避免未使用告警。
-    let _ = (args.seed, args.config.as_deref());
-
     let started = std::time::Instant::now();
 
     // 1. 读输入
