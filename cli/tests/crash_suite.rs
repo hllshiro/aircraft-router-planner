@@ -77,6 +77,32 @@ fn negative_radar_radius_rejected() {
     }
 }
 
+/// v0.21 契约精简护栏：旧契约字段一律 malformed_json 拒绝（不 panic）。
+const MIN_MISSION: &str = r#"{"start":{"lon":116.30,"lat":39.90,"alt_m":500},"target":{"lon":117.10,"lat":40.20,"alt_m":1000}}"#;
+
+#[test]
+fn legacy_schema_version_rejected() {
+    let s = format!(r#"{{"schema_version":"0.20","mission":{}}}"#, MIN_MISSION);
+    assert!(Input::from_json_str(&s).is_err());
+}
+
+#[test]
+fn legacy_contract_fields_rejected() {
+    let cases: &[&str] = &[
+        &format!(r#"{{"crs":{{"datum":"WGS84","vertical":"MSL","input_projection":"lonlat"}},"mission":{}}}"#, MIN_MISSION),
+        &format!(r#"{{"output_crs":{{"projection":"lonlat"}},"mission":{}}}"#, MIN_MISSION),
+        &format!(r#"{{"mission":{{"start":{{"lon":116.30,"lat":39.90,"alt_m":500}},"target":{{"lon":117.10,"lat":40.20,"alt_m":1000}},"red_forces":{{"sams":[{{"id":"s1","lon":116.0,"lat":39.5,"radius_km":30}}]}}}}}}"#),
+        &format!(r#"{{"mission":{{"start":{{"lon":116.30,"lat":39.90,"alt_m":500}},"target":{{"lon":117.10,"lat":40.20,"alt_m":1000}},"red_forces":{{"radars":[{{"id":"r1","lon":116.0,"lat":39.5,"radar_type":"tracking","radius_km":50}}]}}}}}}"#),
+        &format!(r#"{{"mission":{{"start":{{"lon":116.30,"lat":39.90,"alt_m":500}},"target":{{"lon":117.10,"lat":40.20,"alt_m":1000}},"no_fly_zones":[{{"id":"z1","zone_type":"no_fly","shape":"circle","geometry":{{"center":[116.5,39.9],"radius_km":50}},"height_semantics":"msl"}}]}}}}"#),
+        &format!(r#"{{"mission":{{"start":{{"lon":116.30,"lat":39.90,"alt_m":500}},"target":{{"lon":117.10,"lat":40.20,"alt_m":1000}},"vehicles":[{{"id":"v1","profile":{{"aircraft_type":"FIXED_WING"}},"start_pose":{{"lon":116.30,"lat":39.90,"alt_m":500,"heading_deg":45}}}}]}}}}"#),
+        &format!(r#"{{"mission":{{"start":{{"lon":116.30,"lat":39.90,"alt_m":500}},"target":{{"lon":117.10,"lat":40.20,"alt_m":1000}},"vehicles":[{{"id":"v1","profile":{{"aircraft_type":"FIXED_WING","detection_probability":0.3}},"start_pose":{{"lon":116.30,"lat":39.90,"alt_m":500}}}}]}}}}"#),
+        &format!(r#"{{"mission":{{"start":{{"lon":116.30,"lat":39.90,"alt_m":500}},"target":{{"lon":117.10,"lat":40.20,"alt_m":1000}},"parameters":{{"coarse_cell_m":2000}}}}}}"#),
+    ];
+    for s in cases {
+        assert!(Input::from_json_str(s).is_err(), "旧契约字段应被拒: {s}");
+    }
+}
+
 // ==================== coord ====================
 
 #[test]
