@@ -11,11 +11,16 @@
 
 ### Added
 - demo 场景新增鼠标悬停经纬高实时显示（右下角浮层）。
+- demo-server 新增 `GET /api/data-files`：扫描数据目录（`DATA_DIR` 环境变量覆盖，默认 exe 同级 `data/`），按扩展名分类返回地形/掩膜文件列表，供前端下拉选择。
 
 ### Changed
 - 优化 help 展示：首行显示可执行文件名与版本，Usage/示例/错误信息动态使用当前执行文件名。
 - 移除 `--version` 标志与 `plan` 未启用的保留参数 `--seed`/`--config`（**破坏性变更**：传入即报错退出）。
 - demo 地形显示与计算配置解耦（跟随/无/外部文件）。
+- **移除 `builtin` 地形选项（破坏性变更）**：`TerrainSourceType` 仅保留 `none`/`path`；CLI `source=path` 未提供路径或加载失败时自动降级为无地形（不再报错中止），并在输出 `degradations` 中记录原因。
+- 掩膜不再自动探测：仅显式指定 `--mask`/`terrain.mask_path` 时启用（文件缺失仍报错）。
+- demo 前端自动扫描数据目录：启动时拉取 `/api/data-files`，有地形/掩膜文件时默认选中第一个，路径输入改为文件下拉。
+- demo 地形面板重构：「地形（CLI计算）」更名为「地形显示」；原「地形显示」更名为「CLI计算数据源」（none/follow_view，默认跟随视图）。
 
 ## [0.2.1] - 2026-08-19
 

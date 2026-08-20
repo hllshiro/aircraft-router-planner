@@ -438,6 +438,77 @@ async fn tile_route(Json(payload): Json<TileReq>) -> Json<Value> {
     Json(result)
 }
 
+/// GET /api/data-files — 扫描 data 目录，返回地形/掩膜文件列表。
+/// 数据目录：环境变量 DATA_DIR 覆盖，默认 exe 同级 data/。
+/// 文件分类：.arpack/.zstd = terrain，.mask = mask。
+async fn data_files_route() -> Json<Value> {
+    let data_dir: PathBuf = std::env::var("DATA_DIR")
+        .unwrap_or_else(|_| "data".into())
+        .into();
+    let data_dir = std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(|d| d.to_path_buf()))
+        .map(|d| d.join(&data_dir))
+        .unwrap_or(data_dir);
+
+    let mut terrain_files = Vec::new();
+    let mut mask_files = Vec::new();
+
+    if data_dir.is_dir() {
+        if let Ok(entries) = std::fs::read_dir(&data_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if !path.is_file() {
+                    continue;
+                }
+                let ext = path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                let name = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("")
+                    .to_string();
+                let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                let rel_path = format!("data/{}", name);
+
+                match ext.as_str() {
+                    "arpack" | "zstd" => {
+                        terrain_files.push(serde_json::json!({
+                            "name": name,
+                            "path": rel_path,
+                            "size": size,
+                        }));
+                    }
+                    "mask" => {
+                        mask_files.push(serde_json::json!({
+                            "name": name,
+                            "path": rel_path,
+                            "size": size,
+                        }));
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    terrain_files.sort_by(|a, b| {
+        a["name"].as_str().unwrap_or("").cmp(b["name"].as_str().unwrap_or(""))
+    });
+    mask_files.sort_by(|a, b| {
+        a["name"].as_str().unwrap_or("").cmp(b["name"].as_str().unwrap_or(""))
+    });
+
+    Json(serde_json::json!({
+        "data_dir": data_dir.to_string_lossy(),
+        "terrain": terrain_files,
+        "mask": mask_files,
+    }))
+}
+
 #[tokio::main]
 async fn main() {
     // 静态前端目录：环境变量 DEMO_WEB_DIR 覆盖，默认 exe 同目录 web-dist/
@@ -460,6 +531,7 @@ async fn main() {
         .route("/api/basemap", post(basemap::basemap_route))
         .route("/api/tile", post(tile_route))
         .route("/api/wms", get(basemap::wms_proxy))
+        .route("/api/data-files", get(data_files_route))
         .fallback_service(serve)
         .layer(tower_http::cors::CorsLayer::permissive());
 

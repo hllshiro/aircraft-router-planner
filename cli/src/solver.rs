@@ -138,104 +138,82 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
     let over_budget = |elapsed_ms: u64| -> bool {
         budget_ms != 0 && elapsed_ms + solve_t0.elapsed().as_millis() as u64 >= budget_ms
     };
-    // 1. 地形源（none = 无地形平面；path/builtin = ARPK1 文件或外部格式）。
+    // 1. 地形源（none = 无地形平面；path = 外部文件；加载失败降级为 none + 警告）。
     //    主管 2026-08-11：外部格式（GeoTIFF/DTED/SRTM）不需要转换，直接调对应
     //    解析库取数（`open_source` 按扩展名分派）；ARPK1 走 BuiltinSource（预取）。
+    let mut terrain_warnings: Vec<String> = Vec::new();
     let terrain: TerrainHandle = match input.terrain.source {
         TerrainSourceType::None => TerrainHandle::None,
-        _ => {
+        TerrainSourceType::Path => {
             let p = params
                 .terrain_path
                 .clone()
                 .or_else(|| input.terrain.path.clone().map(PathBuf::from));
-            let inner: InnerSource = match p {
-                Some(p) => {
+            let inner: Option<InnerSource> = match p {
+                Some(ref p) => {
                     let ext = p
                         .extension()
                         .and_then(|e| e.to_str())
                         .unwrap_or("")
                         .to_ascii_lowercase();
-                    match ext.as_str() {
-                        // ARPK1/zstd → BuiltinSource（BulkPrefetch 预取路径）
-                        "arpack" | "zstd" => InnerSource::Builtin(BuiltinSource::open(&p)?),
-                        // 外部格式 → open_source 分派对应解析库（GeoTiff/Dted/Srtm/目录）
-                        _ => InnerSource::Dyn(crate::terrain::open_source(&p)?),
+                    let result = match ext.as_str() {
+                        "arpack" | "zstd" => {
+                            BuiltinSource::open(p).map(InnerSource::Builtin)
+                        }
+                        _ => crate::terrain::open_source(p).map(InnerSource::Dyn),
+                    };
+                    match result {
+                        Ok(src) => Some(src),
+                        Err(e) => {
+                            let msg = format!(
+                                "terrain path '{}' 加载失败（{}），降级为无地形",
+                                p.display(),
+                                e
+                            );
+                            eprintln!("[warn] {msg}");
+                            terrain_warnings.push(msg);
+                            None
+                        }
                     }
                 }
                 None => {
-                    // 主管决策 2026-08-08：默认地形 = 7.5as 东亚压缩版（east_asia_7p5as.arpack）。
-                    // 候选：exe 同目录 / 工作目录 data/（2026-08-08 数据迁移到项目根 data/）。
-                    let mut candidates = vec![
-                        PathBuf::from("east_asia_7p5as.arpack"),
-                        PathBuf::from("data/east_asia_7p5as.arpack"),
-                    ];
-                    if let Ok(exe) = std::env::current_exe() {
-                        if let Some(dir) = exe.parent() {
-                            candidates.insert(0, dir.join("east_asia_7p5as.arpack"));
-                            // 上溯 3 层（target/release → target → workspace 根），逐层试 data/
-                            for anc in dir.ancestors().skip(1).take(3) {
-                                candidates.push(anc.join("data/east_asia_7p5as.arpack"));
-                            }
-                        }
-                    }
-                    if let Some(c) = candidates.iter().find(|c| c.exists()) {
-                        InnerSource::Builtin(BuiltinSource::open(c)?)
-                    } else {
-                        return Err(AppError::Data(
-                            "terrain.source=path/builtin 但未提供地形文件，且默认地形 \
-                             (east_asia_7p5as.arpack) 未找到（--terrain / terrain.path / exe 同目录 / data/）"
-                                .into(),
-                        ));
-                    }
+                    let msg = "terrain.source=path 但未提供地形文件（--terrain / terrain.path），降级为无地形".into();
+                    eprintln!("[warn] {msg}");
+                    terrain_warnings.push(msg);
+                    None
                 }
             };
-            // 海岸掩膜（主管 2026-08-08 默认提供）：
-            // - 显式 --mask / terrain.mask_path：必须存在，始终套用；
-            // - 未显式指定掩膜时：仅**默认地形**（未显式 --terrain/path）自动探测默认掩膜，
-            //   显式地形不自动套（用户明确选数据 → 掩膜也应显式，避免语义意外变化）。
-            let mask = params
-                .mask_path
-                .clone()
-                .or_else(|| input.terrain.mask_path.clone().map(PathBuf::from));
-            let explicit_terrain =
-                params.terrain_path.is_some() || input.terrain.path.is_some();
-            match mask {
-                Some(mp) => {
-                    if !mp.exists() {
-                        return Err(AppError::Data(format!(
-                            "mask file not found: {}（--mask / terrain.mask_path）",
-                            mp.display()
-                        )));
-                    }
-                    let gm = GeoMask::open(&mp)?;
-                    match inner {
-                        InnerSource::Builtin(b) => TerrainHandle::Masked(MaskedSource::new(b, gm)),
-                        InnerSource::Dyn(d) => {
-                            TerrainHandle::MaskedExternal(MaskedSource::new(d, gm))
+            match inner {
+                None => TerrainHandle::None,
+                Some(inner) => {
+                    let mask = params
+                        .mask_path
+                        .clone()
+                        .or_else(|| input.terrain.mask_path.clone().map(PathBuf::from));
+                    match mask {
+                        Some(mp) => {
+                            if !mp.exists() {
+                                return Err(AppError::Data(format!(
+                                    "mask file not found: {}（--mask / terrain.mask_path）",
+                                    mp.display()
+                                )));
+                            }
+                            let gm = GeoMask::open(&mp)?;
+                            match inner {
+                                InnerSource::Builtin(b) => {
+                                    TerrainHandle::Masked(MaskedSource::new(b, gm))
+                                }
+                                InnerSource::Dyn(d) => {
+                                    TerrainHandle::MaskedExternal(MaskedSource::new(d, gm))
+                                }
+                            }
                         }
+                        None => match inner {
+                            InnerSource::Builtin(b) => TerrainHandle::Plain(b),
+                            InnerSource::Dyn(d) => TerrainHandle::External(d),
+                        },
                     }
                 }
-                None if !explicit_terrain => match default_mask_candidates() {
-                    Some(mp) => {
-                        let gm = GeoMask::open(&mp)?;
-                        match inner {
-                            InnerSource::Builtin(b) => {
-                                TerrainHandle::Masked(MaskedSource::new(b, gm))
-                            }
-                            InnerSource::Dyn(d) => {
-                                TerrainHandle::MaskedExternal(MaskedSource::new(d, gm))
-                            }
-                        }
-                    }
-                    None => match inner {
-                        InnerSource::Builtin(b) => TerrainHandle::Plain(b),
-                        InnerSource::Dyn(d) => TerrainHandle::External(d),
-                    },
-                },
-                None => match inner {
-                    InnerSource::Builtin(b) => TerrainHandle::Plain(b),
-                    InnerSource::Dyn(d) => TerrainHandle::External(d),
-                },
             }
         }
     };
@@ -387,6 +365,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
     //     硬墙向外膨胀 max(0.5×r)（clamp [2km, 10km]）——FMM 绕行自然远离边界，
     //     Dubins 转弯弧留足空间（不再因贴边急弯被物理复验拒绝）。
     let mut degradations = Vec::new();
+    degradations.extend(terrain_warnings);
     radar_param_degradations(input, &mut degradations);
     let inflation_m = specs
         .iter()
@@ -2036,28 +2015,6 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
 }
 
 // ==================== 辅助 ====================
-
-/// 默认海岸掩膜候选（主管 2026-08-08：默认提供和使用的掩膜为全球版本，
-/// **7.5 弧秒（mask_7p5as.mask，与默认地形 east_asia_7p5as.arpack 同分辨率）**；
-/// GSHHG 全球 V2 3 态，覆盖 360°×180°，86400×172800，30.8MB）。
-/// 候选：exe 同目录 / 工作目录 data/（2026-08-08 数据迁移到项目根 data/）；
-/// 未找到 → None（纯地形，无掩膜分层）。
-/// 区域窗口掩膜（east_asia_7p5as.mask 等）不自动探测——用户可显式 terrain.mask_path 指定。
-fn default_mask_candidates() -> Option<PathBuf> {
-    let mut candidates = vec![
-        PathBuf::from("mask_7p5as.mask"),
-        PathBuf::from("data/mask_7p5as.mask"),
-    ];
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            candidates.insert(0, dir.join("mask_7p5as.mask"));
-            for anc in dir.ancestors().skip(1).take(3) {
-                candidates.push(anc.join("data/mask_7p5as.mask"));
-            }
-        }
-    }
-    candidates.into_iter().find(|c| c.exists())
-}
 
 /// 任务区域缓冲（度）：保证源/目标不贴边；同时是障碍感知外扩的机动余量
 /// （2026-08-11 zz_region_block2：墙占满 region 短边方向时绕行被迫出 region）。

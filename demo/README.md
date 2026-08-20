@@ -20,7 +20,7 @@ demo/
 │              # POST /api/terrain 直接采样 ARPK1 供 3D 地形渲染；
 │              # 其余路径 serve 前端生产构建（web-dist/，环境变量 DEMO_WEB_DIR 覆盖）
 │              # 端口环境变量 DEMO_PORT，默认 3001
-└── web/       # React 18 + TS + Vite + Three.js 前端（npm）
+└── web/       # React 18 + TS + Vite + Three.js 前端（pnpm）
     └── src/
         ├── types.ts        # 输入/输出契约类型 + 经纬高↔局部平面坐标工具
         ├── api.ts          # /api/plan 调用（相对路径，同源）
@@ -35,7 +35,7 @@ demo/
 ```
 install/demo/
 ├── demo-server.exe     # release 构建（含静态文件服务）
-├── web-dist/           # npm run build 产物（vite build → dist → 复制为 web-dist）
+├── web-dist/           # pnpm build 产物（vite build → dist → 复制为 web-dist）
 ├── start-demo.bat      # Windows 一键（cd install 根 + ARP_CLI + 开浏览器）
 ├── start-demo.sh       # Linux/macOS 一键
 └── DEMO_README.md      # 分发给使用者的说明
@@ -48,7 +48,7 @@ install/demo/
 
 ```bash
 cargo build --release -p demo-server
-cd demo/web && npm run build          # 产出 demo/web/dist
+cd demo/web && pnpm build              # 产出 demo/web/dist
 copy demo/web/dist  → install/demo/web-dist
 copy target/release/demo-server.exe → install/demo/
 ```
@@ -72,7 +72,7 @@ copy target/release/demo-server.exe → install/demo/
 cargo build --release -p aircraft-router-planner-cli
 cargo build --release -p demo-server
 cargo run --release -p demo-server &        # :3001
-cd demo/web && npm install && npm run dev   # :5173
+cd demo/web && pnpm install && pnpm dev   # :5173
 ```
 
 Linux/macOS 可用 `bash demo/start.sh` 一键（脚本按 Git Bash/pnpm 编写）。

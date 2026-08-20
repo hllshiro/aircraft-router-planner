@@ -74,31 +74,13 @@ export interface Zone {
 }
 
 export interface TerrainConfig {
-  source: 'none' | 'builtin' | 'path';
+  source: 'none' | 'path';
   path?: string;
 }
 
-/** 场景地形显示配置（demo 显示配置；与 CLI 计算配置 Input.terrain 解耦，2026-08-20） */
-export interface SceneTerrainConfig {
-  /** follow = 跟随 CLI 计算配置（默认）；none = 无地形表面；path = 独立外部文件 */
-  mode: 'follow' | 'none' | 'path';
-  /** mode='path' 时的文件路径 */
-  path?: string;
-}
-
-/** 显示配置地形解析：follow → 复用 CLI 计算配置（只读）；none/path → demo 显示配置独立。
- *  注意：follow 且 CLI 计算 source='builtin' 时，解析结果为 builtin —— 显示采样
- *  只认 path（tiles.ts wantTerrain），builtin 无表面（与现状一致）。 */
-export function resolveSceneTerrain(
-  scene: SceneTerrainConfig,
-  planning: TerrainConfig,
-): TerrainConfig {
-  switch (scene.mode) {
-    case 'follow': return planning;
-    case 'none':   return { source: 'none' };
-    case 'path':   return { source: 'path', path: scene.path };
-  }
-}
+/** CLI 计算数据源（2026-08-20）：none = 平地计算（不传地形）；
+ *  follow_view = 跟随视图（用「地形显示」选中的地形文件参与代价场/净空计算）。 */
+export type CliTerrainMode = 'none' | 'follow_view';
 
 export interface ParamsOverride {
   radar_inflation?: number;
@@ -289,4 +271,17 @@ export function defaultBaseMapConfig(): BaseMapConfig {
     wmsLayers: 'workspace:layer',
     wmsCrs: 'EPSG:4326',
   };
+}
+
+// === 数据文件扫描 ===
+export interface DataFile {
+  name: string;
+  path: string;
+  size: number;
+}
+
+export interface DataFilesResponse {
+  data_dir: string;
+  terrain: DataFile[];
+  mask: DataFile[];
 }

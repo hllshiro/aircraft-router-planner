@@ -1,4 +1,4 @@
-import type { Input, PlanResult, TerrainInfo, BaseMapInfo, TiffProjection } from './types';
+import type { Input, PlanResult, TerrainInfo, BaseMapInfo, TiffProjection, DataFilesResponse } from './types';
 
 /** 解析后端响应并兜底：空 body / 非 JSON / 非 2xx → 明确错误，
  *  避免 resp.json() 裸调用抛 "Unexpected end of JSON input"（2026-08-13 修复）。 */
@@ -256,4 +256,9 @@ export function wmsSize(
   w = Math.min(Math.max(w, 256), 1024);
   h = Math.min(Math.max(h, 256), 1024);
   return [w, h];
+}
+
+export async function fetchDataFiles(): Promise<DataFilesResponse> {
+  const resp = await fetch('/api/data-files');
+  return readJsonResponse(resp, '数据文件扫描');
 }

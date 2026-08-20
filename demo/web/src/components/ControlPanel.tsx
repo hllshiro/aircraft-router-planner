@@ -10,7 +10,8 @@ import type {
   BaseMapConfig,
   BaseMapSource,
   TiffProjection,
-  SceneTerrainConfig,
+  CliTerrainMode,
+  DataFile,
 } from '../types';
 import { WEAPON_DEFAULT_RANGE_KM } from '../types';
 import { fetchElevation, sanitizePath } from '../api';
@@ -34,9 +35,11 @@ interface ControlPanelProps {
   onBaseMapConfigChange: (cfg: BaseMapConfig) => void;
   baseMapLoading: boolean;
   baseMapError: string | null;
-  /** 场景地形显示配置（demo 显示配置；与 CLI 计算配置 config.terrain 解耦，2026-08-20） */
-  sceneTerrain: SceneTerrainConfig;
-  onSceneTerrainChange: (cfg: SceneTerrainConfig) => void;
+  /** CLI 计算数据源（2026-08-20：none = 平地计算；follow_view = 跟随视图用显示地形） */
+  cliTerrainMode: CliTerrainMode;
+  onCliTerrainModeChange: (mode: CliTerrainMode) => void;
+  /** 数据文件扫描结果（2026-08-20：demo-server 扫描 data/ 供下拉选择） */
+  dataFiles?: { terrain: DataFile[]; mask: DataFile[] };
 }
 
 export function ControlPanel({
@@ -55,8 +58,9 @@ export function ControlPanel({
   onBaseMapConfigChange,
   baseMapLoading,
   baseMapError,
-  sceneTerrain,
-  onSceneTerrainChange,
+  cliTerrainMode,
+  onCliTerrainModeChange,
+  dataFiles,
 }: ControlPanelProps) {
   const update = (patch: Partial<Input>) =>
     onConfigChange({ ...config, ...patch });
@@ -87,6 +91,8 @@ export function ControlPanel({
   configRef.current = config;
   const onConfigChangeRef = useRef(onConfigChange);
   onConfigChangeRef.current = onConfigChange;
+  const cliTerrainModeRef = useRef(cliTerrainMode);
+  cliTerrainModeRef.current = cliTerrainMode;
   const [groundAlt, setGroundAlt] = useState<{
     s: number | null;
     t: number | null;
@@ -95,15 +101,21 @@ export function ControlPanel({
   const updateBaseMap = (patch: Partial<BaseMapConfig>) =>
     onBaseMapConfigChange({ ...baseMapConfig, ...patch });
 
-  // 起终点经纬度签名：仅经纬度/地形路径变化才重新查询海拔（高度变化不触发）
+  // 起终点经纬度签名：仅经纬度/计算地形路径变化才重新查询海拔（高度变化不触发）
   const startTargetKey = useMemo(() => {
     if (!config.aircraft.length) return 'none';
     const a = config.aircraft[0];
+    // CLI 计算数据源解析：跟随视图 → 用显示地形；无 → 平地（无地面海拔约束）
+    const t =
+      cliTerrainMode === 'follow_view'
+        ? config.terrain
+        : ({ source: 'none' } as const);
+    const terrainPath = t.source === 'path' ? t.path ?? '' : '';
     return (
       `${a.id}|${a.start.lon.toFixed(5)},${a.start.lat.toFixed(5)}|` +
-      `${a.target.lon.toFixed(5)},${a.target.lat.toFixed(5)}|${config.terrain.path}`
+      `${a.target.lon.toFixed(5)},${a.target.lat.toFixed(5)}|${terrainPath}`
     );
-  }, [config]);
+  }, [config, cliTerrainMode]);
 
   // 经纬度变化（防抖 250ms）→ 查询该点地面海拔 → 设置 min；
   // 当前高度低于地面 → 自动抬升到地面海拔（主管 2026-08-14）
@@ -116,9 +128,16 @@ export function ControlPanel({
     ) => {
       timers.push(
         window.setTimeout(() => {
-          // path 缺省用默认地形；无效路径 → fetchElevation 返回 null，静默无 min
-          const terrainPath =
-            configRef.current.terrain.path ?? 'data/east_asia_7p5as.arpack';
+          // CLI 计算数据源解析（同 startTargetKey）：平地 → 无地面海拔约束
+          const t =
+            cliTerrainModeRef.current === 'follow_view'
+              ? configRef.current.terrain
+              : ({ source: 'none' } as const);
+          const terrainPath = t.source === 'path' && t.path ? t.path : null;
+          if (terrainPath == null) {
+            setGroundAlt((prev) => ({ ...prev, [kind]: null }));
+            return;
+          }
           fetchElevation(terrainPath, lon, lat).then((e) => {
             setGroundAlt((prev) => ({ ...prev, [kind]: e }));
             if (e == null) return;
@@ -639,11 +658,11 @@ export function ControlPanel({
         </div>
       )}
 
-      {/* Terrain —— CLI 计算配置（流入 arp-cli plan 子进程；2026-08-20 与显示解耦） */}
-      <h3>地形（CLI计算）</h3>
+      {/* 地形显示 —— 场景 3D 显示的地形文件（2026-08-20：显示为主，计算解耦见下方） */}
+      <h3>地形显示</h3>
       <div className="field-row" style={{ marginBottom: 4 }}>
         <div style={{ fontSize: 10, color: '#888', lineHeight: '1.3' }}>
-          流入 arp-cli plan 子进程，参与代价场/净空计算；场景显示见「地形显示」
+          场景 3D 显示的地形；是否参与代价场/净空计算见「CLI计算数据源」
         </div>
       </div>
       <div className="field-row">
@@ -655,28 +674,33 @@ export function ControlPanel({
               update({
                 terrain: {
                   ...config.terrain,
-                  source: e.target.value as 'none' | 'builtin' | 'path',
+                  source: e.target.value as 'none' | 'path',
                 },
               })
             }
           >
             <option value="none">无（海拔 0 平面）</option>
-            <option value="builtin">内置数据包</option>
-            <option value="path">外部文件</option>
+            <option value="path">数据文件</option>
           </select>
         </div>
         {config.terrain.source === 'path' && (
           <div>
-            <label>路径</label>
-            <input
-              type="text"
+            <label>文件</label>
+            <select
               value={config.terrain.path ?? ''}
               onChange={(e) =>
                 update({
                   terrain: { ...config.terrain, path: e.target.value },
                 })
               }
-            />
+            >
+              <option value="">选择地形文件…</option>
+              {(dataFiles?.terrain ?? []).map((f) => (
+                <option key={f.path} value={f.path}>
+                  {f.name}（{(f.size / 1048576).toFixed(0)}MB）
+                </option>
+              ))}
+            </select>
           </div>
         )}
       </div>
@@ -708,16 +732,26 @@ export function ControlPanel({
         <div className="field-row">
           <div className="wide">
             <label>路径</label>
-            <input
-              type="text"
-              value={baseMapConfig.path ?? ''}
-              onChange={(e) => updateBaseMap({ path: sanitizePath(e.target.value) })}
-              placeholder={
-                baseMapConfig.source === 'mask'
-                  ? '如 data/mask_7p5as.mask'
-                  : '如 data/map.tif'
-              }
-            />
+            {baseMapConfig.source === 'mask' ? (
+              <select
+                value={baseMapConfig.path ?? ''}
+                onChange={(e) => updateBaseMap({ path: sanitizePath(e.target.value) })}
+              >
+                <option value="">选择掩膜文件…</option>
+                {(dataFiles?.mask ?? []).map((f) => (
+                  <option key={f.path} value={f.path}>
+                    {f.name}（{(f.size / 1048576).toFixed(0)}MB）
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <input
+                type="text"
+                value={baseMapConfig.path ?? ''}
+                onChange={(e) => updateBaseMap({ path: sanitizePath(e.target.value) })}
+                placeholder={'如 data/map.tif'}
+              />
+            )}
           </div>
         </div>
       )}
@@ -791,40 +825,26 @@ export function ControlPanel({
         </div>
       )}
 
-      {/* 地形显示 —— demo 显示配置（与 CLI 计算配置解耦；2026-08-20） */}
-      <h3>地形显示</h3>
+      {/* CLI计算数据源 —— 是否用显示地形参与代价场/净空计算（2026-08-20） */}
+      <h3>CLI计算数据源</h3>
+      <div className="field-row" style={{ marginBottom: 4 }}>
+        <div style={{ fontSize: 10, color: '#888', lineHeight: '1.3' }}>
+          流入 arp-cli plan 子进程；「跟随视图」= 用「地形显示」选中的文件参与计算
+        </div>
+      </div>
       <div className="field-row">
         <div>
-          <label>数据源</label>
+          <label>计算方式</label>
           <select
-            value={sceneTerrain.mode}
+            value={cliTerrainMode}
             onChange={(e) =>
-              onSceneTerrainChange({
-                mode: e.target.value as 'follow' | 'none' | 'path',
-                path: undefined,
-              })
+              onCliTerrainModeChange(e.target.value as CliTerrainMode)
             }
           >
-            <option value="follow">跟随 CLI 计算配置</option>
-            <option value="none">无（0 高平面）</option>
-            <option value="path">外部文件</option>
+            <option value="none">无（平地计算）</option>
+            <option value="follow_view">跟随视图</option>
           </select>
         </div>
-        {sceneTerrain.mode === 'path' && (
-          <div>
-            <label>路径</label>
-            <input
-              type="text"
-              value={sceneTerrain.path ?? ''}
-              onChange={(e) =>
-                onSceneTerrainChange({
-                  ...sceneTerrain,
-                  path: e.target.value,
-                })
-              }
-            />
-          </div>
-        )}
       </div>
 
       {/* Radars */}

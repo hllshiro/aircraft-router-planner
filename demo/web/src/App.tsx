@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo, useRef } from 'react';
+import { useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import { Scene3D } from './components/Scene3D';
 import { ControlPanel } from './components/ControlPanel';
 import type {
@@ -9,10 +9,11 @@ import type {
   CircleGeometry,
   PolygonGeometry,
   BaseMapConfig,
-  SceneTerrainConfig,
+  CliTerrainMode,
+  DataFile,
 } from './types';
-import { buildDefaultInput, defaultBaseMapConfig, resolveSceneTerrain } from './types';
-import { planRoute, sceneBounds } from './api';
+import { buildDefaultInput, defaultBaseMapConfig } from './types';
+import { planRoute, sceneBounds, fetchDataFiles } from './api';
 
 type ClickMode = 'start' | 'target' | 'midpoint' | 'polygon' | null;
 
@@ -35,8 +36,47 @@ export default function App() {
   // 视口瓦片是否在加载（canvas overlay 用）
   const [tilesLoading, setTilesLoading] = useState(false);
 
-  // 场景地形显示配置（demo 显示配置；与 CLI 计算配置 config.terrain 解耦，2026-08-20）
-  const [sceneTerrain, setSceneTerrain] = useState<SceneTerrainConfig>({ mode: 'follow' });
+  // CLI 计算数据源（2026-08-20）：none = 平地计算；follow_view = 跟随视图（用显示地形）
+  const [cliTerrainMode, setCliTerrainMode] = useState<CliTerrainMode>('follow_view');
+
+  // 数据文件扫描（2026-08-20：demo-server /api/data-files 扫描 data/，供下拉选择）
+  const [dataFiles, setDataFiles] = useState<{ terrain: DataFile[]; mask: DataFile[] }>({
+    terrain: [],
+    mask: [],
+  });
+
+  // 启动时扫描数据目录：自动填充默认地形与底图（第一个非空选项）
+  useEffect(() => {
+    let cancelled = false;
+    fetchDataFiles()
+      .then((res) => {
+        if (cancelled) return;
+        const terrainFiles = res.terrain ?? [];
+        const maskFiles = res.mask ?? [];
+        setDataFiles({ terrain: terrainFiles, mask: maskFiles });
+        if (terrainFiles.length > 0) {
+          setConfig((prev) => ({
+            ...prev,
+            terrain: { source: 'path', path: terrainFiles[0].path },
+          }));
+        }
+        if (maskFiles.length > 0) {
+          setBaseMapConfig((prev) => ({
+            ...prev,
+            source: 'mask',
+            path: maskFiles[0].path,
+          }));
+        }
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          console.warn('数据文件扫描失败:', err);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const [hoverPos, setHoverPos] = useState<Waypoint | null>(null);
   const hoverRafRef = useRef<number>(0);
@@ -59,7 +99,12 @@ export default function App() {
     setLoading(true);
     setResult(null);
     try {
-      const res = await planRoute(config);
+      // CLI 计算数据源解析：跟随视图 → 用显示地形；无 → 平地（不传地形）
+      const input: Input =
+        cliTerrainMode === 'follow_view'
+          ? config
+          : { ...config, terrain: { source: 'none' } };
+      const res = await planRoute(input);
       setResult(res);
     } catch (err) {
       setResult({
@@ -244,8 +289,9 @@ export default function App() {
           onBaseMapConfigChange={setBaseMapConfig}
           baseMapLoading={baseMapLoading}
           baseMapError={baseMapError}
-          sceneTerrain={sceneTerrain}
-          onSceneTerrainChange={setSceneTerrain}
+          cliTerrainMode={cliTerrainMode}
+          onCliTerrainModeChange={setCliTerrainMode}
+          dataFiles={dataFiles}
         />
       </div>
       <div className="canvas">
@@ -272,7 +318,7 @@ export default function App() {
             })),
           ]}
           results={result?.aircraft ?? null}
-          terrainConfig={resolveSceneTerrain(sceneTerrain, config.terrain)}
+          terrainConfig={config.terrain}
           baseMapConfig={baseMapConfig}
           sceneAltRange={sceneAltRange}
           bounds={sceneBounds(config)}

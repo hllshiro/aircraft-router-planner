@@ -203,12 +203,12 @@ pub enum ZoneShape {
 #[derive(Debug, Clone, Deserialize, Default, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TerrainConfig {
-    /// none（默认，海拔 0 平面）/ builtin（内置数据包）/ path（外部文件）
+    /// none（默认，海拔 0 平面）/ path（外部文件；加载失败降级为 none 并警告）
     #[serde(default)]
     pub source: TerrainSourceType,
     #[serde(default)]
     pub path: Option<String>,
-    /// 海岸掩膜文件（GSHHG 3 态；None 时自动探测默认掩膜）
+    /// 海岸掩膜文件（GSHHG 3 态；需显式指定，不自动探测）
     #[serde(default)]
     pub mask_path: Option<String>,
 }
@@ -218,7 +218,6 @@ pub struct TerrainConfig {
 pub enum TerrainSourceType {
     #[default]
     None,
-    Builtin,
     Path,
 }
 

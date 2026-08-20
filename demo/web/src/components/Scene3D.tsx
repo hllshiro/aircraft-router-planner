@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import * as THREE from 'three';
-import { Canvas } from '@react-three/fiber';
+import { Canvas, useFrame } from '@react-three/fiber';
 import { OrbitControls } from '@react-three/drei';
 import type { ThreeEvent } from '@react-three/fiber';
 import type {
@@ -157,14 +157,10 @@ function HoverPlane({
   geoRef,
   onMove,
   sampleHeight,
-  cameraRef,
-  controlsRef,
 }: {
   geoRef: GeoRef;
   onMove: (wp: Waypoint | null) => void;
   sampleHeight: (lon: number, lat: number) => number | null;
-  cameraRef: React.RefObject<any>;
-  controlsRef: React.RefObject<any>;
 }) {
   const meshRef = useRef<THREE.Mesh>(null);
   const lat0 = (geoRef.lat * Math.PI) / 180;
@@ -186,24 +182,14 @@ function HoverPlane({
     onMove(null);
   }, [onMove]);
 
-  useEffect(() => {
-    const cam = cameraRef.current;
-    if (!cam) return;
-    const update = () => {
-      const mesh = meshRef.current;
-      if (!mesh) return;
-      const H = cam.position.y;
-      const size = Math.max(H * 4, 200000);
-      mesh.position.set(cam.position.x, 0.1, cam.position.z);
-      mesh.scale.set(size / kx, size / ky, 1);
-    };
-    update();
-    const ctrl = controlsRef.current;
-    if (ctrl?.addEventListener) {
-      ctrl.addEventListener('change', update);
-      return () => ctrl.removeEventListener('change', update);
-    }
-  }, [cameraRef, kx, ky]);
+  useFrame(({ camera }) => {
+    const mesh = meshRef.current;
+    if (!mesh) return;
+    const H = camera.position.y;
+    const size = Math.max(H * 4, 200000);
+    mesh.position.set(camera.position.x, 0.1, camera.position.z);
+    mesh.scale.set(size / kx, size / ky, 1);
+  });
 
   return (
     <mesh
@@ -278,7 +264,7 @@ function computeZScaleFromTiles(
 }
 
 /** 无地形表面时的 0 高平面载体（2×2 网格足够；uv 由 TerrainMesh 按 bbox 计算）。
- *  用于 demo 显示配置为 none 或 CLI 计算配置为 none/builtin 时承载底图。 */
+ *  用于 demo 显示配置为 none 或 CLI 计算配置为 none 时承载底图。 */
 function planeTerrain(bbox: [number, number, number, number]): TerrainInfo {
   return {
     nx: 2, ny: 2,
@@ -639,8 +625,6 @@ export function Scene3D({
           geoRef={stableGeoRef}
           onMove={onMouseMove}
           sampleHeight={sampleHeight}
-          cameraRef={cameraRef}
-          controlsRef={controlsRef}
         />
       )}
 
