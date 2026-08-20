@@ -21,6 +21,15 @@
 - 契约版本追溯改由 CHANGELOG/技术方案版本承担（版本号不再是输入输出的重要参数）。
 - 输出 JSON 不再携带 `schema_version`。
 
+### 输入契约统一与飞行器化（v0.21 第二波）
+- 删除 mission 包裹层与顶层 start/target：起终点逐机显式（aircraft[].start/target 必填）；aircraft 空数组 → input_invalid: missing_aircraft（新原因码）
+- vehicle → aircraft 全量改名（契约 JSON 键 vehicles→aircraft、公开类型、内部标识符与注释）
+- 删除 start_pose（VehiclePose 与 Waypoint 重复类型）与 target_ref 魔法字符串（"mission.target"/"lon,lat,alt"），目标结构化
+- 武器移入飞行器：删除顶层 weapons 数组与 weapon_id="<id>_w1" 拼接约定；aircraft[].weapon{weapon_type 必填, range_km?, envelope?}（出现即启用）
+- Zone 删除 zone_type 键：三数组为唯一类型标记（解析层按数组注入内部字段；旧键 → malformed_json）
+- demo-server 修复：调用 CLI 补充 plan 子命令（v0.2.0 起需显式 plan，修复 /api/plan 失效）
+- crash_suite 新增 6 个第二波护栏用例
+
 ## [0.2.0] - 2026-08-18
 
 ### Added

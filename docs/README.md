@@ -22,7 +22,7 @@
 ## 目录
 
 - [01-概览与架构](./01-概览与架构.md) — 项目背景、目标与硬指标、技术选型、workspace 结构、分层架构（FMM 粗层 / 平滑细层 / 全链复验 / 回退层）、端到端数据流、实施进度、已知占位项
-- [02-输入输出契约](./02-输入输出契约.md) — Input/Output JSON schema（crs / mission / vehicles / zones / radar / weapons / parameters）、InputValidator、status 四态契约、错误码、默认参数表、A6 物理自洽
+- [02-输入输出契约](./02-输入输出契约.md) — Input/Output JSON schema（aircraft / red_forces / 三区 / terrain / parameters / weapon）、InputValidator、status 四态契约、错误码、默认参数表、A6 物理自洽
 - [03-坐标与投影](./03-坐标与投影.md) — 椭球表（WGS84/CGCS2000/GRS80）、TM 正反算（Krüger 级数）、UTM/GK3/WebMercator、近场 ENU、垂直基准层、WKT2 核对
 - [04-地形数据源](./04-地形数据源.md) — TerrainSource trait、Sample 语义（Land/Water/Lake/NoData/OOB/Forbidden）、ARPK1 内置格式（布局/fail-fast/缓存/双线性）、GSHHG 掩膜、SRTM/GeoTIFF/DTED（外部格式 solver 直读）、LOS 语义
 - [05-代价场与FMM](./05-代价场与FMM.md) — CostField、语义代价场构建、Godunov 迎风差分 + BinaryHeap 窄带、确定性堆、回溯、rstar 空间索引
@@ -33,7 +33,7 @@
 - [10-测试与验证](./10-测试与验证.md) — 单元/集成/崩溃套件（B9 一票否决）/回归套件（历史 bug 防复发）/基准实测数据/确定性验证/标定值状态
 - [11-工程化与构建](./11-工程化与构建.md) — workspace 配置、依赖版本锁定、静态编译红线、确定性构建 flags、交付形态、构建/运行命令
 - [12-两级分辨率架构评估](./12-两级分辨率架构评估.md) — 粗层（1-2km）细层（152.87m）两级分辨率评估记录
-- [13-输入参数消费审计](./13-输入参数消费审计.md) — 输入 JSON 逐字段消费审计、清理建议与 v0.21 定稿决策
+- [13-输入参数消费审计](./13-输入参数消费审计.md) — 输入 JSON 逐字段消费审计、清理建议与 v0.21 定稿决策、v0.21 第二波契约变更记录
 
 ## 关键信息速查
 
