@@ -26,7 +26,7 @@ pub enum InputInvalidReason {
     RadarOverlapNoFly,
     /// 地形数据空洞残留（加载后仍有 NaN/NoData 且未声明容忍）
     TerrainHolesRemain,
-    /// 车辆参数不自洽（如多机速度/半径/场景互相矛盾）
+    /// 飞行器参数不自洽（如多机速度/半径/场景互相矛盾）
     VehicleParamsInconsistent,
     /// 飞行器数组为空（逐机显式契约下无任务可规划）
     MissingAircraft,

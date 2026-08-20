@@ -120,7 +120,7 @@ fn assert_path_clear(input: &Input, out: &config::Output, name: &str) {
             for z in &zones {
                 if point_violates(z, &geo, pt.alt_m) {
                     panic!(
-                        "{name}: vehicle {} path point {i} (lon={}, lat={}, alt={}) violates zone {} ({:?})",
+                        "{name}: aircraft {} path point {i} (lon={}, lat={}, alt={}) violates zone {} ({:?})",
                         v.id, pt.x, pt.y, pt.alt_m, z.id, z.zone_type
                     );
                 }

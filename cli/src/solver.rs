@@ -429,7 +429,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
     // 6. 每机：分段 FMM（start → mid[0..] → target，共享代价场）→ 拼接 → 平滑 → 输出
     let mut out_aircraft = Vec::new();
     let mut fmm_ms = 0.0f64;
-    'veh: for v in &specs {
+    'aircraft: for v in &specs {
         // P6-B 检查点①（每机开始）：预算耗尽 → 有部分结果返回 degraded_timeout，
         // 无候选返回 DegradedTimeout（docs/07 §5：warm best-so-far 超时降级）。
         if over_budget(elapsed_ms) {
@@ -628,7 +628,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
             };
             let has_restricted_wall = all_zones.iter().any(|z| restricted_wall_for(z));
             let has_terrain_mask = use_terrain_mask && terrain.as_source().is_some();
-            let veh_field: Option<crate::costfield::CostField> =
+            let aircraft_field: Option<crate::costfield::CostField> =
                 if has_restricted_wall || has_terrain_mask {
                     let mut f = field.clone();
                     let g = f.rows;
@@ -676,11 +676,11 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                 } else {
                     None
                 };
-            let field_ref = veh_field.as_ref().unwrap_or(&field);
+            let field_ref = aircraft_field.as_ref().unwrap_or(&field);
             eprintln!(
-                "[debug] fmm attempt {} field ready (veh={})",
+                "[debug] fmm attempt {} field ready (aircraft={})",
                 attempts,
-                veh_field.is_some()
+                aircraft_field.is_some()
             );
             // 逐段 FMM → 回溯 → 拼接（去重段端点）
             let mut raw_segs: Vec<Path> = Vec::new();
@@ -834,7 +834,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                     "coarse FMM no path (docs/12 §11.2)",
                     &mut degradations,
                 );
-                continue 'veh;
+                continue 'aircraft;
             }
             // 段端点（必经点/目标）是硬约束：任何平滑不得移除
             raw_joined = join_paths(&raw_segs);
@@ -1852,7 +1852,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                 distance_m: 0.0,
                 warnings: diag,
             });
-            continue 'veh;
+            continue 'aircraft;
         }
         // 垂直剖面（2026-08-12 主管 demo 轨迹倾斜）：输出高度从起点高度按累计
         // 距离线性过渡到目标高度（起终点不同高时轨迹呈现爬升/下降，而非恒为
@@ -1998,7 +1998,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                     distance_m: 0.0,
                     warnings,
                 });
-                continue 'veh;
+                continue 'aircraft;
             }
         }
         let dist = Path::new(pts.clone()).length_m();
@@ -10024,7 +10024,7 @@ mod tests {
     // ---------- P7 Rmin-Rmax 环带目标集 + 发射包线（2026-08-12 主管拍板启动） ----------
     #[test]
     fn p7_ring_target_lands_in_ring_not_on_point() {
-        // 单机（隐式 v1）+ v1_w1 agm [3,120]：FMM 传播到环带即停——路径终点停在
+        // 单机显式 aircraft + weapon agm [3,120]：FMM 传播到环带即停——路径终点停在
         // **进入环带处（Rmax 外边界）**（T 最小 = 距源最近 = 刚进入发射阵位，
         // docs/技术方案 §4.2"传播到环带即停"），而非目标点本身（Rmin 内不得停留）。
         let s = r#"{
