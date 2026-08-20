@@ -37,6 +37,8 @@ export interface ViewportTilesState {
   wms: WmsTile | null;
   loading: boolean;
   error: string | null;
+  /** 从已加载瓦片双线性插值查询地面海拔（MSL 米）；无数据 → null */
+  sampleHeight: (lon: number, lat: number) => number | null;
 }
 
 export interface ViewportTilesOptions {
@@ -446,5 +448,45 @@ export function useViewportTiles(opts: ViewportTilesOptions): ViewportTilesState
     [],
   );
 
-  return { tiles, wms, loading, error };
+  const sampleHeight = useCallback(
+    (lon: number, lat: number): number | null => {
+      let best: TerrainInfo | null = null;
+      let bestSpan = Infinity;
+      for (const [, entry] of cacheRef.current) {
+        if (!entry.terrain) continue;
+        const [bMinLon, bMinLat, bMaxLon, bMaxLat] = entry.bbox;
+        if (lon < bMinLon || lon > bMaxLon || lat < bMinLat || lat > bMaxLat) continue;
+        const span = parseFloat(entry.key.split('|')[0]);
+        if (span < bestSpan) {
+          bestSpan = span;
+          best = entry.terrain;
+        }
+      }
+      if (!best) return null;
+      const { nx, ny, min_lon, min_lat, max_lon, max_lat, heights } = best;
+      const lonRange = max_lon - min_lon;
+      const latRange = max_lat - min_lat;
+      if (lonRange <= 0 || latRange <= 0) return null;
+      const fi = ((lon - min_lon) / lonRange) * (nx - 1);
+      const fj = ((max_lat - lat) / latRange) * (ny - 1);
+      const i0 = Math.max(0, Math.min(nx - 2, Math.floor(fi)));
+      const j0 = Math.max(0, Math.min(ny - 2, Math.floor(fj)));
+      const di = fi - i0;
+      const dj = fj - j0;
+      const h00 = heights[j0 * nx + i0];
+      const h10 = heights[j0 * nx + i0 + 1];
+      const h01 = heights[(j0 + 1) * nx + i0];
+      const h11 = heights[(j0 + 1) * nx + i0 + 1];
+      if (h00 == null || h10 == null || h01 == null || h11 == null) return null;
+      return (
+        h00 * (1 - di) * (1 - dj) +
+        h10 * di * (1 - dj) +
+        h01 * (1 - di) * dj +
+        h11 * di * dj
+      );
+    },
+    [],
+  );
+
+  return { tiles, wms, loading, error, sampleHeight };
 }

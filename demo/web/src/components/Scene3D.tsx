@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { Canvas } from '@react-three/fiber';
-import { OrbitControls, Grid } from '@react-three/drei';
+import { OrbitControls } from '@react-three/drei';
 import type { ThreeEvent } from '@react-three/fiber';
 import type {
   Waypoint,
@@ -55,6 +55,8 @@ interface Scene3DProps {
   activeClickMode: 'start' | 'target' | 'midpoint' | 'polygon' | null;
   /** 瓦片加载状态回调（App 用于 ControlPanel 底图状态 / canvas overlay） */
   onTilesStatus?: (loading: boolean, error: string | null) => void;
+  /** 鼠标滑动实时经纬高回调（右下角坐标显示） */
+  onMouseMove?: (wp: Waypoint | null) => void;
 }
 
 /** zone 渲染视图：输入 Zone 无 zone_type（JSON 契约 2026-08-19），前端按所属数组打标着色 */
@@ -147,6 +149,71 @@ function GroundClickPlane({
     >
       <planeGeometry args={[width, height]} />
       <meshBasicMaterial visible={false} />
+    </mesh>
+  );
+}
+
+function HoverPlane({
+  geoRef,
+  onMove,
+  sampleHeight,
+  cameraRef,
+  controlsRef,
+}: {
+  geoRef: GeoRef;
+  onMove: (wp: Waypoint | null) => void;
+  sampleHeight: (lon: number, lat: number) => number | null;
+  cameraRef: React.RefObject<any>;
+  controlsRef: React.RefObject<any>;
+}) {
+  const meshRef = useRef<THREE.Mesh>(null);
+  const lat0 = (geoRef.lat * Math.PI) / 180;
+  const kx = 111320 * Math.cos(lat0);
+  const ky = 110574;
+
+  const handlePointerMove = useCallback(
+    (e: ThreeEvent<PointerEvent>) => {
+      e.stopPropagation();
+      const wp = localToGeo([e.point.x, -e.point.z, 0], geoRef);
+      const h = sampleHeight(wp.lon, wp.lat);
+      if (h !== null) wp.alt_m = h;
+      onMove(wp);
+    },
+    [geoRef, onMove, sampleHeight],
+  );
+
+  const handlePointerLeave = useCallback(() => {
+    onMove(null);
+  }, [onMove]);
+
+  useEffect(() => {
+    const cam = cameraRef.current;
+    if (!cam) return;
+    const update = () => {
+      const mesh = meshRef.current;
+      if (!mesh) return;
+      const H = cam.position.y;
+      const size = Math.max(H * 4, 200000);
+      mesh.position.set(cam.position.x, 0.1, cam.position.z);
+      mesh.scale.set(size / kx, size / ky, 1);
+    };
+    update();
+    const ctrl = controlsRef.current;
+    if (ctrl?.addEventListener) {
+      ctrl.addEventListener('change', update);
+      return () => ctrl.removeEventListener('change', update);
+    }
+  }, [cameraRef, kx, ky]);
+
+  return (
+    <mesh
+      ref={meshRef}
+      rotation={[-Math.PI / 2, 0, 0]}
+      onPointerMove={handlePointerMove}
+      onPointerLeave={handlePointerLeave}
+    >
+      <planeGeometry args={[1, 1]} />
+      <meshBasicMaterial transparent opacity={0} depthWrite={false} />
     </mesh>
   );
 }
@@ -299,6 +366,7 @@ export function Scene3D({
   onMidpointMove,
   activeClickMode,
   onTilesStatus,
+  onMouseMove,
 }: Scene3DProps) {
   // 相机/轨道控制器引用
   const cameraRef = useRef<any>(null);
@@ -313,7 +381,7 @@ export function Scene3D({
   const stableGeoRef = geoRefRef.current;
 
   // 视口瓦片系统（相机 change 节流驱动；配置变化清缓存重载）
-  const { tiles, wms, loading: tilesLoading, error: tilesError } = useViewportTiles({
+  const { tiles, wms, loading: tilesLoading, error: tilesError, sampleHeight } = useViewportTiles({
     terrainConfig,
     baseMapConfig,
     cameraRef,
@@ -495,19 +563,6 @@ export function Scene3D({
         />
       ))}
 
-      <Grid
-        args={[100000, 100000, 20, 20]}
-        position={[50000, 0, 50000]}
-        cellSize={1000}
-        cellThickness={0.5}
-        cellColor="#4a5a78"
-        sectionSize={5000}
-        sectionThickness={1}
-        sectionColor="#6a7a98"
-        fadeDistance={400000}
-        infiniteGrid
-      />
-
       {/* 每机独立起点 marker（aircraft[].start；v0.21 起输入无 heading_deg，机头朝向为固定 45° 占位） */}
       {aircraft.map((a) => (
         <StartMarker
@@ -578,6 +633,16 @@ export function Scene3D({
           color={al.status === 'planned' ? '#ffdd00' : '#ff66aa'}
         />
       ))}
+
+      {onMouseMove && (
+        <HoverPlane
+          geoRef={stableGeoRef}
+          onMove={onMouseMove}
+          sampleHeight={sampleHeight}
+          cameraRef={cameraRef}
+          controlsRef={controlsRef}
+        />
+      )}
 
       <GroundClickPlane
         active={activeClickMode !== null}

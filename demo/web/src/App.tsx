@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo } from 'react';
+import { useState, useCallback, useMemo, useRef } from 'react';
 import { Scene3D } from './components/Scene3D';
 import { ControlPanel } from './components/ControlPanel';
 import type {
@@ -37,6 +37,13 @@ export default function App() {
 
   // 场景地形显示配置（demo 显示配置；与 CLI 计算配置 config.terrain 解耦，2026-08-20）
   const [sceneTerrain, setSceneTerrain] = useState<SceneTerrainConfig>({ mode: 'follow' });
+
+  const [hoverPos, setHoverPos] = useState<Waypoint | null>(null);
+  const hoverRafRef = useRef<number>(0);
+  const handleMouseMove = useCallback((wp: Waypoint | null) => {
+    cancelAnimationFrame(hoverRafRef.current);
+    hoverRafRef.current = requestAnimationFrame(() => setHoverPos(wp));
+  }, []);
 
   // Scene3D 瓦片加载状态回调（loading/error 汇总 → ControlPanel 底图区 + overlay）
   const handleTilesStatus = useCallback(
@@ -275,12 +282,18 @@ export default function App() {
           onMidpointMove={handleMidpointMove}
           activeClickMode={clickMode}
           onTilesStatus={handleTilesStatus}
+          onMouseMove={handleMouseMove}
         />
         {baseMapError && (
           <div className="canvas-overlay-error">⚠ 数据加载失败: {baseMapError}</div>
         )}
         {tilesLoading && (
           <div className="canvas-overlay-loading">⏳ 视口数据加载中…</div>
+        )}
+        {hoverPos && (
+          <div className="canvas-overlay-coords">
+            {hoverPos.lat.toFixed(6)}°N, {hoverPos.lon.toFixed(6)}°E, {hoverPos.alt_m.toFixed(1)}m
+          </div>
         )}
       </div>
     </div>
