@@ -9,6 +9,8 @@
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-08-20
+
 ### Added
 - demo 场景新增鼠标悬停经纬高实时显示（右下角浮层）。
 - demo-server 新增 `GET /api/data-files`：扫描数据目录（`DATA_DIR` 环境变量覆盖，默认 exe 同级 `data/`），按扩展名分类返回地形/掩膜文件列表，供前端下拉选择。
@@ -21,14 +23,6 @@
 - 掩膜不再自动探测：仅显式指定 `--mask`/`terrain.mask_path` 时启用（文件缺失仍报错）。
 - demo 前端自动扫描数据目录：启动时拉取 `/api/data-files`，有地形/掩膜文件时默认选中第一个，路径输入改为文件下拉。
 - demo 地形面板重构：「地形（CLI计算）」更名为「地形显示」；原「地形显示」更名为「CLI计算数据源」（none/follow_view，默认跟随视图）。
-
-### Fixed
-- 修复 pnpm 构建时 hls.js 触发最小发布年龄检查报错。
-
-## [0.2.1] - 2026-08-19
-
-### Changed
-
 - **输入/输出契约精简（破坏性变更，v0.21）**：删除全部未消费字段——顶层 `schema_version`（输入输出全删）、`crs`/`output_crs`、`red_forces.sams`、`radar.radar_type`、`terrain.resolution_m`/`vertical_datum`、`zone.height_semantics`（高度一律 MSL）、`weapon.fuze_type`/`target_ref`、`start_pose.heading_deg`、`profile.detection_probability`、`parameters` 的 `main_budget_ms`/`degrade_budget_ms`/`z_resolution_m`/`fine_success_threshold`/`coarse_cell_m`/`default_weapon_radius_km`/`weapon_map`；`DefaultParams` 同名死字段与零调用点的 `default_weapon_map()` 一并删除。携带旧字段的输入将被拒绝（`input_invalid: malformed_json`）。
 - 契约版本追溯改由 CHANGELOG/技术方案版本承担（版本号不再是输入输出的重要参数）。
 - 输出 JSON 不再携带 `schema_version`。
@@ -41,6 +35,9 @@
 - Zone 删除 zone_type 键：三数组为唯一类型标记（解析层按数组注入内部字段；旧键 → malformed_json）
 - demo-server 修复：调用 CLI 补充 plan 子命令（v0.2.0 起需显式 plan，修复 /api/plan 失效）
 - crash_suite 新增 6 个第二波护栏用例
+
+### Fixed
+- 修复 pnpm 构建时 hls.js 触发最小发布年龄检查报错。
 
 ## [0.2.0] - 2026-08-18
 
