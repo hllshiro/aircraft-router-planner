@@ -1,4 +1,5 @@
-// AircraftRouterPlanner Demo 前端类型 —— 匹配 cli/src/config.rs 输入/输出契约（schema 0.20）。
+// AircraftRouterPlanner Demo 前端类型 —— 匹配 cli/src/config.rs 输入/输出契约（schema 0.21；
+// 2026-08-19 第二波：mission 包裹层已拍平、逐机显式 start/target、武器移入飞行器）。
 // 坐标统一：经纬度（度，WGS84）+ MSL 高度（米）。三维场景采用局部等距投影
 // （geoToLocal，见下方）：x=东（经度→米）、y=北（纬度→米）、z=高（米）。
 
@@ -16,7 +17,7 @@ export interface Waypoint {
 // === 输入类型（匹配 Input JSON） ===
 export type AircraftType = 'FIXED_WING' | 'ROTORCRAFT';
 
-export interface VehicleProfile {
+export interface AircraftProfile {
   aircraft_type: AircraftType;
   cruise_speed_mps?: number;
   speed_range_mps?: [number, number];
@@ -26,19 +27,18 @@ export interface VehicleProfile {
   ceiling_m?: number;
 }
 
-export interface VehiclePose {
-  lon: number;
-  lat: number;
-  alt_m: number;
-}
-
-export interface VehicleInput {
+export interface AircraftInput {
   id: string;
-  profile: VehicleProfile;
-  start_pose: VehiclePose;
-  /** 目标引用：缺省 / "mission.target" = mission.target；"lon,lat[,alt]" = 自定义坐标（每机独立终点） */
-  target_ref?: string;
+  /** 机型性能参数（整段省略 → 缺省固定翼占位） */
+  profile?: AircraftProfile;
+  /** 起点（必填） */
+  start: Waypoint;
+  /** 目标点（必填） */
+  target: Waypoint;
+  /** 中途必经点：start → mid[0..] → target（alt_m 为垂直剖面分段锚点） */
   mid_waypoints?: Waypoint[];
+  /** 武器（出现即启用；缺省 = 点目标语义） */
+  weapon?: WeaponInput;
 }
 
 export interface Radar {
@@ -64,7 +64,8 @@ export type ZoneGeometry = CircleGeometry | PolygonGeometry;
 
 export interface Zone {
   id: string;
-  zone_type: ZoneType;
+  /** zone_type 不入 JSON（后端按所属数组注入：no_fly_zones/restricted_zones/obstacles）；
+   *  前端渲染时由 App 按数组打标（Scene3D 的 VisualZone） */
   shape: 'circle' | 'polygon';
   geometry: ZoneGeometry;
   /** 仅限飞区（restricted）需要高度区间；禁飞/障碍全高度禁入，省略（2026-08-12） */
@@ -86,15 +87,25 @@ export interface ParamsOverride {
   los_mask_coef?: number;
 }
 
-// === 武器（匹配 cli/src/config.rs WeaponEntry；P6-D 2026-08-12） ===
+// === 武器（匹配 cli/src/config.rs Weapon；2026-08-19 移入飞行器：weapon 出现即启用、weapon_type 必填） ===
 export type WeaponType = 'aam' | 'agm' | 'bomb';
 
+export interface LaunchEnvelope {
+  /** 航向窗 [min, max]°（硬校验） */
+  heading_deg?: [number, number];
+  /** 高度窗 [min, max] m（硬校验） */
+  alt_m?: [number, number];
+  /** 速度窗 [min, max] m/s（软校验） */
+  speed_mps?: [number, number];
+}
+
 export interface WeaponInput {
-  weapon_id: string;
-  /** 缺省 = 该武器默认不启用（不参与规划计算） */
-  weapon_type?: WeaponType;
+  /** 武器类型（aam / agm / bomb）。出现即启用，类型必填。 */
+  weapon_type: WeaponType;
   /** 射程 [Rmin, Rmax] km；缺省 = 按类型默认（aam [5,40] / agm [3,120] / bomb [1,15]） */
   range_km?: [number, number];
+  /** 发射包线（航向/高度/速度窗） */
+  envelope?: LaunchEnvelope;
 }
 
 /** 武器类型默认射程 [Rmin, Rmax] km（与 cli/config.rs WeaponType::default_range_km 对齐） */
@@ -104,21 +115,16 @@ export const WEAPON_DEFAULT_RANGE_KM: Record<WeaponType, [number, number]> = {
   bomb: [1, 15],
 };
 
-export interface Mission {
-  start: Waypoint;
-  target: Waypoint;
-  vehicles: VehicleInput[];
+/** 顶层输入（2026-08-19 第二波：mission 包裹层已拍平；逐机显式 start/target） */
+export interface Input {
+  /** 飞行器数组（必填非空；空数组 → missing_aircraft） */
+  aircraft: AircraftInput[];
   red_forces: { radars: Radar[] };
   no_fly_zones: Zone[];
   restricted_zones: Zone[];
   obstacles: Zone[];
   terrain: TerrainConfig;
-  weapons: WeaponInput[];
   parameters: ParamsOverride;
-}
-
-export interface InputConfig {
-  mission: Mission;
 }
 
 // === 输出类型（匹配 Output JSON） ===
@@ -128,7 +134,7 @@ export interface PathPoint {
   alt_m: number; // MSL 米
 }
 
-export interface VehicleOutput {
+export interface AircraftOutput {
   id: string;
   status: 'planned' | 'no_solution' | 'degraded';
   path: PathPoint[];
@@ -151,7 +157,7 @@ export interface PlanResult {
   status: 'success' | 'degraded_timeout' | 'no_solution' | 'input_invalid';
   error?: ErrorDetail | null;
   elapsed_ms?: number;
-  vehicles: VehicleOutput[];
+  aircraft: AircraftOutput[];
   stats: OutputStats;
 }
 
@@ -193,25 +199,6 @@ export function geoPointToLocal(
   return geoToLocal({ lon, lat, alt_m }, ref, zScale);
 }
 
-/** 每机自定义目标（target_ref = "lon,lat[,alt]"）；缺省 / "mission.target" → null */
-export function parseVehicleTargetRef(
-  v: VehicleInput,
-  missionTarget: Waypoint,
-): Waypoint | null {
-  const r = (v.target_ref ?? '').trim();
-  if (!r || r === 'mission.target') return null;
-  const parts = r.split(',').map((s) => s.trim());
-  if (parts.length < 2) return null;
-  const lon = +parts[0];
-  const lat = +parts[1];
-  if (!Number.isFinite(lon) || !Number.isFinite(lat)) return null;
-  const alt =
-    parts.length >= 3 && Number.isFinite(+parts[2])
-      ? +parts[2]
-      : missionTarget.alt_m;
-  return { lon, lat, alt_m: alt };
-}
-
 export function localToGeo(v: Vec3, ref: GeoRef): Waypoint {
   const lat0 = (ref.lat * Math.PI) / 180;
   const lon = ref.lon + v[0] / (111320 * Math.cos(lat0));
@@ -220,34 +207,23 @@ export function localToGeo(v: Vec3, ref: GeoRef): Waypoint {
 }
 
 // === 默认配置（北京近郊演示场景） ===
-export function defaultInputConfig(): InputConfig {
+export function buildDefaultInput(): Input {
   return {
-    mission: {
-      start: { lon: 115.9, lat: 39.8, alt_m: 3000 },
-      target: { lon: 116.8, lat: 40.3, alt_m: 3000 },
-      vehicles: [
-        {
-          id: 'v1',
-          profile: {
-            aircraft_type: 'FIXED_WING',
-            cruise_speed_mps: 250,
-            min_turn_radius_m: 442,
-            max_climb_angle_deg: 15,
-          },
-          start_pose: { lon: 115.9, lat: 39.8, alt_m: 3000 },
-          mid_waypoints: [],
-        },
-      ],
-      red_forces: { radars: [] },
-      no_fly_zones: [],
-      restricted_zones: [],
-      obstacles: [],
-      weapons: [],
-      // 默认真实地形：east_asia_7p5as ARPK1（~537MB，GMTED2010 东亚 7.5as，70-135E, 15-55N）
-      // 与发布版（install/）默认地形对齐；路径相对 workspace 根（demo-server 与 CLI 的 cwd）
-      terrain: { source: 'path', path: 'data/east_asia_7p5as.arpack' },
-      parameters: {},
-    },
+    aircraft: [
+      {
+        id: 'a1',
+        profile: { aircraft_type: 'FIXED_WING' },
+        start: { lon: 115.9, lat: 39.8, alt_m: 3000 },
+        target: { lon: 116.4, lat: 40.0, alt_m: 1000 },
+        mid_waypoints: [],
+      },
+    ],
+    red_forces: { radars: [] },
+    no_fly_zones: [],
+    restricted_zones: [],
+    obstacles: [],
+    terrain: { source: 'none', path: undefined },
+    parameters: {},
   };
 }
 

@@ -2,7 +2,7 @@ import { useState, useCallback, useMemo } from 'react';
 import { Scene3D } from './components/Scene3D';
 import { ControlPanel } from './components/ControlPanel';
 import type {
-  InputConfig,
+  Input,
   PlanResult,
   Waypoint,
   Zone,
@@ -10,28 +10,18 @@ import type {
   PolygonGeometry,
   BaseMapConfig,
 } from './types';
-import { defaultInputConfig, parseVehicleTargetRef, defaultBaseMapConfig } from './types';
+import { buildDefaultInput, defaultBaseMapConfig } from './types';
 import { planRoute, sceneBounds } from './api';
 
 type ClickMode = 'start' | 'target' | 'midpoint' | 'polygon' | null;
 
-/** 解析 target_ref 当前目标高度（自定义坐标第 3 段；缺省回落 mission.target.alt_m） */
-function currentTargetAlt(v: { target_ref?: string } | undefined, fallback: number): number {
-  if (v?.target_ref) {
-    const parts = v.target_ref.split(',').map((s) => s.trim());
-    const a = +parts[2];
-    if (parts.length >= 3 && Number.isFinite(a)) return a;
-  }
-  return fallback;
-}
-
 export default function App() {
-  const [config, setConfig] = useState<InputConfig>(defaultInputConfig);
+  const [config, setConfig] = useState<Input>(buildDefaultInput);
   const [result, setResult] = useState<PlanResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [clickMode, setClickMode] = useState<ClickMode>(null);
-  // 每机拾取目标下标（clickMode === 'start' | 'target' 时生效；每机独立起终点）
-  const [pickVehicleIdx, setPickVehicleIdx] = useState<number | null>(null);
+  // 拾取目标机下标（clickMode === 'start' | 'target' | 'midpoint' 时生效；逐机起终点/必经点）
+  const [pickAircraftIdx, setPickAircraftIdx] = useState<number | null>(null);
   // 多边形拾取编辑目标 zone id（clickMode === 'polygon' 时生效）
   const [editingZoneId, setEditingZoneId] = useState<string | null>(null);
   // 底图层（2026-08-13：掩膜 / GeoTIFF / WMS 三选一；地形/底图瓦片由 Scene3D 按
@@ -68,7 +58,7 @@ export default function App() {
           message: String(err),
         },
         elapsed_ms: 0,
-        vehicles: [],
+        aircraft: [],
         stats: { fmm_ms: 0, los_checks: 0, degradations: [] },
       });
     } finally {
@@ -79,14 +69,11 @@ export default function App() {
   const handleRadarMove = useCallback((id: string, lon: number, lat: number) => {
     setConfig((prev) => ({
       ...prev,
-      mission: {
-        ...prev.mission,
-        red_forces: {
-          ...prev.mission.red_forces,
-          radars: prev.mission.red_forces.radars.map((r) =>
-            r.id === id ? { ...r, lon, lat } : r,
-          ),
-        },
+      red_forces: {
+        ...prev.red_forces,
+        radars: prev.red_forces.radars.map((r) =>
+          r.id === id ? { ...r, lon, lat } : r,
+        ),
       },
     }));
   }, []);
@@ -115,33 +102,26 @@ export default function App() {
           },
         };
       };
-      const m = prev.mission;
       return {
         ...prev,
-        mission: {
-          ...m,
-          no_fly_zones: m.no_fly_zones.map(shift),
-          restricted_zones: m.restricted_zones.map(shift),
-          obstacles: m.obstacles.map(shift),
-        },
+        no_fly_zones: prev.no_fly_zones.map(shift),
+        restricted_zones: prev.restricted_zones.map(shift),
+        obstacles: prev.obstacles.map(shift),
       };
     });
   }, []);
 
   const handleMidpointMove = useCallback(
-    (vehicleId: string, index: number, lon: number, lat: number) => {
+    (aircraftId: string, index: number, lon: number, lat: number) => {
       setConfig((prev) => ({
         ...prev,
-        mission: {
-          ...prev.mission,
-          vehicles: prev.mission.vehicles.map((v) => {
-            if (v.id !== vehicleId) return v;
-            const ms = [...(v.mid_waypoints ?? [])];
-            if (!ms[index]) return v;
-            ms[index] = { ...ms[index], lon, lat };
-            return { ...v, mid_waypoints: ms };
-          }),
-        },
+        aircraft: prev.aircraft.map((a) => {
+          if (a.id !== aircraftId) return a;
+          const ms = [...(a.mid_waypoints ?? [])];
+          if (!ms[index]) return a;
+          ms[index] = { ...ms[index], lon, lat };
+          return { ...a, mid_waypoints: ms };
+        }),
       }));
     },
     [],
@@ -149,49 +129,45 @@ export default function App() {
 
   const handleGroundClick = useCallback(
     (wp: Waypoint) => {
-      // 每机独立起点/终点拾取（2026-08-10）：start → 该机 start_pose；target → 该机
-      // target_ref（"lon,lat,alt" 自定义坐标，核心已支持每机独立目标）
-      if ((clickMode === 'start' || clickMode === 'target') && pickVehicleIdx !== null) {
-        setConfig((prev) => {
-          const vehicles = prev.mission.vehicles.map((v, i) => {
-            if (i !== pickVehicleIdx) return v;
+      // 逐机独立起点/终点拾取：start → 该机 start；target → 该机 target（2026-08-19：
+      // 契约拍平后 target 为必填 Waypoint，直接改坐标，保留原高度）
+      if ((clickMode === 'start' || clickMode === 'target') && pickAircraftIdx !== null) {
+        setConfig((prev) => ({
+          ...prev,
+          aircraft: prev.aircraft.map((a, i) => {
+            if (i !== pickAircraftIdx) return a;
             if (clickMode === 'start') {
-              return {
-                ...v,
-                start_pose: { ...v.start_pose, lon: wp.lon, lat: wp.lat },
-              };
+              return { ...a, start: { ...a.start, lon: wp.lon, lat: wp.lat } };
             }
-            const alt = currentTargetAlt(v, prev.mission.target.alt_m);
-            return { ...v, target_ref: `${wp.lon},${wp.lat},${alt}` };
-          });
-          return { ...prev, mission: { ...prev.mission, vehicles } };
-        });
+            return { ...a, target: { ...a.target, lon: wp.lon, lat: wp.lat } };
+          }),
+        }));
         setClickMode(null);
-        setPickVehicleIdx(null);
-      } else if (clickMode === 'midpoint' && pickVehicleIdx !== null) {
-        // 场景拾取添加必经点（2026-08-10）：高度取该机起点高度；保持拾取模式可连续添加
-        setConfig((prev) => {
-          const vehicles = prev.mission.vehicles.map((v, i) => {
-            if (i !== pickVehicleIdx) return v;
+        setPickAircraftIdx(null);
+      } else if (clickMode === 'midpoint' && pickAircraftIdx !== null) {
+        // 场景拾取添加必经点：高度取该机起点高度；保持拾取模式可连续添加
+        setConfig((prev) => ({
+          ...prev,
+          aircraft: prev.aircraft.map((a, i) => {
+            if (i !== pickAircraftIdx) return a;
             return {
-              ...v,
+              ...a,
               mid_waypoints: [
-                ...(v.mid_waypoints ?? []),
-                { lon: wp.lon, lat: wp.lat, alt_m: v.start_pose.alt_m },
+                ...(a.mid_waypoints ?? []),
+                { lon: wp.lon, lat: wp.lat, alt_m: a.start.alt_m },
               ],
             };
-          });
-          return { ...prev, mission: { ...prev.mission, vehicles } };
-        });
+          }),
+        }));
       } else if (clickMode === 'polygon' && editingZoneId) {
-        // 场景拾取追加多边形顶点（禁飞区或限飞区，2026-08-12 补限飞区支持）
+        // 场景拾取追加多边形顶点（禁飞区或限飞区）
         setConfig((prev) => {
           // 先查禁飞区数组（zone_ 前缀），未命中则查限飞区数组（rz_ 前缀）
-          const inNoFly = prev.mission.no_fly_zones.some(
+          const inNoFly = prev.no_fly_zones.some(
             (z) => z.id === editingZoneId,
           );
           if (inNoFly) {
-            const zones = prev.mission.no_fly_zones.map((z) => {
+            const zones = prev.no_fly_zones.map((z) => {
               if (z.id !== editingZoneId || z.shape !== 'polygon') return z;
               return {
                 ...z,
@@ -203,9 +179,9 @@ export default function App() {
                 },
               };
             });
-            return { ...prev, mission: { ...prev.mission, no_fly_zones: zones } };
+            return { ...prev, no_fly_zones: zones };
           }
-          const rzones = prev.mission.restricted_zones.map((z) => {
+          const rzones = prev.restricted_zones.map((z) => {
             if (z.id !== editingZoneId || z.shape !== 'polygon') return z;
             return {
               ...z,
@@ -217,31 +193,23 @@ export default function App() {
               },
             };
           });
-          return {
-            ...prev,
-            mission: { ...prev.mission, restricted_zones: rzones },
-          };
+          return { ...prev, restricted_zones: rzones };
         });
       }
     },
-    [clickMode, editingZoneId, pickVehicleIdx],
+    [clickMode, editingZoneId, pickAircraftIdx],
   );
 
   const bbox = sceneBounds(config);
 
-  // 场景高度范围（米）：mission 起终点 / 每机起点与自定义目标 / 结果路径高度
+  // 场景高度范围（米）：逐机 start/target / 结果路径高度
   // —— 无地形数据时驱动 z 夸张（2026-08-12：起终点不同高度轨迹需呈现倾斜）
   const sceneAltRange = useMemo(() => {
-    const alts: number[] = [
-      config.mission.start.alt_m,
-      config.mission.target.alt_m,
-      ...config.mission.vehicles.map((v) => v.start_pose.alt_m),
-    ];
-    config.mission.vehicles.forEach((v) => {
-      const t = parseVehicleTargetRef(v, config.mission.target);
-      if (t) alts.push(t.alt_m);
-    });
-    result?.vehicles.forEach((vo) => vo.path.forEach((p) => alts.push(p.alt_m)));
+    const alts: number[] = [];
+    for (const a of config.aircraft) {
+      alts.push(a.start.alt_m, a.target.alt_m);
+    }
+    result?.aircraft.forEach((ao) => ao.path.forEach((p) => alts.push(p.alt_m)));
     if (!alts.length) return 2000;
     return Math.max(Math.max(...alts) - Math.min(...alts), 1);
   }, [config, result]);
@@ -259,8 +227,8 @@ export default function App() {
           onSetClickMode={setClickMode}
           editingZoneId={editingZoneId}
           onEditingZoneId={setEditingZoneId}
-          pickVehicleIdx={pickVehicleIdx}
-          onPickVehicle={setPickVehicleIdx}
+          pickAircraftIdx={pickAircraftIdx}
+          onPickAircraft={setPickAircraftIdx}
           baseMapConfig={baseMapConfig}
           onBaseMapConfigChange={setBaseMapConfig}
           baseMapLoading={baseMapLoading}
@@ -273,17 +241,25 @@ export default function App() {
             lon: (bbox[0] + bbox[2]) / 2,
             lat: (bbox[1] + bbox[3]) / 2,
           }}
-          start={config.mission.start}
-          target={config.mission.target}
-          vehicles={config.mission.vehicles}
-          radars={config.mission.red_forces.radars}
+          target={config.aircraft[0].target}
+          aircraft={config.aircraft}
+          radars={config.red_forces.radars}
           zones={[
-            ...config.mission.no_fly_zones,
-            ...config.mission.restricted_zones,
-            ...config.mission.obstacles,
+            ...config.no_fly_zones.map((z) => ({
+              ...z,
+              zone_type: 'no_fly' as const,
+            })),
+            ...config.restricted_zones.map((z) => ({
+              ...z,
+              zone_type: 'restricted' as const,
+            })),
+            ...config.obstacles.map((z) => ({
+              ...z,
+              zone_type: 'obstacle' as const,
+            })),
           ]}
-          results={result?.vehicles ?? null}
-          terrainConfig={config.mission.terrain}
+          results={result?.aircraft ?? null}
+          terrainConfig={config.terrain}
           baseMapConfig={baseMapConfig}
           sceneAltRange={sceneAltRange}
           bounds={sceneBounds(config)}

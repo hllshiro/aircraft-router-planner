@@ -1,11 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
-  InputConfig,
+  Input,
   PlanResult,
   Radar,
   Zone,
-  Waypoint,
-  VehicleInput,
+  AircraftInput,
   WeaponInput,
   WeaponType,
   BaseMapConfig,
@@ -17,8 +16,8 @@ import { fetchElevation, sanitizePath } from '../api';
 import { ResultPanel } from './ResultPanel';
 
 interface ControlPanelProps {
-  config: InputConfig;
-  onConfigChange: (config: InputConfig) => void;
+  config: Input;
+  onConfigChange: (config: Input) => void;
   onPlan: () => void;
   result: PlanResult | null;
   loading: boolean;
@@ -26,32 +25,14 @@ interface ControlPanelProps {
   onSetClickMode: (mode: 'start' | 'target' | 'midpoint' | 'polygon' | null) => void;
   editingZoneId: string | null;
   onEditingZoneId: (id: string | null) => void;
-  /** 每机拾取目标下标（点击设置起/终点，2026-08-10） */
-  pickVehicleIdx: number | null;
-  onPickVehicle: (idx: number | null) => void;
+  /** 拾取目标机下标（点击设置起/终点/必经点，2026-08-10） */
+  pickAircraftIdx: number | null;
+  onPickAircraft: (idx: number | null) => void;
   /** 底图层（2026-08-13：掩膜/GeoTIFF/WMS 三选一，配置置入左侧功能区） */
   baseMapConfig: BaseMapConfig;
   onBaseMapConfigChange: (cfg: BaseMapConfig) => void;
   baseMapLoading: boolean;
   baseMapError: string | null;
-}
-
-/** 每机当前目标（自定义 target_ref 或 mission.target） */
-function vehicleTarget(v: VehicleInput, missionTarget: Waypoint): Waypoint {
-  const r = (v.target_ref ?? '').trim();
-  if (r && r !== 'mission.target') {
-    const parts = r.split(',').map((s) => s.trim());
-    const lon = +parts[0];
-    const lat = +parts[1];
-    if (Number.isFinite(lon) && Number.isFinite(lat)) {
-      const alt =
-        parts.length >= 3 && Number.isFinite(+parts[2])
-          ? +parts[2]
-          : missionTarget.alt_m;
-      return { lon, lat, alt_m: alt };
-    }
-  }
-  return { ...missionTarget };
 }
 
 export function ControlPanel({
@@ -64,194 +45,150 @@ export function ControlPanel({
   onSetClickMode,
   editingZoneId,
   onEditingZoneId,
-  pickVehicleIdx,
-  onPickVehicle,
+  pickAircraftIdx,
+  onPickAircraft,
   baseMapConfig,
   onBaseMapConfigChange,
   baseMapLoading,
   baseMapError,
 }: ControlPanelProps) {
-  const mission = config.mission;
-  const update = (patch: Partial<InputConfig>) =>
+  const update = (patch: Partial<Input>) =>
     onConfigChange({ ...config, ...patch });
-  const updateMission = (patch: Partial<InputConfig['mission']>) =>
-    update({ mission: { ...mission, ...patch } });
+  // 单机表单（2026-08-19 契约拍平后 demo 保持单机）：所有编辑落到 aircraft[0]
+  const aircraft = config.aircraft[0];
+  const updateAircraft = (patch: Partial<AircraftInput>) => {
+    if (!config.aircraft.length) return;
+    update({
+      aircraft: config.aircraft.map((a, i) =>
+        i === 0 ? { ...a, ...patch } : a,
+      ),
+    });
+  };
+  const updateProfile = (patch: Partial<AircraftInput['profile']>) => {
+    // aircraft_type 由默认输入保证存在；cast 仅补全 TS 的 Partial 合并类型
+    updateAircraft({
+      profile: {
+        aircraft_type: 'FIXED_WING',
+        ...aircraft.profile,
+        ...patch,
+      } as AircraftInput['profile'],
+    });
+  };
 
   // —— 起终点地面海拔（2026-08-14：高度输入框 min = 地面海拔；低于地面自动抬升）——
   // ref 存最新状态/回调，避免 250ms 防抖查询回调用陈旧闭包覆盖用户的并发修改
-  const missionRef = useRef(mission);
-  missionRef.current = mission;
   const configRef = useRef(config);
   configRef.current = config;
   const onConfigChangeRef = useRef(onConfigChange);
   onConfigChangeRef.current = onConfigChange;
-  const [groundAlt, setGroundAlt] = useState<
-    Record<string, { s: number | null; t: number | null }>
-  >({});
+  const [groundAlt, setGroundAlt] = useState<{
+    s: number | null;
+    t: number | null;
+  }>({ s: null, t: null });
 
   const updateBaseMap = (patch: Partial<BaseMapConfig>) =>
     onBaseMapConfigChange({ ...baseMapConfig, ...patch });
 
-  const updateVehicleAt = (idx: number, patch: Partial<VehicleInput>) => {
-    const vehicles = [...mission.vehicles];
-    vehicles[idx] = { ...vehicles[idx], ...patch };
-    updateMission({ vehicles });
-  };
-
   // 起终点经纬度签名：仅经纬度/地形路径变化才重新查询海拔（高度变化不触发）
-  const startTargetKey = useMemo(
-    () =>
-      mission.vehicles
-        .map(
-          (v) =>
-            `${v.id}|${v.start_pose.lon.toFixed(5)},${v.start_pose.lat.toFixed(5)}|${vehicleTarget(v, mission.target).lon.toFixed(5)},${vehicleTarget(v, mission.target).lat.toFixed(5)}`,
-        )
-        .join(';') + '|' + mission.terrain.path,
-    [mission.vehicles, mission.target, mission.terrain.path],
-  );
+  const startTargetKey = useMemo(() => {
+    if (!config.aircraft.length) return 'none';
+    const a = config.aircraft[0];
+    return (
+      `${a.id}|${a.start.lon.toFixed(5)},${a.start.lat.toFixed(5)}|` +
+      `${a.target.lon.toFixed(5)},${a.target.lat.toFixed(5)}|${config.terrain.path}`
+    );
+  }, [config]);
 
   // 经纬度变化（防抖 250ms）→ 查询该点地面海拔 → 设置 min；
   // 当前高度低于地面 → 自动抬升到地面海拔（主管 2026-08-14）
   useEffect(() => {
     const timers: number[] = [];
     const schedule = (
-      idx: number,
-      key: string,
       lon: number,
       lat: number,
       kind: 's' | 't',
     ) => {
       timers.push(
         window.setTimeout(() => {
-          // path 缺省用默认地形（与 types.ts 默认一致；无效路径 → fetchElevation 返回 null，静默无 min）
+          // path 缺省用默认地形；无效路径 → fetchElevation 返回 null，静默无 min
           const terrainPath =
-            missionRef.current.terrain.path ?? 'data/east_asia_7p5as.arpack';
+            configRef.current.terrain.path ?? 'data/east_asia_7p5as.arpack';
           fetchElevation(terrainPath, lon, lat).then((e) => {
-            setGroundAlt((prev) => ({ ...prev, [key]: { ...prev[key], [kind]: e } }));
+            setGroundAlt((prev) => ({ ...prev, [kind]: e }));
             if (e == null) return;
-            const m = missionRef.current;
-            const v = m.vehicles[idx];
-            if (!v) return;
+            const c = configRef.current;
+            const a = c.aircraft[0];
+            if (!a) return;
             if (kind === 's') {
-              if (v.start_pose.alt_m < e) {
-                const vehicles = [...m.vehicles];
-                vehicles[idx] = { ...v, start_pose: { ...v.start_pose, alt_m: e } };
+              if (a.start.alt_m < e) {
                 onConfigChangeRef.current({
-                  ...configRef.current,
-                  mission: { ...m, vehicles },
+                  ...c,
+                  aircraft: c.aircraft.map((x, i) =>
+                    i === 0 ? { ...x, start: { ...x.start, alt_m: e } } : x,
+                  ),
                 });
               }
-            } else {
-              const tgt = vehicleTarget(v, m.target);
-              if (tgt.alt_m < e) {
-                const vehicles = [...m.vehicles];
-                vehicles[idx] = { ...v, target_ref: `${tgt.lon},${tgt.lat},${e}` };
-                onConfigChangeRef.current({
-                  ...configRef.current,
-                  mission: { ...m, vehicles },
-                });
-              }
+            } else if (a.target.alt_m < e) {
+              onConfigChangeRef.current({
+                ...c,
+                aircraft: c.aircraft.map((x, i) =>
+                  i === 0 ? { ...x, target: { ...x.target, alt_m: e } } : x,
+                ),
+              });
             }
           });
         }, 250),
       );
     };
-    missionRef.current.vehicles.forEach((v, idx) => {
-      const tgt = vehicleTarget(v, missionRef.current.target);
-      schedule(idx, v.id, v.start_pose.lon, v.start_pose.lat, 's');
-      schedule(idx, v.id, tgt.lon, tgt.lat, 't');
-    });
+    const a = configRef.current.aircraft[0];
+    if (a) {
+      schedule(a.start.lon, a.start.lat, 's');
+      schedule(a.target.lon, a.target.lat, 't');
+    }
     return () => timers.forEach((t) => window.clearTimeout(t));
   }, [startTargetKey]);
-  const updateProfileAt = (idx: number, patch: Partial<VehicleInput['profile']>) => {
-    const vehicles = [...mission.vehicles];
-    vehicles[idx] = {
-      ...vehicles[idx],
-      profile: { ...vehicles[idx].profile, ...patch },
-    };
-    updateMission({ vehicles });
-  };
 
-  // 每机武器（P6-D 2026-08-12）：一机至多一条武器，映射到 mission.weapons
-  // （weapon_id = `${v.id}_w1`）。类型缺省 = 不启用（从 mission.weapons 移除）。
-  const vehicleWeapon = (v: VehicleInput): WeaponInput | undefined =>
-    mission.weapons.find((w) => w.weapon_id === `${v.id}_w1`);
-  const setVehicleWeapon = (v: VehicleInput, patch: Partial<WeaponInput>) => {
-    const wid = `${v.id}_w1`;
-    const cur = vehicleWeapon(v);
-    const next: WeaponInput = { weapon_id: wid, ...cur, ...patch };
-    updateMission({
-      weapons: [...mission.weapons.filter((w) => w.weapon_id !== wid), next],
-    });
+  // 武器（2026-08-19 移入飞行器：aircraft[0].weapon；weapon 出现即启用、weapon_type 必填；
+  // 类型缺省 = 不启用 → 直接删除 weapon 字段）
+  const weapon = aircraft.weapon;
+  const setWeapon = (patch: Partial<WeaponInput>) => {
+    // 所有调用点都保证已有 weapon_type（类型下拉 / 射程输入均先判 weapon_type）
+    const next = { ...weapon, ...patch } as WeaponInput;
+    updateAircraft({ weapon: next });
   };
-  const clearVehicleWeapon = (v: VehicleInput) => {
-    const wid = `${v.id}_w1`;
-    updateMission({
-      weapons: mission.weapons.filter((w) => w.weapon_id !== wid),
-    });
-  };
-
-  // 添加飞机：id 递增（v2/v3…），起点默认 = mission.start，机型默认固定翼
-  const addVehicle = () => {
-    const n = mission.vehicles.length + 1;
-    const existing = new Set(mission.vehicles.map((x) => x.id));
-    const id = existing.has(`v${n}`) ? `v${n}_${Date.now() % 10000}` : `v${n}`;
-    const vehicle: VehicleInput = {
-      id,
-      profile: {
-        aircraft_type: 'FIXED_WING',
-        cruise_speed_mps: 250,
-        min_turn_radius_m: 442,
-        max_climb_angle_deg: 15,
-      },
-      start_pose: {
-        lon: mission.start.lon,
-        lat: mission.start.lat,
-        alt_m: mission.start.alt_m,
-      },
-      mid_waypoints: [],
-    };
-    updateMission({ vehicles: [...mission.vehicles, vehicle] });
-  };
-  // 删除飞机：至少保留 1 架
-  const removeVehicleAt = (idx: number) => {
-    if (mission.vehicles.length <= 1) return;
-    updateMission({
-      vehicles: mission.vehicles.filter((_, i) => i !== idx),
-    });
-  };
+  const clearWeapon = () => updateAircraft({ weapon: undefined });
 
   const addRadar = useCallback(() => {
     const id = `radar_${Date.now()}`;
     const radar: Radar = {
       id,
-      lon: (mission.start.lon + mission.target.lon) / 2,
-      lat: (mission.start.lat + mission.target.lat) / 2,
+      lon: (aircraft.start.lon + aircraft.target.lon) / 2,
+      lat: (aircraft.start.lat + aircraft.target.lat) / 2,
       radius_km: 50,
       alt_m: 10,
     };
-    updateMission({
+    update({
       red_forces: {
-        ...mission.red_forces,
-        radars: [...mission.red_forces.radars, radar],
+        ...config.red_forces,
+        radars: [...config.red_forces.radars, radar],
       },
     });
-  }, [mission]);
+  }, [config]);
 
   const updateRadar = (id: string, patch: Partial<Radar>) =>
-    updateMission({
+    update({
       red_forces: {
-        ...mission.red_forces,
-        radars: mission.red_forces.radars.map((r) =>
+        ...config.red_forces,
+        radars: config.red_forces.radars.map((r) =>
           r.id === id ? { ...r, ...patch } : r,
         ),
       },
     });
   const removeRadar = (id: string) =>
-    updateMission({
+    update({
       red_forces: {
-        ...mission.red_forces,
-        radars: mission.red_forces.radars.filter((r) => r.id !== id),
+        ...config.red_forces,
+        radars: config.red_forces.radars.filter((r) => r.id !== id),
       },
     });
 
@@ -259,42 +196,40 @@ export function ControlPanel({
     const id = `zone_${Date.now()}`;
     const zone: Zone = {
       id,
-      zone_type: 'no_fly',
       shape: 'circle',
       geometry: {
         center: [
-          (mission.start.lon + mission.target.lon) / 2,
-          (mission.start.lat + mission.target.lat) / 2,
+          (aircraft.start.lon + aircraft.target.lon) / 2,
+          (aircraft.start.lat + aircraft.target.lat) / 2,
         ],
         radius_km: 20,
       },
       // 禁飞区无高度范围（全高度禁入，2026-08-12）
     };
-    updateMission({ no_fly_zones: [...mission.no_fly_zones, zone] });
-  }, [mission]);
+    update({ no_fly_zones: [...config.no_fly_zones, zone] });
+  }, [config]);
 
   const updateZone = (id: string, patch: Partial<Zone>) =>
-    updateMission({
-      no_fly_zones: mission.no_fly_zones.map((z) =>
+    update({
+      no_fly_zones: config.no_fly_zones.map((z) =>
         z.id === id ? { ...z, ...patch } : z,
       ),
     });
   const removeZone = (id: string) =>
-    updateMission({
-      no_fly_zones: mission.no_fly_zones.filter((z) => z.id !== id),
+    update({
+      no_fly_zones: config.no_fly_zones.filter((z) => z.id !== id),
     });
 
-  // 限飞区（restricted_zones 独立数组，schema 0.20）
+  // 限飞区（restricted_zones 独立数组）
   const addRestrictedZone = useCallback(() => {
     const id = `rz_${Date.now()}`;
     const zone: Zone = {
       id,
-      zone_type: 'restricted',
       shape: 'circle',
       geometry: {
         center: [
-          (mission.start.lon + mission.target.lon) / 2,
-          (mission.start.lat + mission.target.lat) / 2,
+          (aircraft.start.lon + aircraft.target.lon) / 2,
+          (aircraft.start.lat + aircraft.target.lat) / 2,
         ],
         radius_km: 20,
       },
@@ -302,57 +237,45 @@ export function ControlPanel({
       alt_min_m: 0,
       alt_max_m: 12000,
     };
-    updateMission({
-      restricted_zones: [...mission.restricted_zones, zone],
-    });
-  }, [mission]);
+    update({ restricted_zones: [...config.restricted_zones, zone] });
+  }, [config]);
 
   const updateRestrictedZone = (id: string, patch: Partial<Zone>) =>
-    updateMission({
-      restricted_zones: mission.restricted_zones.map((z) =>
+    update({
+      restricted_zones: config.restricted_zones.map((z) =>
         z.id === id ? { ...z, ...patch } : z,
       ),
     });
   const removeRestrictedZone = (id: string) =>
-    updateMission({
-      restricted_zones: mission.restricted_zones.filter((z) => z.id !== id),
+    update({
+      restricted_zones: config.restricted_zones.filter((z) => z.id !== id),
     });
 
   return (
     <div>
       <h2>AircraftRouterPlanner Demo</h2>
-      <div className="subtitle">开发期工具 · schema 0.20</div>
+      <div className="subtitle">开发期工具 · schema 0.21</div>
 
-      {/* Vehicles（多机：schema 0.20 vehicles 数组，每机独立机型/起点位姿/目标/必经点）。
-          全局起终点输入已删除（2026-08-10）：每机独立设置起终点后不再需要；
-          mission.start/target 保留在内部状态（默认值），仅作契约兜底。 */}
-      <h3>飞行器 ({mission.vehicles.length})</h3>
-      {mission.vehicles.map((v, idx) => (
-        <div key={v.id} className="obstacle-item">
+      {/* 飞行器（单机表单：demo 保持单机，编辑 aircraft[0]；逐机显式 start/target/weapon） */}
+      <h3>飞行器 ({config.aircraft.length})</h3>
+      {config.aircraft.length > 0 && (
+        <div className="obstacle-item">
           <div className="obstacle-header">
             <span>ID</span>
             <input
               type="text"
-              value={v.id}
+              value={aircraft.id}
               style={{ width: 90 }}
-              onChange={(e) => updateVehicleAt(idx, { id: e.target.value })}
+              onChange={(e) => updateAircraft({ id: e.target.value })}
             />
-            <button
-              className="btn-small btn-danger"
-              disabled={mission.vehicles.length <= 1}
-              title={mission.vehicles.length <= 1 ? '至少保留 1 架飞机' : '删除飞机'}
-              onClick={() => removeVehicleAt(idx)}
-            >
-              ✕
-            </button>
           </div>
           <div className="field-row">
             <div>
               <label>机型</label>
               <select
-                value={v.profile.aircraft_type}
+                value={aircraft.profile?.aircraft_type}
                 onChange={(e) =>
-                  updateProfileAt(idx, {
+                  updateProfile({
                     aircraft_type: e.target.value as 'FIXED_WING' | 'ROTORCRAFT',
                   })
                 }
@@ -365,9 +288,9 @@ export function ControlPanel({
               <label>巡航速度 (m/s)</label>
               <input
                 type="number"
-                value={v.profile.cruise_speed_mps ?? 250}
+                value={aircraft.profile?.cruise_speed_mps ?? 250}
                 onChange={(e) =>
-                  updateProfileAt(idx, { cruise_speed_mps: +e.target.value })
+                  updateProfile({ cruise_speed_mps: +e.target.value })
                 }
               />
             </div>
@@ -377,9 +300,9 @@ export function ControlPanel({
               <label>最小转弯半径 (m)</label>
               <input
                 type="number"
-                value={v.profile.min_turn_radius_m ?? 442}
+                value={aircraft.profile?.min_turn_radius_m ?? 442}
                 onChange={(e) =>
-                  updateProfileAt(idx, { min_turn_radius_m: +e.target.value })
+                  updateProfile({ min_turn_radius_m: +e.target.value })
                 }
               />
             </div>
@@ -387,9 +310,9 @@ export function ControlPanel({
               <label>最大爬升角 (°)</label>
               <input
                 type="number"
-                value={v.profile.max_climb_angle_deg ?? 15}
+                value={aircraft.profile?.max_climb_angle_deg ?? 15}
                 onChange={(e) =>
-                  updateProfileAt(idx, { max_climb_angle_deg: +e.target.value })
+                  updateProfile({ max_climb_angle_deg: +e.target.value })
                 }
               />
             </div>
@@ -400,10 +323,10 @@ export function ControlPanel({
               <input
                 type="number"
                 step="0.0001"
-                value={v.start_pose.lon}
+                value={aircraft.start.lon}
                 onChange={(e) =>
-                  updateVehicleAt(idx, {
-                    start_pose: { ...v.start_pose, lon: +e.target.value },
+                  updateAircraft({
+                    start: { ...aircraft.start, lon: +e.target.value },
                   })
                 }
               />
@@ -413,10 +336,10 @@ export function ControlPanel({
               <input
                 type="number"
                 step="0.0001"
-                value={v.start_pose.lat}
+                value={aircraft.start.lat}
                 onChange={(e) =>
-                  updateVehicleAt(idx, {
-                    start_pose: { ...v.start_pose, lat: +e.target.value },
+                  updateAircraft({
+                    start: { ...aircraft.start, lat: +e.target.value },
                   })
                 }
               />
@@ -427,40 +350,40 @@ export function ControlPanel({
               <label>起点高度 (m)</label>
               <input
                 type="number"
-                value={v.start_pose.alt_m}
-                min={groundAlt[v.id]?.s ?? undefined}
+                value={aircraft.start.alt_m}
+                min={groundAlt.s ?? undefined}
                 title={
-                  groundAlt[v.id]?.s != null
-                    ? `最小高度 = 该点地面海拔 ${Math.round(groundAlt[v.id]!.s!)}m`
+                  groundAlt.s != null
+                    ? `最小高度 = 该点地面海拔 ${Math.round(groundAlt.s)}m`
                     : '最小高度 = 地面海拔（查询中…）'
                 }
                 onBlur={() => {
-                  const minAlt = groundAlt[v.id]?.s;
-                  if (minAlt != null && v.start_pose.alt_m < minAlt) {
-                    updateVehicleAt(idx, {
-                      start_pose: { ...v.start_pose, alt_m: minAlt },
+                  const minAlt = groundAlt.s;
+                  if (minAlt != null && aircraft.start.alt_m < minAlt) {
+                    updateAircraft({
+                      start: { ...aircraft.start, alt_m: minAlt },
                     });
                   }
                 }}
                 onChange={(e) =>
-                  updateVehicleAt(idx, {
-                    start_pose: { ...v.start_pose, alt_m: +e.target.value },
+                  updateAircraft({
+                    start: { ...aircraft.start, alt_m: +e.target.value },
                   })
                 }
               />
             </div>
           </div>
-          {/* 每机独立目标（2026-08-10：target_ref 自定义坐标；改输入即写 target_ref 覆盖全局，删恢复按钮 2026-08-11） */}
+          {/* 目标（2026-08-19：逐机 target 为必填 Waypoint，直接编辑） */}
           <div className="field-row">
             <div>
               <label>目标经度</label>
               <input
                 type="number"
                 step="0.0001"
-                value={vehicleTarget(v, mission.target).lon}
+                value={aircraft.target.lon}
                 onChange={(e) =>
-                  updateVehicleAt(idx, {
-                    target_ref: `${+e.target.value},${vehicleTarget(v, mission.target).lat},${vehicleTarget(v, mission.target).alt_m}`,
+                  updateAircraft({
+                    target: { ...aircraft.target, lon: +e.target.value },
                   })
                 }
               />
@@ -470,10 +393,10 @@ export function ControlPanel({
               <input
                 type="number"
                 step="0.0001"
-                value={vehicleTarget(v, mission.target).lat}
+                value={aircraft.target.lat}
                 onChange={(e) =>
-                  updateVehicleAt(idx, {
-                    target_ref: `${vehicleTarget(v, mission.target).lon},${+e.target.value},${vehicleTarget(v, mission.target).alt_m}`,
+                  updateAircraft({
+                    target: { ...aircraft.target, lat: +e.target.value },
                   })
                 }
               />
@@ -484,43 +407,42 @@ export function ControlPanel({
               <label>目标高度 (m)</label>
               <input
                 type="number"
-                value={vehicleTarget(v, mission.target).alt_m}
-                min={groundAlt[v.id]?.t ?? undefined}
+                value={aircraft.target.alt_m}
+                min={groundAlt.t ?? undefined}
                 title={
-                  groundAlt[v.id]?.t != null
-                    ? `最小高度 = 该点地面海拔 ${Math.round(groundAlt[v.id]!.t!)}m`
+                  groundAlt.t != null
+                    ? `最小高度 = 该点地面海拔 ${Math.round(groundAlt.t)}m`
                     : '最小高度 = 地面海拔（查询中…）'
                 }
                 onBlur={() => {
-                  const minAlt = groundAlt[v.id]?.t;
-                  const tgt = vehicleTarget(v, mission.target);
-                  if (minAlt != null && tgt.alt_m < minAlt) {
-                    updateVehicleAt(idx, {
-                      target_ref: `${tgt.lon},${tgt.lat},${minAlt}`,
+                  const minAlt = groundAlt.t;
+                  if (minAlt != null && aircraft.target.alt_m < minAlt) {
+                    updateAircraft({
+                      target: { ...aircraft.target, alt_m: minAlt },
                     });
                   }
                 }}
                 onChange={(e) =>
-                  updateVehicleAt(idx, {
-                    target_ref: `${vehicleTarget(v, mission.target).lon},${vehicleTarget(v, mission.target).lat},${+e.target.value}`,
+                  updateAircraft({
+                    target: { ...aircraft.target, alt_m: +e.target.value },
                   })
                 }
               />
             </div>
           </div>
-          {/* 武器（P6-D 2026-08-12：类型 + 射程；类型缺省 = 不启用；射程缺省 = 按类型默认） */}
+          {/* 武器（2026-08-19 移入飞行器：类型 + 射程；类型缺省 = 不启用 → 删除 weapon 字段） */}
           <div className="field-row" style={{ marginTop: 4 }}>
             <div>
               <label>武器类型</label>
               <select
-                value={vehicleWeapon(v)?.weapon_type ?? ''}
+                value={weapon?.weapon_type ?? ''}
                 onChange={(e) => {
                   const wt = e.target.value as WeaponType | '';
                   if (!wt) {
-                    clearVehicleWeapon(v);
+                    clearWeapon();
                   } else {
                     // 类型切换 → 射程回落类型默认（range_km 清空，占位显示默认值）
-                    setVehicleWeapon(v, { weapon_type: wt, range_km: undefined });
+                    setWeapon({ weapon_type: wt, range_km: undefined });
                   }
                 }}
               >
@@ -535,21 +457,24 @@ export function ControlPanel({
               <input
                 type="number"
                 min={0}
-                disabled={!vehicleWeapon(v)?.weapon_type}
+                disabled={!weapon?.weapon_type}
                 placeholder={
-                  vehicleWeapon(v)?.weapon_type
-                    ? String(WEAPON_DEFAULT_RANGE_KM[vehicleWeapon(v)!.weapon_type!][0])
+                  weapon?.weapon_type
+                    ? String(WEAPON_DEFAULT_RANGE_KM[weapon.weapon_type][0])
                     : ''
                 }
-                value={vehicleWeapon(v)?.range_km?.[0] ?? ''}
+                value={weapon?.range_km?.[0] ?? ''}
                 onChange={(e) => {
-                  const cur = vehicleWeapon(v);
-                  if (!cur?.weapon_type) return;
+                  if (!weapon?.weapon_type) return;
                   const lo = +e.target.value;
-                  const hi = cur.range_km?.[1] ?? WEAPON_DEFAULT_RANGE_KM[cur.weapon_type][1];
-                  setVehicleWeapon(v, {
+                  const hi =
+                    weapon.range_km?.[1] ??
+                    WEAPON_DEFAULT_RANGE_KM[weapon.weapon_type][1];
+                  setWeapon({
                     range_km: [
-                      Number.isFinite(lo) ? lo : WEAPON_DEFAULT_RANGE_KM[cur.weapon_type][0],
+                      Number.isFinite(lo)
+                        ? lo
+                        : WEAPON_DEFAULT_RANGE_KM[weapon.weapon_type][0],
                       hi,
                     ],
                   });
@@ -561,43 +486,46 @@ export function ControlPanel({
               <input
                 type="number"
                 min={0}
-                disabled={!vehicleWeapon(v)?.weapon_type}
+                disabled={!weapon?.weapon_type}
                 placeholder={
-                  vehicleWeapon(v)?.weapon_type
-                    ? String(WEAPON_DEFAULT_RANGE_KM[vehicleWeapon(v)!.weapon_type!][1])
+                  weapon?.weapon_type
+                    ? String(WEAPON_DEFAULT_RANGE_KM[weapon.weapon_type][1])
                     : ''
                 }
-                value={vehicleWeapon(v)?.range_km?.[1] ?? ''}
+                value={weapon?.range_km?.[1] ?? ''}
                 onChange={(e) => {
-                  const cur = vehicleWeapon(v);
-                  if (!cur?.weapon_type) return;
+                  if (!weapon?.weapon_type) return;
                   const hi = +e.target.value;
-                  const lo = cur.range_km?.[0] ?? WEAPON_DEFAULT_RANGE_KM[cur.weapon_type][0];
-                  setVehicleWeapon(v, {
+                  const lo =
+                    weapon.range_km?.[0] ??
+                    WEAPON_DEFAULT_RANGE_KM[weapon.weapon_type][0];
+                  setWeapon({
                     range_km: [
                       lo,
-                      Number.isFinite(hi) ? hi : WEAPON_DEFAULT_RANGE_KM[cur.weapon_type][1],
+                      Number.isFinite(hi)
+                        ? hi
+                        : WEAPON_DEFAULT_RANGE_KM[weapon.weapon_type][1],
                     ],
                   });
                 }}
               />
             </div>
           </div>
-          {/* 每机独立起终点场景拾取（原全局按钮已转移至此） */}
+          {/* 单机起终点/必经点场景拾取（idx 恒为 0） */}
           <div className="mode-buttons">
             <button
               className={
-                pickVehicleIdx === idx && activeClickMode === 'start'
+                pickAircraftIdx === 0 && activeClickMode === 'start'
                   ? 'active'
                   : ''
               }
               onClick={() => {
-                if (pickVehicleIdx === idx && activeClickMode === 'start') {
+                if (pickAircraftIdx === 0 && activeClickMode === 'start') {
                   onSetClickMode(null);
-                  onPickVehicle(null);
+                  onPickAircraft(null);
                 } else {
                   onSetClickMode('start');
-                  onPickVehicle(idx);
+                  onPickAircraft(0);
                 }
               }}
             >
@@ -605,17 +533,17 @@ export function ControlPanel({
             </button>
             <button
               className={
-                pickVehicleIdx === idx && activeClickMode === 'target'
+                pickAircraftIdx === 0 && activeClickMode === 'target'
                   ? 'active'
                   : ''
               }
               onClick={() => {
-                if (pickVehicleIdx === idx && activeClickMode === 'target') {
+                if (pickAircraftIdx === 0 && activeClickMode === 'target') {
                   onSetClickMode(null);
-                  onPickVehicle(null);
+                  onPickAircraft(null);
                 } else {
                   onSetClickMode('target');
-                  onPickVehicle(idx);
+                  onPickAircraft(0);
                 }
               }}
             >
@@ -624,16 +552,16 @@ export function ControlPanel({
           </div>
           <div>
             <label>必经点（mid_waypoints）</label>
-            {(v.mid_waypoints ?? []).map((m, i) => (
+            {(aircraft.mid_waypoints ?? []).map((m, i) => (
               <div key={i} className="field-row" style={{ marginTop: 4 }}>
                 <input
                   type="number"
                   step="0.0001"
                   value={m.lon}
                   onChange={(e) => {
-                    const ms = [...(v.mid_waypoints ?? [])];
+                    const ms = [...(aircraft.mid_waypoints ?? [])];
                     ms[i] = { ...ms[i], lon: +e.target.value };
-                    updateVehicleAt(idx, { mid_waypoints: ms });
+                    updateAircraft({ mid_waypoints: ms });
                   }}
                   placeholder="lon"
                 />
@@ -642,20 +570,20 @@ export function ControlPanel({
                   step="0.0001"
                   value={m.lat}
                   onChange={(e) => {
-                    const ms = [...(v.mid_waypoints ?? [])];
+                    const ms = [...(aircraft.mid_waypoints ?? [])];
                     ms[i] = { ...ms[i], lat: +e.target.value };
-                    updateVehicleAt(idx, { mid_waypoints: ms });
+                    updateAircraft({ mid_waypoints: ms });
                   }}
                   placeholder="lat"
                 />
                 <input
                   type="number"
                   step="1"
-                  value={m.alt_m ?? v.start_pose.alt_m}
+                  value={m.alt_m ?? aircraft.start.alt_m}
                   onChange={(e) => {
-                    const ms = [...(v.mid_waypoints ?? [])];
+                    const ms = [...(aircraft.mid_waypoints ?? [])];
                     ms[i] = { ...ms[i], alt_m: +e.target.value };
-                    updateVehicleAt(idx, { mid_waypoints: ms });
+                    updateAircraft({ mid_waypoints: ms });
                   }}
                   placeholder="alt(m)"
                   title="必经点高度（MSL 米；2026-08-13 P8 M2 起生效——多锚点分段插值）"
@@ -663,8 +591,8 @@ export function ControlPanel({
                 <button
                   className="btn-small btn-danger"
                   onClick={() =>
-                    updateVehicleAt(idx, {
-                      mid_waypoints: (v.mid_waypoints ?? []).filter(
+                    updateAircraft({
+                      mid_waypoints: (aircraft.mid_waypoints ?? []).filter(
                         (_, j) => j !== i,
                       ),
                     })
@@ -676,26 +604,26 @@ export function ControlPanel({
             ))}
             <button
               className={
-                pickVehicleIdx === idx && activeClickMode === 'midpoint'
+                pickAircraftIdx === 0 && activeClickMode === 'midpoint'
                   ? 'btn-small active'
                   : 'btn-small'
               }
               style={{
                 marginTop: 4,
                 background:
-                  pickVehicleIdx === idx && activeClickMode === 'midpoint'
+                  pickAircraftIdx === 0 && activeClickMode === 'midpoint'
                     ? '#3a5f0b'
                     : '#333',
                 color: '#e0e0e0',
               }}
               title="点击后在地图上点选添加必经点；场景中的黄色小球可直接拖动调整位置"
               onClick={() => {
-                if (pickVehicleIdx === idx && activeClickMode === 'midpoint') {
+                if (pickAircraftIdx === 0 && activeClickMode === 'midpoint') {
                   onSetClickMode(null);
-                  onPickVehicle(null);
+                  onPickAircraft(null);
                 } else {
                   onSetClickMode('midpoint');
-                  onPickVehicle(idx);
+                  onPickAircraft(0);
                 }
               }}
             >
@@ -703,14 +631,7 @@ export function ControlPanel({
             </button>
           </div>
         </div>
-      ))}
-      <button
-        className="btn-small"
-        onClick={addVehicle}
-        style={{ width: '100%', background: '#333', color: '#e0e0e0' }}
-      >
-        + 添加飞机
-      </button>
+      )}
 
       {/* Terrain */}
       <h3>地形</h3>
@@ -718,11 +639,11 @@ export function ControlPanel({
         <div>
           <label>数据源</label>
           <select
-            value={mission.terrain.source}
+            value={config.terrain.source}
             onChange={(e) =>
-              updateMission({
+              update({
                 terrain: {
-                  ...mission.terrain,
+                  ...config.terrain,
                   source: e.target.value as 'none' | 'builtin' | 'path',
                 },
               })
@@ -733,15 +654,15 @@ export function ControlPanel({
             <option value="path">外部文件</option>
           </select>
         </div>
-        {mission.terrain.source === 'path' && (
+        {config.terrain.source === 'path' && (
           <div>
             <label>路径</label>
             <input
               type="text"
-              value={mission.terrain.path ?? ''}
+              value={config.terrain.path ?? ''}
               onChange={(e) =>
-                updateMission({
-                  terrain: { ...mission.terrain, path: e.target.value },
+                update({
+                  terrain: { ...config.terrain, path: e.target.value },
                 })
               }
             />
@@ -860,8 +781,8 @@ export function ControlPanel({
       )}
 
       {/* Radars */}
-      <h3>雷达 ({mission.red_forces.radars.length})</h3>
-      {mission.red_forces.radars.map((r) => (
+      <h3>雷达 ({config.red_forces.radars.length})</h3>
+      {config.red_forces.radars.map((r) => (
         <div key={r.id} className="obstacle-item">
           <div className="obstacle-header">
             <span>{r.id}</span>
@@ -915,8 +836,8 @@ export function ControlPanel({
       </button>
 
       {/* Zones */}
-      <h3>禁飞区·no_fly ({mission.no_fly_zones.length})</h3>
-      {mission.no_fly_zones.map((z) => (
+      <h3>禁飞区·no_fly ({config.no_fly_zones.length})</h3>
+      {config.no_fly_zones.map((z) => (
         <div key={z.id} className="obstacle-item">
           <div className="obstacle-header">
             <span>{z.id}</span>
@@ -925,14 +846,27 @@ export function ControlPanel({
               onChange={(e) => {
                 const shape = e.target.value as 'circle' | 'polygon';
                 if (shape === 'circle') {
+                  const g = z.geometry as { center?: [number, number] };
                   updateZone(z.id, {
                     shape: 'circle',
-                    geometry: { center: [z.zone_type === 'no_fly' ? (mission.start.lon + mission.target.lon) / 2 : (z.geometry as { center?: [number, number] }).center?.[0] ?? (mission.start.lon + mission.target.lon) / 2, (z.geometry as { center?: [number, number] }).center?.[1] ?? (mission.start.lat + mission.target.lat) / 2], radius_km: 20 },
+                    geometry: {
+                      center: [
+                        g.center?.[0] ??
+                          (aircraft.start.lon + aircraft.target.lon) / 2,
+                        g.center?.[1] ??
+                          (aircraft.start.lat + aircraft.target.lat) / 2,
+                      ],
+                      radius_km: 20,
+                    },
                   });
                 } else {
                   updateZone(z.id, {
                     shape: 'polygon',
-                    geometry: { vertices: (z.geometry as { vertices?: [number, number][] }).vertices ?? [] },
+                    geometry: {
+                      vertices:
+                        (z.geometry as { vertices?: [number, number][] })
+                          .vertices ?? [],
+                    },
                   });
                 }
               }}
@@ -1084,8 +1018,8 @@ export function ControlPanel({
       </button>
 
       {/* Restricted zones */}
-      <h3>限飞区 ({mission.restricted_zones.length})</h3>
-      {mission.restricted_zones.map((z) => {
+      <h3>限飞区 ({config.restricted_zones.length})</h3>
+      {config.restricted_zones.map((z) => {
         const g = z.geometry as { center?: [number, number]; radius_km?: number; vertices?: [number, number][] };
         return (
           <div key={z.id} className="obstacle-item">
@@ -1100,8 +1034,8 @@ export function ControlPanel({
                       shape: 'circle',
                       geometry: {
                         center: g.center ?? [
-                          (mission.start.lon + mission.target.lon) / 2,
-                          (mission.start.lat + mission.target.lat) / 2,
+                          (aircraft.start.lon + aircraft.target.lon) / 2,
+                          (aircraft.start.lat + aircraft.target.lat) / 2,
                         ],
                         radius_km: g.radius_km ?? 20,
                       },
@@ -1278,11 +1212,11 @@ export function ControlPanel({
           <input
             type="number"
             step="0.01"
-            value={mission.parameters.p_cross ?? 0.1}
+            value={config.parameters.p_cross ?? 0.1}
             onChange={(e) =>
-              updateMission({
+              update({
                 parameters: {
-                  ...mission.parameters,
+                  ...config.parameters,
                   p_cross: +e.target.value,
                 },
               })
@@ -1292,11 +1226,11 @@ export function ControlPanel({
         <div>
           <label>探测曲线</label>
           <select
-            value={mission.parameters.detection_curve ?? 'swerling1'}
+            value={config.parameters.detection_curve ?? 'swerling1'}
             onChange={(e) =>
-              updateMission({
+              update({
                 parameters: {
-                  ...mission.parameters,
+                  ...config.parameters,
                   detection_curve: e.target.value,
                 },
               })

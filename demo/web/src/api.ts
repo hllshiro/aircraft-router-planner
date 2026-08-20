@@ -1,5 +1,4 @@
-import type { InputConfig, PlanResult, TerrainInfo, BaseMapInfo, TiffProjection } from './types';
-import { parseVehicleTargetRef } from './types';
+import type { Input, PlanResult, TerrainInfo, BaseMapInfo, TiffProjection } from './types';
 
 /** 解析后端响应并兜底：空 body / 非 JSON / 非 2xx → 明确错误，
  *  避免 resp.json() 裸调用抛 "Unexpected end of JSON input"（2026-08-13 修复）。 */
@@ -22,7 +21,7 @@ async function readJsonResponse(resp: Response, what: string): Promise<any> {
   return data;
 }
 
-export async function planRoute(config: InputConfig): Promise<PlanResult> {
+export async function planRoute(config: Input): Promise<PlanResult> {
   const resp = await fetch('/api/plan', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -78,30 +77,22 @@ export async function fetchElevation(
   }
 }
 
-/** 场景包围盒：start/target + 各机起点（vehicles[].start_pose）包围，跨度按
- *  start→target 距离自适应（1.4 倍 + 最小 2.5°×2.2°），覆盖全场景 + 四周余量，
- *  避免地形网格只覆盖路径附近（主管 2026-08-06：地形块太小；2026-08-08：多机起点）。 */
-export function sceneBounds(
-  config: InputConfig,
-): [number, number, number, number] {
-  const { start, target, vehicles } = config.mission;
+/** 场景包围盒：逐机 start/target 包围，跨度按 start→target 距离自适应（1.4 倍 +
+ *  最小 2.5°×2.2°），覆盖全场景 + 四周余量，避免地形网格只覆盖路径附近
+ * （主管 2026-08-06：地形块太小；2026-08-19：mission 拍平，逐机显式 start/target）。 */
+export function sceneBounds(config: Input): [number, number, number, number] {
+  const a = config.aircraft[0];
+  const start = a.start;
+  const target = a.target;
   let minLon = Math.min(start.lon, target.lon);
   let maxLon = Math.max(start.lon, target.lon);
   let minLat = Math.min(start.lat, target.lat);
   let maxLat = Math.max(start.lat, target.lat);
-  for (const v of vehicles) {
-    minLon = Math.min(minLon, v.start_pose.lon);
-    maxLon = Math.max(maxLon, v.start_pose.lon);
-    minLat = Math.min(minLat, v.start_pose.lat);
-    maxLat = Math.max(maxLat, v.start_pose.lat);
-    // 每机自定义目标（target_ref）纳入包围盒 → 点击设置终点在场景外时 bbox 自动扩展
-    const vt = parseVehicleTargetRef(v, target);
-    if (vt) {
-      minLon = Math.min(minLon, vt.lon);
-      maxLon = Math.max(maxLon, vt.lon);
-      minLat = Math.min(minLat, vt.lat);
-      maxLat = Math.max(maxLat, vt.lat);
-    }
+  for (const ac of config.aircraft) {
+    minLon = Math.min(minLon, ac.start.lon, ac.target.lon);
+    maxLon = Math.max(maxLon, ac.start.lon, ac.target.lon);
+    minLat = Math.min(minLat, ac.start.lat, ac.target.lat);
+    maxLat = Math.max(maxLat, ac.start.lat, ac.target.lat);
   }
   // 跨度 = max(实际距离 × 1.4, 最小 2.5°lon ≈ 220km / 2.2°lat ≈ 245km)
   const spanLon = Math.max((maxLon - minLon) * 1.4, 2.5);

@@ -6,15 +6,16 @@ import type { ThreeEvent } from '@react-three/fiber';
 import type {
   Waypoint,
   GeoRef,
-  VehicleInput,
+  AircraftInput,
   Radar,
   Zone,
-  VehicleOutput,
+  ZoneType,
+  AircraftOutput,
   Vec2,
   TerrainConfig,
   BaseMapConfig,
 } from '../types';
-import { geoToLocal, geoPointToLocal, localToGeo, parseVehicleTargetRef } from '../types';
+import { geoToLocal, geoPointToLocal, localToGeo } from '../types';
 import { useViewportTiles, type TileEntry } from '../tiles';
 import { StartMarker } from './StartMarker';
 import { TargetZone } from './TargetZone';
@@ -26,12 +27,12 @@ import { MidpointMarker } from './MidpointMarker';
 
 interface Scene3DProps {
   geoRef: GeoRef;
-  start: Waypoint;
   target: Waypoint;
-  vehicles: VehicleInput[];
+  aircraft: AircraftInput[];
   radars: Radar[];
-  zones: Zone[];
-  results: VehicleOutput[] | null;
+  /** zone 渲染视图：输入 zone 不带 zone_type，由 App 按所属数组打标（仅前端着色用） */
+  zones: VisualZone[];
+  results: AircraftOutput[] | null;
   /** 地形源配置（source=none/path；瓦片按相机视口加载，2026-08-13） */
   terrainConfig: TerrainConfig;
   /** 底图配置（mask/tiff 瓦片级纹理；wms 视口级单图） */
@@ -54,6 +55,9 @@ interface Scene3DProps {
   /** 瓦片加载状态回调（App 用于 ControlPanel 底图状态 / canvas overlay） */
   onTilesStatus?: (loading: boolean, error: string | null) => void;
 }
+
+/** zone 渲染视图：输入 Zone 无 zone_type（JSON 契约 2026-08-19），前端按所属数组打标着色 */
+export type VisualZone = Zone & { zone_type: ZoneType };
 
 /** 圆形 zone → 局部平面多边形（24 边近似） */
 function circleToLocalPolygon(center: [number, number], radiusKm: number, ref: GeoRef): Vec2[] {
@@ -261,7 +265,7 @@ function TileMesh({
 export function Scene3D({
   geoRef,
   target,
-  vehicles,
+  aircraft,
   radars,
   zones,
   results,
@@ -393,13 +397,13 @@ export function Scene3D({
     [zones, stableGeoRef, zScale],
   );
 
-  // 车辆路径（输出，经纬高 → 局部平面；高度乘 zScale 贴合地形表面）
-  const vehicleLines = useMemo(() => {
+  // 飞行器路径（输出，经纬高 → 局部平面；高度乘 zScale 贴合地形表面）
+  const aircraftLines = useMemo(() => {
     if (!results) return [];
-    return results.map((v) => ({
-      id: v.id,
-      status: v.status,
-      points: v.path.map((p) =>
+    return results.map((ao) => ({
+      id: ao.id,
+      status: ao.status,
+      points: ao.path.map((p) =>
         geoPointToLocal(p.x, p.y, p.alt_m, stableGeoRef, zScale),
       ),
     }));
@@ -408,24 +412,14 @@ export function Scene3D({
   // 必经点（输入；可拖动——MidpointMarker）
   const midPoints = useMemo(
     () =>
-      vehicles.flatMap((v) =>
-        (v.mid_waypoints ?? []).map((m, idx) => ({
-          vehicleId: v.id,
+      aircraft.flatMap((a) =>
+        (a.mid_waypoints ?? []).map((m, idx) => ({
+          vehicleId: a.id,
           index: idx,
           pos: geoToLocal(m, stableGeoRef, zScale),
         })),
       ),
-    [vehicles, stableGeoRef, zScale],
-  );
-
-  // 每机自定义目标（非 mission.target 的 target_ref → 红色标记，与全局蓝色目标区分）
-  const vehicleTargets = useMemo(
-    () =>
-      vehicles.flatMap((v) => {
-        const t = parseVehicleTargetRef(v, target);
-        return t ? [{ id: v.id, pos: geoToLocal(t, stableGeoRef, zScale) }] : [];
-      }),
-    [vehicles, target, stableGeoRef, zScale],
+    [aircraft, stableGeoRef, zScale],
   );
 
   return (
@@ -494,14 +488,14 @@ export function Scene3D({
         infiniteGrid
       />
 
-      {/* 每机独立起点 marker（vehicles[].start_pose；v0.21 起输入无 heading_deg，机头朝向为固定 45° 占位） */}
-      {vehicles.map((v) => (
+      {/* 每机独立起点 marker（aircraft[].start；v0.21 起输入无 heading_deg，机头朝向为固定 45° 占位） */}
+      {aircraft.map((a) => (
         <StartMarker
-          key={v.id}
+          key={a.id}
           position={geoPointToLocal(
-            v.start_pose.lon,
-            v.start_pose.lat,
-            v.start_pose.alt_m,
+            a.start.lon,
+            a.start.lat,
+            a.start.alt_m,
             stableGeoRef,
             zScale,
           )}
@@ -509,14 +503,6 @@ export function Scene3D({
         />
       ))}
       <TargetZone center={targetPos} />
-
-      {/* 每机自定义目标（红色小标记；mission.target 缺省不显示，复用全局 TargetZone） */}
-      {vehicleTargets.map((t) => (
-        <mesh key={t.id} position={[t.pos[0], t.pos[2], -t.pos[1]]}>
-          <sphereGeometry args={[250, 32, 16]} />
-          <meshStandardMaterial color="#ff4466" />
-        </mesh>
-      ))}
 
       {radarMeshes.map((r) => (
         <RadarSphere
@@ -564,12 +550,12 @@ export function Scene3D({
         />
       ))}
 
-      {/* 车辆路径 */}
-      {vehicleLines.map((v) => (
+      {/* 飞行器路径 */}
+      {aircraftLines.map((al) => (
         <PathLine
-          key={v.id}
-          waypoints={v.points}
-          color={v.status === 'planned' ? '#ffdd00' : '#ff66aa'}
+          key={al.id}
+          waypoints={al.points}
+          color={al.status === 'planned' ? '#ffdd00' : '#ff66aa'}
         />
       ))}
 

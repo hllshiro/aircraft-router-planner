@@ -49,22 +49,22 @@ export function ResultPanel({ result }: ResultPanelProps) {
         {result.stats.los_checks} 次
       </div>
 
-      {result.vehicles.map((v) => (
-        <div key={v.id} className="vehicle-result">
+      {result.aircraft.map((ao) => (
+        <div key={ao.id} className="vehicle-result">
           <div className="vehicle-title">
-            {v.id} —{' '}
-            {v.status === 'planned'
+            {ao.id} —{' '}
+            {ao.status === 'planned'
               ? '已规划'
-              : v.status === 'degraded'
+              : ao.status === 'degraded'
                 ? '降级'
                 : '无解'}
           </div>
-          <div>路径长度: {(v.distance_m / 1000).toFixed(2)} km</div>
-          <div>路点数量: {v.path.length}</div>
-          {v.warnings.length > 0 && (
+          <div>路径长度: {(ao.distance_m / 1000).toFixed(2)} km</div>
+          <div>路点数量: {ao.path.length}</div>
+          {ao.warnings.length > 0 && (
             <div className="degradation-list">
               <div className="list-title">复验警告（warnings）</div>
-              {v.warnings.map((w, i) => (
+              {ao.warnings.map((w, i) => (
                 <div key={i}>⚠ {w}</div>
               ))}
             </div>
