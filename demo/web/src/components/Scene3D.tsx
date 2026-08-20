@@ -13,6 +13,7 @@ import type {
   AircraftOutput,
   Vec2,
   TerrainConfig,
+  TerrainInfo,
   BaseMapConfig,
 } from '../types';
 import { geoToLocal, geoPointToLocal, localToGeo } from '../types';
@@ -209,6 +210,19 @@ function computeZScaleFromTiles(
   return Math.min(Math.max((spanMeters / range) * 0.08, 3), 20);
 }
 
+/** 无地形表面时的 0 高平面载体（2×2 网格足够；uv 由 TerrainMesh 按 bbox 计算）。
+ *  用于 demo 显示配置为 none 或 CLI 计算配置为 none/builtin 时承载底图。 */
+function planeTerrain(bbox: [number, number, number, number]): TerrainInfo {
+  return {
+    nx: 2, ny: 2,
+    min_lon: bbox[0], min_lat: bbox[1],
+    max_lon: bbox[2], max_lat: bbox[3],
+    heights: [0, 0, 0, 0],
+    resolution: 'display plane',
+    source_bounds: null,
+  };
+}
+
 /** 单瓦片地形网格 + 底图纹理（mask/tiff 瓦片纹理；wms 用视口级纹理） */
 function TileMesh({
   entry,
@@ -247,12 +261,18 @@ function TileMesh({
     tileTex?.dispose();
   }, [tileTex]);
 
-  if (!entry.terrain) return null;
+  if (!entry.terrain && !entry.baseMap && !wmsTexture) return null;
+
+  const needSurface = Boolean(entry.baseMap) || Boolean(wmsTexture);
+  const terrainData: TerrainInfo | null =
+    entry.terrain ?? (needSurface ? planeTerrain(entry.bbox) : null);
+  if (!terrainData) return null;
+
   const texture = entry.baseMap ? tileTex : wmsTexture;
   const textureBbox = entry.baseMap ? entry.bbox : wmsBbox;
   return (
     <TerrainMesh
-      data={entry.terrain}
+      data={terrainData}
       geoRef={geoRef}
       zScale={zScale}
       texture={texture}

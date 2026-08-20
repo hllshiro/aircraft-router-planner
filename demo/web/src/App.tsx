@@ -9,8 +9,9 @@ import type {
   CircleGeometry,
   PolygonGeometry,
   BaseMapConfig,
+  SceneTerrainConfig,
 } from './types';
-import { buildDefaultInput, defaultBaseMapConfig } from './types';
+import { buildDefaultInput, defaultBaseMapConfig, resolveSceneTerrain } from './types';
 import { planRoute, sceneBounds } from './api';
 
 type ClickMode = 'start' | 'target' | 'midpoint' | 'polygon' | null;
@@ -33,6 +34,9 @@ export default function App() {
   const [baseMapError, setBaseMapError] = useState<string | null>(null);
   // 视口瓦片是否在加载（canvas overlay 用）
   const [tilesLoading, setTilesLoading] = useState(false);
+
+  // 场景地形显示配置（demo 显示配置；与 CLI 计算配置 config.terrain 解耦，2026-08-20）
+  const [sceneTerrain, setSceneTerrain] = useState<SceneTerrainConfig>({ mode: 'follow' });
 
   // Scene3D 瓦片加载状态回调（loading/error 汇总 → ControlPanel 底图区 + overlay）
   const handleTilesStatus = useCallback(
@@ -233,6 +237,8 @@ export default function App() {
           onBaseMapConfigChange={setBaseMapConfig}
           baseMapLoading={baseMapLoading}
           baseMapError={baseMapError}
+          sceneTerrain={sceneTerrain}
+          onSceneTerrainChange={setSceneTerrain}
         />
       </div>
       <div className="canvas">
@@ -259,7 +265,7 @@ export default function App() {
             })),
           ]}
           results={result?.aircraft ?? null}
-          terrainConfig={config.terrain}
+          terrainConfig={resolveSceneTerrain(sceneTerrain, config.terrain)}
           baseMapConfig={baseMapConfig}
           sceneAltRange={sceneAltRange}
           bounds={sceneBounds(config)}

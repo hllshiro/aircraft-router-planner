@@ -78,6 +78,28 @@ export interface TerrainConfig {
   path?: string;
 }
 
+/** 场景地形显示配置（demo 显示配置；与 CLI 计算配置 Input.terrain 解耦，2026-08-20） */
+export interface SceneTerrainConfig {
+  /** follow = 跟随 CLI 计算配置（默认）；none = 无地形表面；path = 独立外部文件 */
+  mode: 'follow' | 'none' | 'path';
+  /** mode='path' 时的文件路径 */
+  path?: string;
+}
+
+/** 显示配置地形解析：follow → 复用 CLI 计算配置（只读）；none/path → demo 显示配置独立。
+ *  注意：follow 且 CLI 计算 source='builtin' 时，解析结果为 builtin —— 显示采样
+ *  只认 path（tiles.ts wantTerrain），builtin 无表面（与现状一致）。 */
+export function resolveSceneTerrain(
+  scene: SceneTerrainConfig,
+  planning: TerrainConfig,
+): TerrainConfig {
+  switch (scene.mode) {
+    case 'follow': return planning;
+    case 'none':   return { source: 'none' };
+    case 'path':   return { source: 'path', path: scene.path };
+  }
+}
+
 export interface ParamsOverride {
   radar_inflation?: number;
   /** 探测曲线形态：swerling1（默认，2026-08-13 base_p 标定——Swerling I 典型监视雷达模型，R_eff 处探测概率 0.9）/ exponential / linear */

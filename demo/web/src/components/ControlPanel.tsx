@@ -10,6 +10,7 @@ import type {
   BaseMapConfig,
   BaseMapSource,
   TiffProjection,
+  SceneTerrainConfig,
 } from '../types';
 import { WEAPON_DEFAULT_RANGE_KM } from '../types';
 import { fetchElevation, sanitizePath } from '../api';
@@ -33,6 +34,9 @@ interface ControlPanelProps {
   onBaseMapConfigChange: (cfg: BaseMapConfig) => void;
   baseMapLoading: boolean;
   baseMapError: string | null;
+  /** 场景地形显示配置（demo 显示配置；与 CLI 计算配置 config.terrain 解耦，2026-08-20） */
+  sceneTerrain: SceneTerrainConfig;
+  onSceneTerrainChange: (cfg: SceneTerrainConfig) => void;
 }
 
 export function ControlPanel({
@@ -51,6 +55,8 @@ export function ControlPanel({
   onBaseMapConfigChange,
   baseMapLoading,
   baseMapError,
+  sceneTerrain,
+  onSceneTerrainChange,
 }: ControlPanelProps) {
   const update = (patch: Partial<Input>) =>
     onConfigChange({ ...config, ...patch });
@@ -633,8 +639,13 @@ export function ControlPanel({
         </div>
       )}
 
-      {/* Terrain */}
-      <h3>地形</h3>
+      {/* Terrain —— CLI 计算配置（流入 arp-cli plan 子进程；2026-08-20 与显示解耦） */}
+      <h3>地形（CLI计算）</h3>
+      <div className="field-row" style={{ marginBottom: 4 }}>
+        <div style={{ fontSize: 10, color: '#888', lineHeight: '1.3' }}>
+          流入 arp-cli plan 子进程，参与代价场/净空计算；场景显示见「地形显示」
+        </div>
+      </div>
       <div className="field-row">
         <div>
           <label>数据源</label>
@@ -779,6 +790,42 @@ export function ControlPanel({
           )}
         </div>
       )}
+
+      {/* 地形显示 —— demo 显示配置（与 CLI 计算配置解耦；2026-08-20） */}
+      <h3>地形显示</h3>
+      <div className="field-row">
+        <div>
+          <label>数据源</label>
+          <select
+            value={sceneTerrain.mode}
+            onChange={(e) =>
+              onSceneTerrainChange({
+                mode: e.target.value as 'follow' | 'none' | 'path',
+                path: undefined,
+              })
+            }
+          >
+            <option value="follow">跟随 CLI 计算配置</option>
+            <option value="none">无（0 高平面）</option>
+            <option value="path">外部文件</option>
+          </select>
+        </div>
+        {sceneTerrain.mode === 'path' && (
+          <div>
+            <label>路径</label>
+            <input
+              type="text"
+              value={sceneTerrain.path ?? ''}
+              onChange={(e) =>
+                onSceneTerrainChange({
+                  ...sceneTerrain,
+                  path: e.target.value,
+                })
+              }
+            />
+          </div>
+        )}
+      </div>
 
       {/* Radars */}
       <h3>雷达 ({config.red_forces.radars.length})</h3>

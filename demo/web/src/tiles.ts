@@ -256,7 +256,9 @@ export function useViewportTiles(opts: ViewportTilesOptions): ViewportTilesState
       vp[3] + span,
     ];
     const render = [...cache.values()].filter(
-      (e) => e.terrain && bboxIntersect(e.bbox, vpExpanded),
+      (e) =>
+        (e.terrain || e.baseMap || baseMapConfig.source === 'wms') &&
+        bboxIntersect(e.bbox, vpExpanded),
     );
     render.sort((a, b) => {
       const aActive = a.key.startsWith(`${span}|`);
@@ -265,7 +267,7 @@ export function useViewportTiles(opts: ViewportTilesOptions): ViewportTilesState
       return aActive ? 1 : -1;
     });
     setTiles(render);
-  }, [cameraRef, geoRef]);
+  }, [cameraRef, geoRef, baseMapConfig.source]);
 
   // LRU trim：只删视口外瓦片（视口内旧层级兜底瓦片受保护，避免空洞）
   const trimCache = useCallback(() => {
