@@ -9,14 +9,16 @@ Deterministic 3D aircraft route planning CLI (Rust 2024 edition): FMM + semantic
 
 ## Environment
 
-- This dev machine has **no Rust toolchain on Windows** — run all cargo/build/test/verification commands inside WSL (Ubuntu-22.04), e.g. `wsl -d Ubuntu-22.04 -- bash -lc "cd /mnt/d/Project/Rust/AircraftRouterPlanner && cargo test --lib"`. `scripts/*.sh` are bash scripts and also run there.
+- **所有编译 / 构建 / 测试 / 验证一律在 WSL（Ubuntu-22.04）执行**——本机 Windows 无 Rust 工具链；WSL 内已有完整环境（cargo / node / pnpm）。统一入口：`wsl -d Ubuntu-22.04 -- bash -lc "cd /mnt/d/Project/Rust/AircraftRouterPlanner && <cmd>"`。
+- 前端 `demo/web` 用 **pnpm**（不是 npm），同样在 WSL 内运行：`wsl -d Ubuntu-22.04 -- bash -lc "cd /mnt/d/Project/Rust/AircraftRouterPlanner/demo/web && pnpm install && pnpm build"`。
+- `scripts/*.sh` 是 bash 脚本，也在 WSL 内运行。
 
 ## Workspace layout
 
 - `cli/` — the product (lib+bin, package `aircraft-router-planner-cli`). All real work happens here.
 - `convert/` — internal `arp-convert` terrain tool; NOT shipped, build on demand.
 - `phase0/` — historical performance prototype/benches; keep compilable, don't develop features there.
-- `demo/server` (`demo-server`, Axum) + `demo/web` (React/Vite, npm, NOT a workspace member) — dev visualization only, not in release. `demo-server` calls the CLI via stdin/stdout pipe; `ARP_CLI` env var overrides CLI path.
+- `demo/server` (`demo-server`, Axum) + `demo/web` (React/Vite, pnpm, NOT a workspace member) — dev visualization only, not in release. `demo-server` calls the CLI via stdin/stdout pipe; `ARP_CLI` env var overrides CLI path.
 - `data/` and `install/` are gitignored (large terrain/mask files); tests degrade gracefully when data is absent (synthetic flat terrain).
 
 ## Commands
@@ -31,6 +33,12 @@ scripts/check.sh [--quick] [--with-compare]            # full gate: build+test+r
 cargo test --test field_build_compare                  # ~7 min; ONLY when touching ARPK1 decompress/BulkPrefetch/costfield
 cargo bench -p phase0 && cargo bench -p aircraft-router-planner-cli --bench b_load_decompress
 scripts/perf_regress.sh                                # ≤3s/100km budget; ARP_BUDGET_MS (0 = unlimited; tests use 0)
+```
+
+Web (pnpm, in WSL):
+```bash
+wsl -d Ubuntu-22.04 -- bash -lc "cd /mnt/d/Project/Rust/AircraftRouterPlanner/demo/web && pnpm install && pnpm build"   # build
+wsl -d Ubuntu-22.04 -- bash -lc "cd /mnt/d/Project/Rust/AircraftRouterPlanner/demo/web && pnpm dev"                      # dev server (:5173)
 ```
 
 - `cargo test --lib` / `--test` run from workspace root target `cli` tests; phase0 has its own.

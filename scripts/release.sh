@@ -91,7 +91,7 @@ if [ "$SKIP_WEB" -eq 0 ]; then
   elif [ ! -d "demo/web" ]; then
     echo "    警告：demo/web 不存在，跳过 web 构建"
   else
-    (cd demo/web && pnpm run build)
+    (cd demo/web && pnpm i && pnpm run build)
     rm -rf "$OUT_DIR/web-dist"
     cp -r demo/web/dist "$OUT_DIR/web-dist"
   fi
