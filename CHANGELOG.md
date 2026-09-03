@@ -9,6 +9,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- 修复 Windows 控制台中文乱码：启动时把控制台输出/输入代码页切到 UTF-8（kernel32 `SetConsoleOutputCP`/`SetConsoleCP`，零 C 依赖），help/告警/错误/结果 JSON 中的中文在 cmd/PowerShell 不再乱码；重定向到文件/管道时字节仍为 UTF-8 不受影响。
+
 ## [0.2.1] - 2026-08-20
 
 ### Added

@@ -65,3 +65,17 @@ wsl -d Ubuntu-22.04 -- bash -lc "cd /mnt/d/Project/Rust/AircraftRouterPlanner/de
 - On every feature/fix: update the matching `docs/NN` doc's "与设计的差异/占位" section + `CHANGELOG.md` (Keep a Changelog). `docs/技术方案.md` + code win over status docs on conflict.
 - Version source of truth: `[workspace.package] version` in root `Cargo.toml`; release tags must be `v<version>`; bump via `scripts/bump_version.sh`.
 - Windows MSVC builds are static CRT (`+crt-static`) by manager decision — exe must not depend on VCRUNTIME140.dll (`cli/check_pe_deps.py` audits imports).
+
+## opencode.json custom commands
+
+`opencode.json` 定义了四个自定义命令，commit 前必须更新 CHANGELOG.md：
+- `commit` — Conventional Commits（中文描述，英文 type/scope），自动更新 CHANGELOG
+- `push` — 推送到远程
+- `sync-changes` — 同步远程 + 推送本地
+- `release` — 分析变更、推荐版本号、更新 CHANGELOG、tag + push
+
+## CI 流水线细节
+
+- `ci.yml`：push/PR 跑 **static-check**（`cargo check --workspace --all-targets` + 依赖红线），不执行测试；**test** job 仅 `workflow_dispatch` 手动触发（单元/崩溃/确定性/回归）。
+- `release.yml`：`v*` tag 触发，交叉编译 windows/linux × amd64/arm64 四产物，校验 tag 与 Cargo.toml version 一致。
+- Linux release 用 `cross`（Docker 交叉工具链）构建 musl 静态二进制。

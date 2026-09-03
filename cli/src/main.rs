@@ -84,6 +84,13 @@ struct PlanArgs {
 }
 
 fn main() {
+    // Windows 控制台默认代码页为 GBK(936)/OEM(437)，而本程序所有输出（帮助/告警/错误）
+    // 均为 UTF-8 字节，直接打印会在控制台显示为中文乱码。启动时把控制台切到 UTF-8
+    //（输出/输入代码页 65001）；重定向到文件/管道时调用返回 0（无控制台），静默忽略——
+    // 此时字节仍为 UTF-8，落盘/管道内容不受影响。
+    #[cfg(windows)]
+    win_console::enable_utf8();
+
     let bin = executable_name();
     let version = env!("CARGO_PKG_VERSION");
 
@@ -234,6 +241,34 @@ fn read_input(path: Option<&std::path::Path>) -> Result<String, AppError> {
         }
     }
     Ok(buf)
+}
+
+/// Windows 控制台 UTF-8 适配：程序输出为 UTF-8，而 Windows 控制台默认 GBK/OEM 代码页
+/// 会把中文显示为乱码。此处通过 kernel32 的 `SetConsoleOutputCP`/`SetConsoleCP` 把控制台
+/// 输出/输入代码页切到 UTF-8（65001）。
+///
+/// 实现说明：
+///   - 直接 FFI 链接 kernel32（系统 DLL，静态 CRT 红线不受影响，`check_pe_deps.py` 白名单内），
+///     不引入 windows-sys 等额外依赖，保持零 C 依赖红线。
+///   - 调用失败（输出被重定向到文件/管道，无关联控制台）返回 0，静默忽略——重定向场景下
+///     字节本身就是 UTF-8，下游按 UTF-8 解码即可，无需改动代码页。
+#[cfg(windows)]
+mod win_console {
+    /// UTF-8 代码页（CP_UTF8）。
+    const CP_UTF8: u32 = 65001;
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn SetConsoleOutputCP(code_page: u32) -> i32;
+        fn SetConsoleCP(code_page: u32) -> i32;
+    }
+
+    pub fn enable_utf8() {
+        unsafe {
+            let _ = SetConsoleOutputCP(CP_UTF8);
+            let _ = SetConsoleCP(CP_UTF8);
+        }
+    }
 }
 
 fn write_output(args: &PlanArgs, out: &Output) -> Result<(), AppError> {
