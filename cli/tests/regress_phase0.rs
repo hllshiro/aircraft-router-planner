@@ -162,12 +162,7 @@ fn phase0_feedback_inputs_regression() {
         // 输入必须过契约校验（退化输入本身即 bug，反馈输入都应是合法任务）
         config::validate(&input).unwrap_or_else(|e| panic!("{name}: validate failed: {e:?}"));
 
-        let mut params = SolveParams::default();
-        if input.terrain.source != config::TerrainSourceType::None {
-            if let Some(p) = &input.terrain.path {
-                params.terrain_path = Some(PathBuf::from(p));
-            }
-        }
+        let params = SolveParams::default();
 
         let out = solver::solve(&input, &params, 0)
             .unwrap_or_else(|e| panic!("{name}: solve error: {e:?}"));

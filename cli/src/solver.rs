@@ -34,13 +34,9 @@ use crate::threat::{SphericalRadarThreat, ThreatModel, ThreatParams};
 /// probe → 路径级抬升。撞山抬升判定同口径（避免与 verify 采样密度差异导致误抬）。
 const TERRAIN_MASK_SLACK_M: f64 = 300.0;
 
-/// 解算参数（M1：地形路径 CLI/输入指定；grid 粗网格分辨率）。
+/// 解算参数。
 #[derive(Debug, Clone)]
 pub struct SolveParams {
-    pub terrain_path: Option<PathBuf>,
-    /// 海岸掩膜文件（GSHHG 3 态；None 时自动探测默认掩膜 mask_7p5as.mask 全球 7.5as）
-    pub mask_path: Option<PathBuf>,
-    pub grid: usize,
     /// 端到端时间预算（ms，含 solve 前地形加载等 main 已计耗时）：0 = 无限
     /// （测试/CI 双跑确定性用；docs/07 §5 3s 预算硬护栏）。超预算：
     /// 已有过闸候选（前面飞行器已完成）→ `degraded_timeout` + 部分结果；
@@ -51,9 +47,6 @@ pub struct SolveParams {
 impl Default for SolveParams {
     fn default() -> Self {
         Self {
-            terrain_path: None,
-            mask_path: None,
-            grid: 256,
             time_budget_ms: 0,
         }
     }
@@ -145,10 +138,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
     let terrain: TerrainHandle = match input.terrain.source {
         TerrainSourceType::None => TerrainHandle::None,
         TerrainSourceType::Path => {
-            let p = params
-                .terrain_path
-                .clone()
-                .or_else(|| input.terrain.path.clone().map(PathBuf::from));
+            let p = input.terrain.path.clone().map(PathBuf::from);
             let inner: Option<InnerSource> = match p {
                 Some(ref p) => {
                     let ext = p
@@ -177,7 +167,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                     }
                 }
                 None => {
-                    let msg = "terrain.source=path 但未提供地形文件（--terrain / terrain.path），降级为无地形".into();
+                    let msg = "terrain.source=path 但未提供地形文件（terrain.path），降级为无地形".into();
                     eprintln!("[warn] {msg}");
                     terrain_warnings.push(msg);
                     None
@@ -186,15 +176,12 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
             match inner {
                 None => TerrainHandle::None,
                 Some(inner) => {
-                    let mask = params
-                        .mask_path
-                        .clone()
-                        .or_else(|| input.terrain.mask_path.clone().map(PathBuf::from));
+                    let mask = input.terrain.mask_path.clone().map(PathBuf::from);
                     match mask {
                         Some(mp) => {
                             if !mp.exists() {
                                 return Err(AppError::Data(format!(
-                                    "mask file not found: {}（--mask / terrain.mask_path）",
+                                    "mask file not found: {}（terrain.mask_path）",
                                     mp.display()
                                 )));
                             }
@@ -329,7 +316,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
     } else {
         0
     };
-    let base_grid = params.grid.max(8).max(auto_grid).min(1024);
+    let base_grid = params_merged.default_grid_resolution.max(8).max(auto_grid).min(1024);
     let grid = if region.span_deg > base_region.span_deg + 1e-9 {
         let cell_deg = base_region.span_deg / base_grid as f64;
         ((region.span_deg / cell_deg).round() as usize)

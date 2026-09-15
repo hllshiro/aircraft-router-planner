@@ -14,7 +14,6 @@
 //! 端口：环境变量 `DEMO_PORT`，默认 3001。
 
 use std::collections::HashMap;
-use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -103,36 +102,42 @@ fn cli_bin() -> PathBuf {
 }
 
 fn run_cli(input_json: &str) -> Result<Value, String> {
-    let mut child = Command::new(cli_bin())
+    // 写入临时文件 → 调用 CLI --file/--out → 读取结果
+    let tmp_input = std::env::temp_dir().join("arp_cli_input.json");
+    let tmp_output = std::env::temp_dir().join("arp_cli_output.json");
+
+    std::fs::write(&tmp_input, input_json)
+        .map_err(|e| format!("Failed to write temp input: {}", e))?;
+
+    let output = Command::new(cli_bin())
         .arg("plan")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
+        .arg("--file")
+        .arg(&tmp_input)
+        .arg("--out")
+        .arg(&tmp_output)
         .stderr(Stdio::piped())
-        .spawn()
+        .output()
         .map_err(|e| format!("Failed to spawn CLI: {}", e))?;
 
-    {
-        let stdin = child.stdin.as_mut().ok_or("Failed to open CLI stdin")?;
-        stdin
-            .write_all(input_json.as_bytes())
-            .map_err(|e| format!("Failed to write to CLI stdin: {}", e))?;
-    }
-
-    let output = child
-        .wait_with_output()
-        .map_err(|e| format!("CLI process error: {}", e))?;
+    // 清理临时输入文件
+    let _ = std::fs::remove_file(&tmp_input);
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        let _ = std::fs::remove_file(&tmp_output);
         return Err(format!("CLI exited with error: {}", stderr));
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if stdout.is_empty() {
+    let result = std::fs::read_to_string(&tmp_output)
+        .map_err(|e| format!("Failed to read CLI output: {}", e))?;
+    let _ = std::fs::remove_file(&tmp_output);
+
+    let result = result.trim().to_string();
+    if result.is_empty() {
         return Err("CLI produced empty output".into());
     }
 
-    serde_json::from_str(&stdout).map_err(|e| format!("Failed to parse CLI output: {}", e))
+    serde_json::from_str(&result).map_err(|e| format!("Failed to parse CLI output: {}", e))
 }
 
 // ===================== /api/terrain =====================

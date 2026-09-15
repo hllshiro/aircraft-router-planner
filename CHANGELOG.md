@@ -9,6 +9,12 @@
 
 ## [Unreleased]
 
+### Changed
+- **Breaking**: CLI 接口精简为 `arp-cli plan --file <file> --out <path>`（两个必填选项），移除 stdin/stdout 管道模式。
+- 移除 `arp-cli schema` 子命令。
+- `grid_resolution` 迁移至 Input JSON 的 `parameters.grid_resolution`（8..1024，默认 256），CLI 不再提供 `--grid` 选项。
+- help 输出从 clap 自动生成改为自定义格式（纯文本 + 定宽对齐，三层递进 Root → Category → Endpoint）。
+
 ### Fixed
 - 修复 Windows 控制台中文乱码：启动时把控制台输出/输入代码页切到 UTF-8（kernel32 `SetConsoleOutputCP`/`SetConsoleCP`，零 C 依赖），help/告警/错误/结果 JSON 中的中文在 cmd/PowerShell 不再乱码；重定向到文件/管道时字节仍为 UTF-8 不受影响。
 

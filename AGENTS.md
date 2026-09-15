@@ -59,8 +59,7 @@ wsl -d Ubuntu-22.04 -- bash -lc "cd /mnt/d/Project/Rust/AircraftRouterPlanner/de
 
 ## Conventions
 
-- CLI help style is `arp-cli` / `arp-cli help <command>` — **no `--help`**. Pipeline: `arp-cli plan` reads task JSON from stdin (or `--input`), writes result JSON to stdout.
-- `arp-cli schema [input|output|all]` generates JSON Schemas via schemars — code (`cli/src/config.rs` types) is the schema source of truth; keep them in sync when changing the contract.
+- CLI help style is `arp-cli` / `arp-cli help` — **no `--help`**. Pipeline: `arp-cli plan --file <file> --out <path>` reads task JSON from file, writes result JSON to file.
 - New regression case: drop a JSON into `cli/tests/regression/cases/` — auto-discovered. Output paths must never cross any zone; the suite asserts this.
 - On every feature/fix: update the matching `docs/NN` doc's "与设计的差异/占位" section + `CHANGELOG.md` (Keep a Changelog). `docs/技术方案.md` + code win over status docs on conflict.
 - Version source of truth: `[workspace.package] version` in root `Cargo.toml`; release tags must be `v<version>`; bump via `scripts/bump_version.sh`.

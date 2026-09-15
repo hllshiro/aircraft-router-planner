@@ -299,6 +299,9 @@ pub struct ParamsOverride {
     pub radar_cost_coef: Option<f64>,
     #[serde(default)]
     pub los_mask_coef: Option<f64>,
+    /// 粗网格分辨率（8..1024；默认 256）
+    #[serde(default)]
+    pub grid_resolution: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default, JsonSchema)]
@@ -353,6 +356,8 @@ pub struct DefaultParams {
     pub default_fixed_wing_speed_mps: f64,
     /// 巡航速度占位（m/s，旋翼机）
     pub default_rotorcraft_speed_mps: f64,
+    /// 粗网格分辨率（默认 256）
+    pub default_grid_resolution: usize,
 }
 
 impl Default for DefaultParams {
@@ -372,6 +377,7 @@ impl Default for DefaultParams {
             default_rotorcraft_turn_radius_m: 0.0,
             default_fixed_wing_speed_mps: 250.0,
             default_rotorcraft_speed_mps: 100.0,
+            default_grid_resolution: 256,
         }
     }
 }
@@ -415,6 +421,9 @@ impl DefaultParams {
                 "linear" => d.detection_curve = DetectionCurve::Linear,
                 _ => {} // 无效 → 默认
             }
+        }
+        if let Some(v) = o.grid_resolution.filter(|v| *v >= 8 && *v <= 1024) {
+            d.default_grid_resolution = v;
         }
         d
     }
