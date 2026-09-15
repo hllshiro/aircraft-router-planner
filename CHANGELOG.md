@@ -9,6 +9,8 @@
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-15
+
 ### Changed
 - **Breaking**: CLI 编译产物从 `aircraft-router-planner-cli` 重命名为 `arpcli`，包名同步更新。
 - **Breaking**: CLI 接口精简为 `arpcli plan --file <file> --out <path>`（两个必填选项），移除 stdin/stdout 管道模式。
