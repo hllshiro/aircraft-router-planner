@@ -5,8 +5,8 @@
 
 use std::hint::black_box;
 
-use aircraft_router_planner_cli::terrain::TerrainSource;
-use aircraft_router_planner_cli::terrain::builtin::{BuiltinSource, write_pack_raw};
+use arpcli::terrain::TerrainSource;
+use arpcli::terrain::builtin::{BuiltinSource, write_pack_raw};
 use criterion::{Criterion, criterion_group, criterion_main};
 
 fn bench_load_and_sample(c: &mut Criterion) {

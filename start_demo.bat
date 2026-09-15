@@ -22,9 +22,9 @@ set REBUILD=0
 if /i "%~1"=="rebuild" set REBUILD=1
 
 REM ---- 1. build CLI (release) if missing or forced ----
-if exist "target\release\aircraft-router-planner-cli.exe" if "!REBUILD!"=="0" goto cli_skip
+if exist "target\release\arpcli.exe" if "!REBUILD!"=="0" goto cli_skip
 echo [1/4] building CLI (release) ...
-cargo build --release -p aircraft-router-planner-cli
+cargo build --release -p arpcli
 if errorlevel 1 goto fail_cli
 :cli_skip
 

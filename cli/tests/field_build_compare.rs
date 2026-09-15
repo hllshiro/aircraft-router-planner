@@ -14,12 +14,12 @@
 use std::path::Path;
 use std::time::Instant;
 
-use aircraft_router_planner_cli::costfield::{
+use arpcli::costfield::{
     CostField, build_semantic_cost_field, build_semantic_cost_field_par,
 };
-use aircraft_router_planner_cli::terrain::builtin::{BuiltinSource, write_pack_raw};
-use aircraft_router_planner_cli::terrain::mask::{GeoMask, MAGIC as MASK_MAGIC, MaskedSource};
-use aircraft_router_planner_cli::terrain::{BulkPrefetch, Sample, TerrainSource};
+use arpcli::terrain::builtin::{BuiltinSource, write_pack_raw};
+use arpcli::terrain::mask::{GeoMask, MAGIC as MASK_MAGIC, MaskedSource};
+use arpcli::terrain::{BulkPrefetch, Sample, TerrainSource};
 
 /// zigzag11 区域（同 solver::region_of：start/target 包围盒 + 0.15° 缓冲，方形 span）。
 fn zigzag11_region() -> (f64, f64, f64) {

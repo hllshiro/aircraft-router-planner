@@ -32,7 +32,7 @@ fi
 ERR_ARG="$TMP/err.txt"
 
 START=$(date +%s%N)
-"./target/release/aircraft-router-planner-cli.exe" -i "$INPUT_ARG" --terrain "$TERRAIN_ARG" -o "$OUT_ARG" 2>"$ERR_ARG" || {
+"./target/release/arpcli.exe" -i "$INPUT_ARG" --terrain "$TERRAIN_ARG" -o "$OUT_ARG" 2>"$ERR_ARG" || {
   echo "FAIL: CLI 运行失败（exit $?）" >&2
   cat "$ERR_ARG" >&2
   exit 1

@@ -16,7 +16,7 @@
 ```
 demo/
 ├── server/    # Rust + Axum 后端：POST /api/plan → stdin/stdout 管道调核心 CLI
-│              # （aircraft-router-planner-cli），透传 Output JSON；
+│              # （arpcli），透传 Output JSON；
 │              # POST /api/terrain 直接采样 ARPK1 供 3D 地形渲染；
 │              # 其余路径 serve 前端生产构建（web-dist/，环境变量 DEMO_WEB_DIR 覆盖）
 │              # 端口环境变量 DEMO_PORT，默认 3001
@@ -69,7 +69,7 @@ copy target/release/demo-server.exe → install/demo/
 ### 手动分步（任意平台）
 
 ```bash
-cargo build --release -p aircraft-router-planner-cli
+cargo build --release -p arpcli
 cargo build --release -p demo-server
 cargo run --release -p demo-server &        # :3001
 cd demo/web && pnpm install && pnpm dev   # :5173
@@ -95,7 +95,7 @@ Linux/macOS 可用 `bash demo/start.sh` 一键（脚本按 Git Bash/pnpm 编写�
 
 ## 说明
 
-- CLI 二进制默认位于 workspace 根 `target/release/aircraft-router-planner-cli`；
+- CLI 二进制默认位于 workspace 根 `target/release/arpcli`；
   可用环境变量 `ARP_CLI` 覆盖（例如指定交叉编译产物；**设置但不存在时回退候选**）。
 - 默认场景为北京近郊（115.9°E, 39.8°N → 116.8°E, 40.3°N），默认地形
   `data/east_asia_7p5as.arpack`（开发模式 cwd=workspace 根命中）；独立模式下

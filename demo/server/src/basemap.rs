@@ -28,7 +28,7 @@ use tiff::decoder::{Decoder, DecodingResult};
 use tiff::tags::Tag;
 use tiff::ColorType;
 
-use aircraft_router_planner_cli::terrain::mask::{GeoMask, MaskClass};
+use arpcli::terrain::mask::{GeoMask, MaskClass};
 
 const MAX_GRID: usize = 256;
 /// 无 .ovr 时主文件「全量解码」的像素上限（≤ 此值全读 + 双线性；> 此值走抽稀降级）

@@ -7,15 +7,15 @@
 //! - 多机线性预算：一次 FMM 多目标回溯 vs 每机独立 FMM（N=1/4/8/16）。
 //! 用法: cargo run --release --example fine_loop_phase2 -- <gmted.arpack> <china.arpack>
 
-use aircraft_router_planner_cli::config::DefaultParams;
-use aircraft_router_planner_cli::costfield::{
+use arpcli::config::DefaultParams;
+use arpcli::costfield::{
     backtrack_path, build_semantic_cost_field, fmm_propagate,
 };
-use aircraft_router_planner_cli::smooth::{
+use arpcli::smooth::{
     SmoothOptions, VerifyContext, default_chain, smooth_path_chain,
 };
-use aircraft_router_planner_cli::terrain::builtin::BuiltinSource;
-use aircraft_router_planner_cli::terrain::{Sample, TerrainSource, los_blocked};
+use arpcli::terrain::builtin::BuiltinSource;
+use arpcli::terrain::{Sample, TerrainSource, los_blocked};
 use rand::{RngExt, SeedableRng};
 use sha2::{Digest, Sha256};
 use std::hint::black_box;
@@ -25,7 +25,7 @@ const GRID: usize = 256;
 const N_TRIALS: usize = 100;
 
 /// 北京区 256² 语义代价场（Land/NoData；NODATA 5x）。
-fn beijing_field<T: TerrainSource>(src: &T) -> aircraft_router_planner_cli::costfield::CostField {
+fn beijing_field<T: TerrainSource>(src: &T) -> arpcli::costfield::CostField {
     build_semantic_cost_field(
         GRID,
         GRID,
@@ -72,18 +72,18 @@ fn gen_pairs<T: TerrainSource>(
 
 /// 粗层回溯路径 → Path（经纬度 + 固定飞行高度）。
 fn coarse_path(
-    field: &aircraft_router_planner_cli::costfield::CostField,
-    res: &aircraft_router_planner_cli::costfield::FmmResult,
+    field: &arpcli::costfield::CostField,
+    res: &arpcli::costfield::FmmResult,
     src: (usize, usize),
     dst: (usize, usize),
     alt: f64,
-) -> Option<aircraft_router_planner_cli::path::Path> {
+) -> Option<arpcli::path::Path> {
     let pts = backtrack_path(field, res, dst.0, dst.1, src.0, src.1)?;
-    Some(aircraft_router_planner_cli::path::Path::new(
+    Some(arpcli::path::Path::new(
         pts.iter()
             .map(|&(r, c)| {
                 let (lon, lat) = lonlat_of(r, c);
-                aircraft_router_planner_cli::path::PathPoint::new(lon, lat, alt)
+                arpcli::path::PathPoint::new(lon, lat, alt)
             })
             .collect(),
     ))

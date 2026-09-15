@@ -1,6 +1,6 @@
 //! arp-convert：AircraftRouterPlanner 内部地形转换工具（**不随核心 CLI 发布**）。
 //!
-//! 从核心 CLI（arp-cli）剥离的数据准备功能：外部地形格式（GeoTIFF / DTED / SRTM .hgt）
+//! 从核心 CLI（arpcli）剥离的数据准备功能：外部地形格式（GeoTIFF / DTED / SRTM .hgt）
 //! → 自有紧凑格式 ARPK1；以及 ARPK1 块压缩重压缩。随用随编（`cargo build --release -p arp-convert`）。
 //!
 //! 子命令：
@@ -18,8 +18,8 @@ use clap::{Parser, Subcommand};
 
 use sha2::{Digest, Sha256};
 
-use aircraft_router_planner_cli::error::AppError;
-use aircraft_router_planner_cli::terrain::builtin::{
+use arpcli::error::AppError;
+use arpcli::terrain::builtin::{
     BLOCK_SIZE, COMPRESSION_DEFLATE, COMPRESSION_RAW, COMPRESSION_ZSTD, FORMAT_VERSION,
     HEADER_SIZE, MAGIC, SEMANTICS_EQUIANGULAR, VDATUM_EGM96, VDATUM_ELLIPSOID,
 };
@@ -128,7 +128,7 @@ fn run_convert(
     };
     let stats = convert_file(input, output, &opts)?;
     // 转换产物自校验：mmap 打开（结构校验）+ verify_sha（全量）
-    let s = aircraft_router_planner_cli::terrain::builtin::BuiltinSource::open(output)?;
+    let s = arpcli::terrain::builtin::BuiltinSource::open(output)?;
     s.verify_sha()
         .map_err(|e| AppError::Data(format!("convert output sha mismatch: {e}")))?;
     println!(
@@ -159,7 +159,7 @@ fn run_recompress(
 ) -> Result<(), AppError> {
     let started = std::time::Instant::now();
     let bytes = recompress_arpk1(input, output, experimental_zstd)?;
-    let s = aircraft_router_planner_cli::terrain::builtin::BuiltinSource::open(output)?;
+    let s = arpcli::terrain::builtin::BuiltinSource::open(output)?;
     s.verify_sha()
         .map_err(|e| AppError::Data(format!("recompress output sha mismatch: {e}")))?;
     println!(
@@ -292,7 +292,7 @@ struct GeoTiffGrid {
 
 impl GeoTiffGrid {
     fn open(path: &Path) -> Result<Self, AppError> {
-        use aircraft_router_planner_cli::terrain::geotiff;
+        use arpcli::terrain::geotiff;
         use tiff::decoder::{Decoder, DecodingResult};
         use tiff::tags::Tag;
 
@@ -996,8 +996,8 @@ pub fn recompress_arpk1(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aircraft_router_planner_cli::terrain::TerrainSource;
-    use aircraft_router_planner_cli::terrain::builtin::BuiltinSource;
+    use arpcli::terrain::TerrainSource;
+    use arpcli::terrain::builtin::BuiltinSource;
 
     /// 构造 SRTM .hgt 字节（大端 i16 行优先；行 0 = 北）。
     /// 网格：3×3，值 = 行号*10 + 列号（便于验证翻转：南行序应为 2*10+.. → 0*10+..）。
@@ -1137,7 +1137,7 @@ mod tests {
         let stats = convert_file(&tif, &arpk, &opts).unwrap();
         let s = BuiltinSource::open(&arpk).unwrap();
         s.verify_sha().unwrap();
-        let g = aircraft_router_planner_cli::terrain::geotiff::GeoTiffSource::open(&tif).unwrap();
+        let g = arpcli::terrain::geotiff::GeoTiffSource::open(&tif).unwrap();
         // 网格中心采样对比
         let lon = stats.origin_lon + (stats.cols as f64 / 2.0) * stats.cell_lon_deg;
         let lat = stats.origin_lat + (stats.rows as f64 / 2.0) * stats.cell_lat_deg;
@@ -1160,7 +1160,7 @@ mod tests {
     /// 采样与原始逐点一致）+ 块压缩字段 = deflate。
     #[test]
     fn recompress_to_deflate_roundtrip() {
-        use aircraft_router_planner_cli::terrain::builtin::{COMPRESSION_DEFLATE, write_pack_raw};
+        use arpcli::terrain::builtin::{COMPRESSION_DEFLATE, write_pack_raw};
         let dir = std::env::temp_dir();
         let id = std::process::id();
         let src = dir.join(format!("recomp_src_{id}.arpack"));
@@ -1222,7 +1222,7 @@ mod tests {
     /// open + verify_sha + 采样与原始逐点一致（ruzstd 0.9 Fastest 编解码 round-trip）。
     #[test]
     fn recompress_to_zstd_experimental_roundtrip() {
-        use aircraft_router_planner_cli::terrain::builtin::{COMPRESSION_ZSTD, write_pack_raw};
+        use arpcli::terrain::builtin::{COMPRESSION_ZSTD, write_pack_raw};
         let dir = std::env::temp_dir();
         let id = std::process::id();
         let src = dir.join(format!("recompz_src_{id}.arpack"));
@@ -1275,7 +1275,7 @@ mod tests {
     /// open + verify_sha + 采样一致（solver 读取路径 round-trip）。
     #[test]
     fn convert_zstd_experimental_roundtrip() {
-        use aircraft_router_planner_cli::terrain::builtin::COMPRESSION_ZSTD;
+        use arpcli::terrain::builtin::COMPRESSION_ZSTD;
         let dir = std::env::temp_dir();
         let id = std::process::id();
         let hgt = dir.join(format!("N39E116_{id}.hgt"));

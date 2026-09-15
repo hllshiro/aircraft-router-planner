@@ -6,11 +6,11 @@
 //!   北京全有效区 / China 空洞区（NODATA 5x）→ 可达率 + 耗时。
 //! 用法: cargo run --release --example real_data_phase2 -- <gmted.arpack> <china.arpack>
 
-use aircraft_router_planner_cli::costfield::{
+use arpcli::costfield::{
     backtrack_path, build_semantic_cost_field, fmm_propagate,
 };
-use aircraft_router_planner_cli::terrain::builtin::BuiltinSource;
-use aircraft_router_planner_cli::terrain::{
+use arpcli::terrain::builtin::BuiltinSource;
+use arpcli::terrain::{
     Sample, TerrainSource, los_blocked, semantic_degradation_ratios,
 };
 use rand::{RngExt, SeedableRng};
@@ -190,8 +190,8 @@ impl<T: TerrainSource> TerrainSource for BeijingSrc<'_, T> {
             None
         }
     }
-    fn bounds(&self) -> Option<aircraft_router_planner_cli::terrain::GeoBounds> {
-        Some(aircraft_router_planner_cli::terrain::GeoBounds {
+    fn bounds(&self) -> Option<arpcli::terrain::GeoBounds> {
+        Some(arpcli::terrain::GeoBounds {
             min_lon: 115.9,
             min_lat: 39.4,
             max_lon: 116.9,

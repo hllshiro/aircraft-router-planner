@@ -2,9 +2,9 @@
 //! （Phase 0-2 待数据项：加载预算 ≤300ms、LOS 预计算耗时、空洞分布统计）。
 //! 用法: cargo run --release --example arpk1_bench -- <gmted.arpack> <china.arpack> [mask.mask]
 
-use aircraft_router_planner_cli::terrain::builtin::BuiltinSource;
-use aircraft_router_planner_cli::terrain::mask::{GeoMask, MaskedSource};
-use aircraft_router_planner_cli::terrain::{Sample, TerrainSource};
+use arpcli::terrain::builtin::BuiltinSource;
+use arpcli::terrain::mask::{GeoMask, MaskedSource};
+use arpcli::terrain::{Sample, TerrainSource};
 use rand::{RngExt, SeedableRng};
 use std::hint::black_box;
 use std::time::Instant;

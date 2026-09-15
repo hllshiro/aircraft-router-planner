@@ -19,9 +19,9 @@
 
 use std::path::{Path, PathBuf};
 
-use aircraft_router_planner_cli::config::{self, Input, Zone, ZoneShape};
-use aircraft_router_planner_cli::coord::Geo;
-use aircraft_router_planner_cli::solver::{self, SolveParams};
+use arpcli::config::{self, Input, Zone, ZoneShape};
+use arpcli::coord::Geo;
+use arpcli::solver::{self, SolveParams};
 
 /// cases 目录：<crate>/tests/regression/cases/
 fn cases_dir() -> PathBuf {

@@ -4,7 +4,7 @@ set -e
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 
 echo "==> Building CLI..."
-cargo build --release -p aircraft-router-planner-cli
+cargo build --release -p arpcli
 
 echo "==> Building server..."
 cargo build --release -p demo-server

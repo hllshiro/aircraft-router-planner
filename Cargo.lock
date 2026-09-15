@@ -18,30 +18,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "aircraft-router-planner-cli"
-version = "0.2.1"
-dependencies = [
- "clap",
- "criterion",
- "dted2",
- "geo",
- "geo-types",
- "geotiff",
- "memmap2",
- "miniz_oxide",
- "nalgebra",
- "rand",
- "rstar",
- "ruzstd",
- "schemars",
- "serde",
- "serde_json",
- "sha2",
- "thiserror 2.0.19",
- "tiff 0.9.1",
-]
-
-[[package]]
 name = "alloca"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -125,13 +101,37 @@ dependencies = [
 name = "arp-convert"
 version = "0.2.1"
 dependencies = [
- "aircraft-router-planner-cli",
+ "arpcli",
  "clap",
  "dted2",
  "memmap2",
  "miniz_oxide",
  "ruzstd",
  "sha2",
+ "tiff 0.9.1",
+]
+
+[[package]]
+name = "arpcli"
+version = "0.2.1"
+dependencies = [
+ "clap",
+ "criterion",
+ "dted2",
+ "geo",
+ "geo-types",
+ "geotiff",
+ "memmap2",
+ "miniz_oxide",
+ "nalgebra",
+ "rand",
+ "rstar",
+ "ruzstd",
+ "schemars",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.19",
  "tiff 0.9.1",
 ]
 
@@ -477,7 +477,7 @@ dependencies = [
 name = "demo-server"
 version = "0.1.0"
 dependencies = [
- "aircraft-router-planner-cli",
+ "arpcli",
  "axum",
  "base64",
  "reqwest",

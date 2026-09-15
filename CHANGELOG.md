@@ -10,8 +10,9 @@
 ## [Unreleased]
 
 ### Changed
-- **Breaking**: CLI 接口精简为 `arp-cli plan --file <file> --out <path>`（两个必填选项），移除 stdin/stdout 管道模式。
-- 移除 `arp-cli schema` 子命令。
+- **Breaking**: CLI 编译产物从 `aircraft-router-planner-cli` 重命名为 `arpcli`，包名同步更新。
+- **Breaking**: CLI 接口精简为 `arpcli plan --file <file> --out <path>`（两个必填选项），移除 stdin/stdout 管道模式。
+- 移除 `arpcli schema` 子命令。
 - `grid_resolution` 迁移至 Input JSON 的 `parameters.grid_resolution`（8..1024，默认 256），CLI 不再提供 `--grid` 选项。
 - help 输出从 clap 自动生成改为自定义格式（纯文本 + 定宽对齐，三层递进 Root → Category → Endpoint）。
 
@@ -51,11 +52,11 @@
 ## [0.2.0] - 2026-08-18
 
 ### Added
-- `arp-cli schema` 子命令：用 schemars 动态生成输入/输出 JSON Schema（代码即事实，零漂移）。
+- `arpcli schema` 子命令：用 schemars 动态生成输入/输出 JSON Schema（代码即事实，零漂移）。
 
 ### Changed
-- help 风格改为 `arp-cli` / `arp-cli help` / `arp-cli help <command>`，移除 `--help` 标志。
-- 规划动作显式化为 `arp-cli plan` 子命令（裸 `arp-cli` 现显示顶层 help；**破坏性变更**，原 `arp-cli < mission.json` 管道改为 `arp-cli plan < mission.json`）。
+- help 风格改为 `arpcli` / `arpcli help` / `arpcli help <command>`，移除 `--help` 标志。
+- 规划动作显式化为 `arpcli plan` 子命令（裸 `arpcli` 现显示顶层 help；**破坏性变更**，原 `arpcli < mission.json` 管道改为 `arpcli plan < mission.json`）。
 - 地形转换/重压缩从核心 CLI 剥离为独立内部工具 `arp-convert`（`convert/` crate，**不随核心 CLI 发布**，随用随编）。
 
 ## [0.1.0] - 2026-08-17

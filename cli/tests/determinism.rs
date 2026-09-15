@@ -5,8 +5,8 @@
 //! 输入刻意不带 terrain/mask（默认掩膜自动探测找不到时纯地形，FMM 代价场
 //! 确定性来源：BTreeMap/固定序 + 整数 tie-break）。
 
-use aircraft_router_planner_cli::config::Input;
-use aircraft_router_planner_cli::solver::{self, SolveParams};
+use arpcli::config::Input;
+use arpcli::solver::{self, SolveParams};
 
 const INPUT_NO_TERRAIN: &str = r#"{
   "aircraft": [
@@ -36,8 +36,8 @@ const INPUT_ZONE_NO_TERRAIN: &str = r#"{
 /// 逐字节门禁：JSON 输出除运行时时间戳（elapsed_ms / stats.fmm_ms 天然受缓存
 /// 热影响）外必须完全一致。时间字段清零后比较（其余字段仍要求字节级相等）。
 fn assert_identical(
-    out1: &aircraft_router_planner_cli::config::Output,
-    out2: &aircraft_router_planner_cli::config::Output,
+    out1: &arpcli::config::Output,
+    out2: &arpcli::config::Output,
 ) {
     let j1 = serde_json::to_string_pretty(out1).unwrap();
     let j2 = serde_json::to_string_pretty(out2).unwrap();

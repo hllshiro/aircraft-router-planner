@@ -13,15 +13,15 @@
 use std::io::{Read, Write};
 use std::path::PathBuf;
 
-use aircraft_router_planner_cli::config::{self, Input, Output};
-use aircraft_router_planner_cli::error::{AppError, ErrorBody, InputInvalidReason};
-use aircraft_router_planner_cli::solver::{self, SolveParams};
-use aircraft_router_planner_cli::help;
+use arpcli::config::{self, Input, Output};
+use arpcli::error::{AppError, ErrorBody, InputInvalidReason};
+use arpcli::solver::{self, SolveParams};
+use arpcli::help;
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "arp-cli",
+    name = "arpcli",
     disable_version_flag = true,
     disable_help_flag = true,
     arg_required_else_help = true,
@@ -88,7 +88,7 @@ fn executable_name() -> String {
         .map(std::path::Path::new)
         .and_then(std::path::Path::file_name)
         .and_then(std::ffi::OsStr::to_str)
-        .unwrap_or("arp-cli")
+        .unwrap_or("arpcli")
         .to_string()
 }
 

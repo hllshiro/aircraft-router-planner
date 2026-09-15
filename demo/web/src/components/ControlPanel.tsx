@@ -829,7 +829,7 @@ export function ControlPanel({
       <h3>CLI计算数据源</h3>
       <div className="field-row" style={{ marginBottom: 4 }}>
         <div style={{ fontSize: 10, color: '#888', lineHeight: '1.3' }}>
-          流入 arp-cli plan 子进程；「跟随视图」= 用「地形显示」选中的文件参与计算
+          流入 arpcli plan 子进程；「跟随视图」= 用「地形显示」选中的文件参与计算
         </div>
       </div>
       <div className="field-row">

@@ -22,16 +22,16 @@ jobs:
         include:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            asset: arp-cli-windows-amd64.exe
+            asset: arpcli-windows-amd64.exe
           - os: windows-latest
             target: aarch64-pc-windows-msvc
-            asset: arp-cli-windows-arm64.exe
+            asset: arpcli-windows-arm64.exe
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
-            asset: arp-cli-linux-amd64
+            asset: arpcli-linux-amd64
           - os: ubuntu-latest
             target: aarch64-unknown-linux-musl
-            asset: arp-cli-linux-arm64
+            asset: arpcli-linux-arm64
 
     runs-on: ${{ matrix.os }}
     steps:
@@ -53,20 +53,20 @@ jobs:
 
       - name: Build (Linux musl via cross)
         if: runner.os == 'Linux'
-        run: cross build --release --target ${{ matrix.target }} -p aircraft-router-planner-cli
+        run: cross build --release --target ${{ matrix.target }} -p arpcli
 
       - name: Build (Windows MSVC)
         if: runner.os == 'Windows'
-        run: cargo build --release --target ${{ matrix.target }} -p aircraft-router-planner-cli
+        run: cargo build --release --target ${{ matrix.target }} -p arpcli
 
       - name: Stage asset
         shell: bash
         run: |
           mkdir -p dist
           if [ "${{ runner.os }}" = "Windows" ]; then
-            cp "target/${{ matrix.target }}/release/aircraft-router-planner-cli.exe" "dist/${{ matrix.asset }}"
+            cp "target/${{ matrix.target }}/release/arpcli.exe" "dist/${{ matrix.asset }}"
           else
-            cp "target/${{ matrix.target }}/release/aircraft-router-planner-cli" "dist/${{ matrix.asset }}"
+            cp "target/${{ matrix.target }}/release/arpcli" "dist/${{ matrix.asset }}"
           fi
 
       - name: Upload artifact
@@ -101,7 +101,7 @@ jobs:
       - name: Generate SHA256SUMS
         run: |
           cd dist
-          sha256sum arp-cli-* | sort -k2 > SHA256SUMS.txt
+          sha256sum arpcli-* | sort -k2 > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
       - name: Publish GitHub Release

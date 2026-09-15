@@ -12,7 +12,7 @@
 #   - thiserror 双版本（^2 + dted2 带 ^1）可接受（体积影响可忽略）
 
 [package]
-name = "aircraft-router-planner-cli"
+name = "arpcli"
 version.workspace = true
 edition.workspace = true
 description = "AircraftRouterPlanner 核心 CLI（lib+bin）：JSON 契约解析 / 坐标系统 / 地形数据源 / 代价场 / 空间索引"

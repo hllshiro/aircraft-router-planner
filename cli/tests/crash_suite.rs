@@ -4,15 +4,15 @@
 //! 断言不 panic、不段错误、不 OOM（fail-fast 返回错误或安全空结果）。
 //! 每轮回归必跑（CI 一票否决），新增模块必须同步补用例。
 
-use aircraft_router_planner_cli::config::{self, Input};
-use aircraft_router_planner_cli::coord::{Ellipsoid, Geo, TransverseMercator, WebMercator};
-use aircraft_router_planner_cli::costfield::{CostField, backtrack_path, fmm_propagate};
-use aircraft_router_planner_cli::error::{AppError, InputInvalidReason};
-use aircraft_router_planner_cli::solver;
-use aircraft_router_planner_cli::spatial::{CircleIndex, RadarEntry, RadarIndex};
-use aircraft_router_planner_cli::terrain::builtin::{BuiltinSource, write_pack_raw};
-use aircraft_router_planner_cli::terrain::mask::{GeoMask, MaskedSource};
-use aircraft_router_planner_cli::terrain::{
+use arpcli::config::{self, Input};
+use arpcli::coord::{Ellipsoid, Geo, TransverseMercator, WebMercator};
+use arpcli::costfield::{CostField, backtrack_path, fmm_propagate};
+use arpcli::error::{AppError, InputInvalidReason};
+use arpcli::solver;
+use arpcli::spatial::{CircleIndex, RadarEntry, RadarIndex};
+use arpcli::terrain::builtin::{BuiltinSource, write_pack_raw};
+use arpcli::terrain::mask::{GeoMask, MaskedSource};
+use arpcli::terrain::{
     TerrainSource, los_blocked, semantic_degradation_ratios,
 };
 
@@ -229,8 +229,8 @@ fn srtm_bad_filename_no_panic() {
 // helper 编译期引用 open_source
 fn crate_terrain_open(
     p: &std::path::Path,
-) -> Result<Box<dyn aircraft_router_planner_cli::terrain::TerrainSource>, AppError> {
-    aircraft_router_planner_cli::terrain::open_source(p)
+) -> Result<Box<dyn arpcli::terrain::TerrainSource>, AppError> {
+    arpcli::terrain::open_source(p)
 }
 
 #[test]
@@ -308,27 +308,27 @@ fn mask_class_at_extreme_coords_no_panic() {
     let m = GeoMask::parse(&tiny_mask_bytes()).unwrap();
     // 极端/非有限坐标不 panic
     assert!(
-        m.class_at(f64::NAN, 0.0) == aircraft_router_planner_cli::terrain::mask::MaskClass::Sea
+        m.class_at(f64::NAN, 0.0) == arpcli::terrain::mask::MaskClass::Sea
     );
     assert!(
         m.class_at(f64::INFINITY, -90.0)
-            == aircraft_router_planner_cli::terrain::mask::MaskClass::Sea
+            == arpcli::terrain::mask::MaskClass::Sea
     );
     assert!(
         m.class_at(-f64::INFINITY, -90.0)
-            == aircraft_router_planner_cli::terrain::mask::MaskClass::Sea
+            == arpcli::terrain::mask::MaskClass::Sea
     );
-    assert!(m.class_at(0.0, 90.0) == aircraft_router_planner_cli::terrain::mask::MaskClass::Sea);
-    assert!(m.class_at(0.0, -90.0) == aircraft_router_planner_cli::terrain::mask::MaskClass::Sea);
-    assert!(m.class_at(180.0, 0.0) == aircraft_router_planner_cli::terrain::mask::MaskClass::Sea);
-    assert!(m.class_at(-180.0, 0.0) == aircraft_router_planner_cli::terrain::mask::MaskClass::Sea);
+    assert!(m.class_at(0.0, 90.0) == arpcli::terrain::mask::MaskClass::Sea);
+    assert!(m.class_at(0.0, -90.0) == arpcli::terrain::mask::MaskClass::Sea);
+    assert!(m.class_at(180.0, 0.0) == arpcli::terrain::mask::MaskClass::Sea);
+    assert!(m.class_at(-180.0, 0.0) == arpcli::terrain::mask::MaskClass::Sea);
 }
 
 #[test]
 fn masked_source_empty_inner_no_panic() {
     // 空 TerrainSource（0 尺寸）包装掩膜：采样不 panic（返回 OOB/NoData）
     let m = GeoMask::parse(&tiny_mask_bytes()).unwrap();
-    let empty = aircraft_router_planner_cli::terrain::memory::Terrain {
+    let empty = arpcli::terrain::memory::Terrain {
         rows: 0,
         cols: 0,
         origin_lon: 0.0,
@@ -344,7 +344,7 @@ fn masked_source_empty_inner_no_panic() {
 
 #[test]
 fn los_extreme_and_nodata_no_panic() {
-    use aircraft_router_planner_cli::terrain::memory::Terrain;
+    use arpcli::terrain::memory::Terrain;
     // 全 NaN 地形（全空洞）→ NoData → LOS 不遮挡（保守端），不 panic
     let t = Terrain {
         rows: 4,
@@ -426,8 +426,8 @@ fn fmm_backtrack_unreachable_no_panic() {
 
 #[test]
 fn output_serialize_with_extremes_no_panic() {
-    use aircraft_router_planner_cli::config::{AircraftOutput, Output, Stats};
-    use aircraft_router_planner_cli::error::ErrorBody;
+    use arpcli::config::{AircraftOutput, Output, Stats};
+    use arpcli::error::ErrorBody;
     let out = Output::failure(
         "input_invalid",
         ErrorBody::input_invalid(InputInvalidReason::TargetInNoFly, "x"),
@@ -453,8 +453,8 @@ fn output_serialize_with_extremes_no_panic() {
 
 // ==================== Phase 3 平滑链 ====================
 
-use aircraft_router_planner_cli::path::{Path, PathPoint};
-use aircraft_router_planner_cli::smooth::{
+use arpcli::path::{Path, PathPoint};
+use arpcli::smooth::{
     SmoothOptions, SmoothResult, Smoother, ThetaStarSmoother, VerifyContext, catmull_rom_spline,
     chaikin_smooth, dubins_fit, greedy_simplify, smooth_path_chain, theta_star_smooth, verify_path,
 };
@@ -505,21 +505,21 @@ fn smooth_nan_inf_no_panic() {
     let _ = catmull_rom_spline(&bad, 4);
     assert!(dubins_fit(&bad, 1000.0, 32).is_none());
     // 直接 dubins 入口
-    let _ = aircraft_router_planner_cli::dubins::dubins_path(
+    let _ = arpcli::dubins::dubins_path(
         (f64::NAN, 0.0),
         0.0,
         (1.0, 0.0),
         0.0,
         1000.0,
     );
-    let _ = aircraft_router_planner_cli::dubins::dubins_path(
+    let _ = arpcli::dubins::dubins_path(
         (0.0, 0.0),
         0.0,
         (1.0, 0.0),
         0.0,
         -5.0, // 负半径
     );
-    let _ = aircraft_router_planner_cli::dubins::dubins_path(
+    let _ = arpcli::dubins::dubins_path(
         (0.0, 0.0),
         0.0,
         (1e9, 1e9), // 极端坐标

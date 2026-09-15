@@ -17,7 +17,7 @@ for arg in "$@"; do
 done
 
 echo "==> [1/5] release 构建（静态编译红线前置）"
-cargo build --release -p aircraft-router-planner-cli
+cargo build --release -p arpcli
 
 echo "==> [2/5] 回归测试（lib / crash / determinism / regress）"
 cargo test --lib

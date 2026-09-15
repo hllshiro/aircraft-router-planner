@@ -26,7 +26,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use tower_http::services::{ServeDir, ServeFile};
 
-use aircraft_router_planner_cli::terrain::{open_source, TerrainSource};
+use arpcli::terrain::{open_source, TerrainSource};
 
 mod basemap;
 
@@ -63,7 +63,7 @@ async fn plan_route(Json(mut payload): Json<Value>) -> Json<Value> {
 }
 
 /// 定位 CLI 二进制：ARP_CLI 环境变量优先（存在才用，误设/指向不存在则回退候选）；
-/// 否则 exe 同目录（独立包形态：demo-server.exe 与 aircraft-router-planner-cli.exe
+/// 否则 exe 同目录（独立包形态：demo-server.exe 与 arpcli.exe
 /// 同目录或上级目录）→ 常见 workspace 相对路径（Windows 下带 .exe 后缀才能被
 /// Command 找到）。
 fn cli_bin() -> PathBuf {
@@ -80,25 +80,25 @@ fn cli_bin() -> PathBuf {
     let mut cands: Vec<PathBuf> = Vec::new();
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            cands.push(dir.join("aircraft-router-planner-cli.exe"));
-            cands.push(dir.join("aircraft-router-planner-cli"));
-            cands.push(dir.join("..").join("aircraft-router-planner-cli.exe"));
-            cands.push(dir.join("..").join("aircraft-router-planner-cli"));
+            cands.push(dir.join("arpcli.exe"));
+            cands.push(dir.join("arpcli"));
+            cands.push(dir.join("..").join("arpcli.exe"));
+            cands.push(dir.join("..").join("arpcli"));
         }
     }
     cands.extend([
-        PathBuf::from("aircraft-router-planner-cli.exe"),
-        PathBuf::from("./target/release/aircraft-router-planner-cli.exe"),
-        PathBuf::from("./target/release/aircraft-router-planner-cli"),
-        PathBuf::from("../target/release/aircraft-router-planner-cli"),
-        PathBuf::from("target/release/aircraft-router-planner-cli"),
+        PathBuf::from("arpcli.exe"),
+        PathBuf::from("./target/release/arpcli.exe"),
+        PathBuf::from("./target/release/arpcli"),
+        PathBuf::from("../target/release/arpcli"),
+        PathBuf::from("target/release/arpcli"),
     ]);
     for c in cands {
         if c.exists() {
             return c;
         }
     }
-    PathBuf::from("aircraft-router-planner-cli.exe")
+    PathBuf::from("arpcli.exe")
 }
 
 fn run_cli(input_json: &str) -> Result<Value, String> {

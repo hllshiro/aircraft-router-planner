@@ -55,9 +55,9 @@ audit_binary() {
 # ── 1. 构建 CLI ──────────────────────────────────────────────────
 
 echo "==> [1/4] 构建 CLI (release)"
-cargo build --release -p aircraft-router-planner-cli
+cargo build --release -p arpcli
 
-CLI_BIN="target/release/aircraft-router-planner-cli"
+CLI_BIN="target/release/arpcli"
 [ -f "$CLI_BIN.exe" ] && CLI_BIN="$CLI_BIN.exe"
 
 audit_binary "$CLI_BIN"

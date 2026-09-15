@@ -23,14 +23,14 @@
 
 ```bash
 # 构建核心 CLI（静态编译红线：零第三方 C/DLL 依赖）
-cargo build --release -p aircraft-router-planner-cli
+cargo build --release -p arpcli
 
 # 运行（plan 子命令：从 stdin 读任务 JSON，输出路径 JSON）
-cat mission.json | target/release/aircraft-router-planner-cli plan
+cat mission.json | target/release/arpcli plan
 
-# 查看帮助（help 风格：arp-cli / arp-cli help / arp-cli help <command>，不使用 --help）
-target/release/aircraft-router-planner-cli          # 顶层 help
-target/release/aircraft-router-planner-cli schema   # 输出输入/输出 JSON Schema
+# 查看帮助（help 风格：arpcli / arpcli help / arpcli help <command>，不使用 --help）
+target/release/arpcli          # 顶层 help
+target/release/arpcli schema   # 输出输入/输出 JSON Schema
 
 # 内部地形转换工具（不随核心 CLI 发布，随用随编）
 cargo build --release -p arp-convert

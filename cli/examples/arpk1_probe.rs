@@ -1,14 +1,14 @@
 //! 开发期工具：读 ARPK1 文件并采样打印（验证转换工具输出兼容性）。
 //! 用法: cargo run --example arpk1_probe -- <path.arpk1> [lon lat ...]
 
-use aircraft_router_planner_cli::terrain::TerrainSource;
+use arpcli::terrain::TerrainSource;
 
 fn main() {
     let mut args = std::env::args().skip(1);
     let path = args
         .next()
         .expect("usage: arpk1_probe <file.arpk1> [lon lat ...]");
-    let src = match aircraft_router_planner_cli::terrain::open_source(std::path::Path::new(&path)) {
+    let src = match arpcli::terrain::open_source(std::path::Path::new(&path)) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("open failed: {e}");

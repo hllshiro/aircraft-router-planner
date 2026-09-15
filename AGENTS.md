@@ -15,7 +15,7 @@ Deterministic 3D aircraft route planning CLI (Rust 2024 edition): FMM + semantic
 
 ## Workspace layout
 
-- `cli/` — the product (lib+bin, package `aircraft-router-planner-cli`). All real work happens here.
+- `cli/` — the product (lib+bin, package `arpcli`). All real work happens here.
 - `convert/` — internal `arp-convert` terrain tool; NOT shipped, build on demand.
 - `phase0/` — historical performance prototype/benches; keep compilable, don't develop features there.
 - `demo/server` (`demo-server`, Axum) + `demo/web` (React/Vite, pnpm, NOT a workspace member) — dev visualization only, not in release. `demo-server` calls the CLI via stdin/stdout pipe; `ARP_CLI` env var overrides CLI path.
@@ -24,14 +24,14 @@ Deterministic 3D aircraft route planning CLI (Rust 2024 edition): FMM + semantic
 ## Commands
 
 ```bash
-cargo build --release -p aircraft-router-planner-cli   # the product
+cargo build --release -p arpcli   # the product
 cargo test --lib                                       # unit tests (workspace root)
 cargo test --test crash_suite                          # B9 never-crash suite (veto gate)
 cargo test --test determinism                          # bit-identical two-run gate
 cargo test --test regress_phase0                       # historical-bug regression suite
 scripts/check.sh [--quick] [--with-compare]            # full gate: build+test+red-line+perf (bash / Git Bash)
 cargo test --test field_build_compare                  # ~7 min; ONLY when touching ARPK1 decompress/BulkPrefetch/costfield
-cargo bench -p phase0 && cargo bench -p aircraft-router-planner-cli --bench b_load_decompress
+cargo bench -p phase0 && cargo bench -p arpcli --bench b_load_decompress
 scripts/perf_regress.sh                                # ≤3s/100km budget; ARP_BUDGET_MS (0 = unlimited; tests use 0)
 ```
 
@@ -59,7 +59,7 @@ wsl -d Ubuntu-22.04 -- bash -lc "cd /mnt/d/Project/Rust/AircraftRouterPlanner/de
 
 ## Conventions
 
-- CLI help style is `arp-cli` / `arp-cli help` — **no `--help`**. Pipeline: `arp-cli plan --file <file> --out <path>` reads task JSON from file, writes result JSON to file.
+- CLI help style is `arpcli` / `arpcli help` — **no `--help`**. Pipeline: `arpcli plan --file <file> --out <path>` reads task JSON from file, writes result JSON to file.
 - New regression case: drop a JSON into `cli/tests/regression/cases/` — auto-discovered. Output paths must never cross any zone; the suite asserts this.
 - On every feature/fix: update the matching `docs/NN` doc's "与设计的差异/占位" section + `CHANGELOG.md` (Keep a Changelog). `docs/技术方案.md` + code win over status docs on conflict.
 - Version source of truth: `[workspace.package] version` in root `Cargo.toml`; release tags must be `v<version>`; bump via `scripts/bump_version.sh`.
