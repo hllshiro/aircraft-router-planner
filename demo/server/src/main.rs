@@ -45,7 +45,7 @@ async fn plan_route(Json(payload): Json<Value>) -> Json<Value> {
                 "message": msg
             },
             "elapsed_ms": 0,
-            "vehicles": [],
+            "aircraft": [],
             "stats": { "fmm_ms": 0.0, "los_checks": 0, "degradations": [] }
         })),
     }
