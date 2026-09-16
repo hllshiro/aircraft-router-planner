@@ -12,11 +12,11 @@ use std::time::Instant;
 
 use crate::config::{
     Input, Output, PathPoint, Stats, TerrainIndex, AircraftOutput, Zone, ZoneShape,
-    point_in_polygon_xy, pt_seg_dist_km, zone_contains, zone_contains_at,
+    point_in_polygon_xy, pt_seg_dist_km, zone_contains, zone_contains_at
 };
 use crate::coord::Geo;
 use crate::costfield::{
-    backtrack_path, build_semantic_cost_field, build_semantic_cost_field_par_local, fmm_propagate,
+    backtrack_path, build_semantic_cost_field, build_semantic_cost_field_par_local, fmm_propagate
 };
 use crate::error::{AppError, InputInvalidReason};
 use crate::path::{Path, PathPoint as RouterPoint};
@@ -40,13 +40,13 @@ pub struct SolveParams {
     /// （测试/CI 双跑确定性用；docs/07 §5 3s 预算硬护栏）。超预算：
     /// 已有过闸候选（前面飞行器已完成）→ `degraded_timeout` + 部分结果；
     /// 无候选 → `AppError::DegradedTimeout`。
-    pub time_budget_ms: u64,
+    pub time_budget_ms: u64
 }
 
 impl Default for SolveParams {
     fn default() -> Self {
         Self {
-            time_budget_ms: 0,
+            time_budget_ms: 0
         }
     }
 }
@@ -54,7 +54,7 @@ impl Default for SolveParams {
 /// 地形打开中间态：ARPK1（BuiltinSource，预取）或外部格式（trait object，带锁）。
 enum InnerSource {
     Builtin(BuiltinSource),
-    Dyn(Box<dyn TerrainSource>),
+    Dyn(Box<dyn TerrainSource>)
 }
 
 /// 地形句柄：无地形 / ARPK1 / 外部格式 / 掩膜包装。
@@ -69,7 +69,7 @@ enum TerrainHandle {
     Plain(BuiltinSource),
     External(Box<dyn TerrainSource>),
     Masked(MaskedSource<BuiltinSource>),
-    MaskedExternal(MaskedSource<Box<dyn TerrainSource>>),
+    MaskedExternal(MaskedSource<Box<dyn TerrainSource>>)
 }
 
 impl TerrainHandle {
@@ -79,7 +79,7 @@ impl TerrainHandle {
             Self::Plain(t) => Some(t),
             Self::External(t) => Some(t.as_ref()),
             Self::Masked(t) => Some(t),
-            Self::MaskedExternal(t) => Some(t),
+            Self::MaskedExternal(t) => Some(t)
         }
     }
     fn as_bulk(&self) -> Option<&(dyn BulkPrefetch + Sync)> {
@@ -88,7 +88,7 @@ impl TerrainHandle {
             Self::Plain(t) => Some(t),
             Self::External(_) => None,
             Self::Masked(t) => Some(t),
-            Self::MaskedExternal(_) => None,
+            Self::MaskedExternal(_) => None
         }
     }
 }
@@ -98,7 +98,7 @@ impl TerrainHandle {
 struct Region {
     min_lon: f64,
     min_lat: f64,
-    span_deg: f64,
+    span_deg: f64
 }
 
 /// 待解算的飞行器规格（逐机显式；aircraft 空数组已在 validate 拦截）。
@@ -118,7 +118,7 @@ struct AircraftSpec {
     mid_alts: Vec<f64>,
     /// 关联武器（P7：逐机显式；出现即启用——`effective_range_km()` 恒 Some
     /// （weapon_type 必填））。None = 无武器 → 点目标语义。
-    weapon: Option<crate::config::Weapon>,
+    weapon: Option<crate::config::Weapon>
 }
 
 /// 查找 data 目录（index.yaml 所在目录）。候选顺序：
@@ -174,7 +174,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                 terrain_warnings.push(msg);
                 None
             }
-            (None, _) => None,
+            (None, _) => None
         };
         // 解析 mask 路径
         let mask_path = match (&input.terrain.mask, &index) {
@@ -189,7 +189,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                 terrain_warnings.push(msg);
                 None
             }
-            (None, _) => None,
+            (None, _) => None
         };
         // 加载地形
         let inner: Option<InnerSource> = match arpack_path {
@@ -201,7 +201,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                     .to_ascii_lowercase();
                 let result = match ext.as_str() {
                     "arpack" | "zstd" => BuiltinSource::open(p).map(InnerSource::Builtin),
-                    _ => crate::terrain::open_source(p).map(InnerSource::Dyn),
+                    _ => crate::terrain::open_source(p).map(InnerSource::Dyn)
                 };
                 match result {
                     Ok(src) => Some(src),
@@ -217,7 +217,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                     }
                 }
             }
-            None => None,
+            None => None
         };
         match inner {
             None => TerrainHandle::None,
@@ -239,9 +239,9 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                 }
                 None => match inner {
                     InnerSource::Builtin(b) => TerrainHandle::Plain(b),
-                    InnerSource::Dyn(d) => TerrainHandle::External(d),
-                },
-            },
+                    InnerSource::Dyn(d) => TerrainHandle::External(d)
+                }
+            }
         }
     };
 
@@ -269,7 +269,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                 profile: a.profile.clone(),
                 mid_waypoints: mid,
                 mid_alts,
-                weapon: a.weapon.clone(),
+                weapon: a.weapon.clone()
             })
         })
         .collect::<Result<Vec<_>, AppError>>()?;
@@ -443,7 +443,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                 distance_m: 0.0,
                 warnings: vec![format!(
                     "time budget {budget_ms}ms exceeded; no path for this aircraft"
-                )],
+                )]
             });
             return Ok(Output {
                 status: "degraded_timeout".into(),
@@ -451,15 +451,15 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                     code: "degraded_timeout".into(),
                     message: format!(
                         "time budget {budget_ms}ms exceeded; partial results for completed aircraft"
-                    ),
+                    )
                 }),
                 elapsed_ms: Some(elapsed_ms),
                 aircraft: out_aircraft,
                 stats: Stats {
                     fmm_ms,
                     los_checks: 0,
-                    degradations,
-                },
+                    degradations
+                }
             });
         }
         // 每机目标（shadow：闭包与剖面切分统一使用 v.target）
@@ -478,7 +478,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                 .as_source()
                 .and_then(|t| match t.sample_at(lon, lat) {
                     crate::terrain::Sample::Land(h) => Some(h),
-                    _ => None,
+                    _ => None
                 })
                 .unwrap_or(0.0)
         };
@@ -564,7 +564,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                     distance_m: 0.0,
                     warnings: vec![format!(
                         "time budget {budget_ms}ms exceeded; no path for this aircraft"
-                    )],
+                    )]
                 });
                 return Ok(Output {
                     status: "degraded_timeout".into(),
@@ -572,15 +572,15 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                         code: "degraded_timeout".into(),
                         message: format!(
                             "time budget {budget_ms}ms exceeded; partial results for completed aircraft"
-                        ),
+                        )
                     }),
                     elapsed_ms: Some(elapsed_ms),
                     aircraft: out_aircraft,
                     stats: Stats {
                         fmm_ms,
                         los_checks: 0,
-                        degradations,
-                    },
+                        degradations
+                    }
                 });
             }
             if attempts > 6 {
@@ -592,7 +592,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                         "attempts": attempts - 1,
                         "failures": last_failures.iter().map(|(a, iss)| {
                             serde_json::json!({ "attempt": a, "issues": iss })
-                        }).collect::<Vec<_>>(),
+                        }).collect::<Vec<_>>()
                     });
                     eprintln!(
                         "{}",
@@ -823,7 +823,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                     status: "no_solution".into(),
                     path: Vec::new(),
                     distance_m: 0.0,
-                    warnings: vec!["coarse FMM no path".into()],
+                    warnings: vec!["coarse FMM no path".into()]
                 });
                 // P3 分类结论出口（docs/12 §3.4/§12.4）：粗层真无通道 → 几何无解分类
                 emit_classified(
@@ -927,7 +927,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                     nofly: Some(&nofly),
                     zones: Some(&all_zones),
                     threat: Some(&threat),
-                    zone_inflation_m: inflation_m,
+                    zone_inflation_m: inflation_m
                 };
                 // 风险1修复（2026-08-07）：平滑链 verify + 威胁 LOS 采样直接打地形源
                 // （height_at 走 LRU），采样点可能越出代价场预取矩形——region 仅起点/target
@@ -1526,7 +1526,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                                                         None
                                                     }
                                                 }
-                                                _ => None,
+                                                _ => None
                                             })
                                             .collect();
                                         // P4：圆硬墙（膨胀后）进入可见图切点锚点
@@ -1538,13 +1538,13 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                                                         Some(crate::patch::CircleObs {
                                                             center: *center,
                                                             r_eff_m: radius_km * 1000.0
-                                                                + inflation_m,
+                                                                + inflation_m
                                                         })
                                                     } else {
                                                         None
                                                     }
                                                 }
-                                                _ => None,
+                                                _ => None
                                             })
                                             .collect();
                                         if !obstacles.is_empty()
@@ -1842,7 +1842,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                 status: "no_solution".into(),
                 path: Vec::new(),
                 distance_m: 0.0,
-                warnings: diag,
+                warnings: diag
             });
             continue 'aircraft;
         }
@@ -1990,7 +1990,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                     status: "no_solution".into(),
                     path: Vec::new(),
                     distance_m: 0.0,
-                    warnings,
+                    warnings
                 });
                 continue 'aircraft;
             }
@@ -2004,11 +2004,11 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                 .map(|p| PathPoint {
                     x: p.lon,
                     y: p.lat,
-                    alt_m: p.alt_m,
+                    alt_m: p.alt_m
                 })
                 .collect(),
             distance_m: dist,
-            warnings,
+            warnings
         });
     }
 
@@ -2024,8 +2024,8 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
         stats: Stats {
             fmm_ms,
             los_checks: 0,
-            degradations,
-        },
+            degradations
+        }
     })
 }
 
@@ -2359,7 +2359,7 @@ fn apply_climb_rate(
     let floor_at = |lon: f64, lat: f64| -> f64 {
         terrain.map_or(f64::NEG_INFINITY, |t| match t.sample_at(lon, lat) {
             Sample::Land(h) => h + clearance,
-            _ => f64::NEG_INFINITY,
+            _ => f64::NEG_INFINITY
         })
     };
     let mut guard = 0;
@@ -2439,7 +2439,7 @@ pub(crate) fn detect_multi_aircraft_crossings(aircraft: &mut [AircraftOutput]) {
                     let lat = a[0].y + (a[1].y - a[0].y) * ta;
                     match best {
                         Some((bh, bv, _, _)) if (h, v) >= (bh, bv) => {}
-                        _ => best = Some((h, v, lon, lat)),
+                        _ => best = Some((h, v, lon, lat))
                     }
                 }
             }
@@ -2532,7 +2532,7 @@ fn region_of(specs: &[AircraftSpec]) -> Region {
     Region {
         min_lon,
         min_lat,
-        span_deg: span,
+        span_deg: span
     }
 }
 
@@ -2550,7 +2550,7 @@ pub(crate) fn emit_classified(
         "event": "classified",
         "aircraft": aircraft_id,
         "category": category,
-        "detail": detail,
+        "detail": detail
     });
     eprintln!(
         "{}",
@@ -2630,7 +2630,7 @@ fn expand_region_for_walls<'a>(
     Region {
         min_lon,
         min_lat,
-        span_deg: span,
+        span_deg: span
     }
 }
 
@@ -2703,9 +2703,9 @@ fn circle_index(zones: &[&Zone]) -> CircleIndex {
                 id: z.id.clone(),
                 lon: center[0],
                 lat: center[1],
-                radius_m: radius_km * 1000.0,
+                radius_m: radius_km * 1000.0
             }),
-            ZoneShape::Polygon { .. } => None,
+            ZoneShape::Polygon { .. } => None
         })
         .collect();
     CircleIndex::build(entries)
@@ -3251,7 +3251,7 @@ fn restricted_pass_alt(
         return match (bottom_ok, top_ok) {
             (true, _) => Some(bottom), // 底部垂直机动总量更小 → 恒更优
             (false, true) => Some(top),
-            (false, false) => None,
+            (false, false) => None
         };
     };
     // 限飞区高度区间必须存在（validate 已强制 Restricted 提供 [alt_min, alt_max]）；
@@ -3287,7 +3287,7 @@ fn restricted_pass_alt(
     match (bottom_ok, top_ok) {
         (true, _) => Some(bottom), // 底部垂直机动总量更小 → 恒更优（显式代价比较结论）
         (false, true) => Some(top), // 底部不可行 → 顶部绕飞（优于水平绕行：水平距离不增加）
-        (false, false) => None,
+        (false, false) => None
     }
 }
 
@@ -3481,7 +3481,7 @@ fn line_hits_restricted_band_km(
                         && z.alt_min_m.is_some_and(|lo| alt >= lo)
                         && z.alt_max_m.is_some_and(|hi| alt <= hi)
                 }
-                Err(_) => false,
+                Err(_) => false
             }
         };
         if in_band_at(lon1, lat1, alt1) || in_band_at(lon2, lat2, alt2) {
@@ -3493,7 +3493,7 @@ fn line_hits_restricted_band_km(
                     lon1, lat1, lon2, lat2, center[0], center[1], *radius_km,
                 ) {
                     Some((t1, t2)) => vec![(t1, t2)],
-                    None => Vec::new(),
+                    None => Vec::new()
                 }
             }
             crate::config::ZoneShape::Polygon { vertices } => {
@@ -4182,7 +4182,7 @@ fn build_cost_field(
                 Sample::Land(0.0)
             },
             5.0,
-        ),
+        )
     };
 
     // 5c. 禁飞区墙向外膨胀 + 过渡带软罚（见 apply_inflation_and_band）
@@ -4356,7 +4356,7 @@ fn apply_inflation_and_band(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Input, ZoneType};
+    use crate::config::Input;
 
     fn parse(s: &str) -> Input {
         Input::from_json_str(s).unwrap()
@@ -4391,7 +4391,7 @@ mod tests {
                 .map(|&(x, y, alt)| PathPoint { x, y, alt_m: alt })
                 .collect(),
             distance_m: 0.0,
-            warnings: Vec::new(),
+            warnings: Vec::new()
         }
     }
 
@@ -4426,10 +4426,9 @@ mod tests {
     fn poly_wall(vertices: Vec<[f64; 2]>) -> Zone {
         Zone {
             id: "poly".into(),
-            zone_type: ZoneType::NoFly,
             shape: ZoneShape::Polygon { vertices },
             alt_min_m: None,
-            alt_max_m: None,
+            alt_max_m: None
         }
     }
 
@@ -4504,13 +4503,12 @@ mod tests {
         // Circle 分支回归：点靠圆心 → 径向外扩 target
         let z = Zone {
             id: "c".into(),
-            zone_type: ZoneType::NoFly,
             shape: ZoneShape::Circle {
                 center: [115.0, 39.0],
-                radius_km: 10.0,
+                radius_km: 10.0
             },
             alt_min_m: None,
-            alt_max_m: None,
+            alt_max_m: None
         };
         let p = RouterPoint::new(115.02, 39.0, 500.0); // ~2.2km 距圆心 < 10+5.5
         let out = push_out_of_walls(&[p], &[z], 5.0, 0.5);
@@ -4747,7 +4745,7 @@ mod tests {
         let region = Region {
             min_lon: 0.0,
             min_lat: 0.0,
-            span_deg: 1.0,
+            span_deg: 1.0
         };
         let mut times = vec![f32::INFINITY; grid * grid];
         times[3 * grid + 3] = 10.0;
@@ -4755,7 +4753,7 @@ mod tests {
         times[4 * grid + 4] = f32::INFINITY; // 目标 cell 本身不可达
         let res = crate::costfield::FmmResult {
             times,
-            accepted: vec![false; grid * grid],
+            accepted: vec![false; grid * grid]
         };
         let got = relaxed_target_cell(&res, &region, grid, 0.5, 0.5, 10.0);
         assert!(got.is_some());
@@ -4771,12 +4769,12 @@ mod tests {
         let region = Region {
             min_lon: 0.0,
             min_lat: 0.0,
-            span_deg: 1.0,
+            span_deg: 1.0
         };
         let times = vec![f32::INFINITY; grid * grid];
         let res = crate::costfield::FmmResult {
             times,
-            accepted: vec![false; grid * grid],
+            accepted: vec![false; grid * grid]
         };
         assert!(relaxed_target_cell(&res, &region, grid, 0.5, 0.5, 10.0).is_none());
     }
@@ -4814,10 +4812,8 @@ mod tests {
           39.9
         ],
         "radius_km": 5
-      },
-      "alt_min_m": 0,
-      "alt_max_m": 12000,
-      "zone_type": "no_fly"
+      }
+
     }
   ]
 }"#;
@@ -4843,23 +4839,21 @@ mod tests {
         // 主管真实输入 zz33/zz34 中走廊闭合 → 无解（比锯齿交付更坏）。
         let nf = Zone {
             id: "nf".into(),
-            zone_type: crate::config::ZoneType::NoFly,
             shape: ZoneShape::Circle {
                 center: [116.0, 39.5],
-                radius_km: 10.0,
+                radius_km: 10.0
             },
             alt_min_m: None,
-            alt_max_m: None,
+            alt_max_m: None
         };
         let rz = Zone {
             id: "rz".into(),
-            zone_type: crate::config::ZoneType::Restricted,
             shape: ZoneShape::Circle {
                 center: [116.0, 39.45],
-                radius_km: 8.0,
+                radius_km: 8.0
             },
             alt_min_m: Some(2000.0),
-            alt_max_m: Some(6000.0),
+            alt_max_m: Some(6000.0)
         };
         // raw 从 rz 南侧绕过（距圆心 > 22km，不穿 rz）；直线 p0→p1 从 rz/nf 内穿过
         let seg = crate::path::Path {
@@ -4869,7 +4863,7 @@ mod tests {
                 vpp(116.0, 39.25, 3000.0),
                 vpp(116.5, 39.3, 3000.0),
                 vpp(116.5, 39.7, 3000.0),
-            ],
+            ]
         };
         let start = Geo::new(115.0, 39.0).unwrap();
         let target = Geo::new(116.5, 39.7).unwrap();
@@ -4911,7 +4905,7 @@ mod tests {
             fn height_at(&self, lon: f64, lat: f64) -> Option<f64> {
                 match self.sample_at(lon, lat) {
                     Sample::Land(h) => Some(h),
-                    _ => None,
+                    _ => None
                 }
             }
             fn bounds(&self) -> Option<crate::terrain::GeoBounds> {
@@ -4924,7 +4918,7 @@ mod tests {
         let region = Region {
             min_lon: 0.0,
             min_lat: 0.0,
-            span_deg: 1.0,
+            span_deg: 1.0
         };
         let grid = 8;
         let radars = [crate::config::Radar {
@@ -4934,7 +4928,7 @@ mod tests {
             radius_km: 200.0,
             alt_m: 10.0,
             suppression_post_range_km: None,
-            suppression_factor: None,
+            suppression_factor: None
         }];
         let threat = SphericalRadarThreat::new(
             &radars,
@@ -5038,10 +5032,8 @@ mod tests {
             39.3
           ]
         ]
-      },
-      "alt_min_m": 0,
-      "alt_max_m": 12000,
-      "zone_type": "no_fly"
+      }
+
     },
     {
       "id": "north",
@@ -5065,10 +5057,8 @@ mod tests {
             40.5
           ]
         ]
-      },
-      "alt_min_m": 0,
-      "alt_max_m": 12000,
-      "zone_type": "no_fly"
+      }
+
     },
     {
       "id": "west",
@@ -5092,10 +5082,8 @@ mod tests {
             40.5
           ]
         ]
-      },
-      "alt_min_m": 0,
-      "alt_max_m": 12000,
-      "zone_type": "no_fly"
+      }
+
     },
     {
       "id": "east",
@@ -5119,10 +5107,8 @@ mod tests {
             40.5
           ]
         ]
-      },
-      "alt_min_m": 0,
-      "alt_max_m": 12000,
-      "zone_type": "no_fly"
+      }
+
     }
   ]
 }"#;
@@ -5248,10 +5234,8 @@ mod tests {
           39.9
         ],
         "radius_km": 30
-      },
-      "alt_min_m": 0,
-      "alt_max_m": 10000,
-      "zone_type": "no_fly"
+      }
+
     }
   ]
 }"#;
@@ -5292,10 +5276,8 @@ mod tests {
           39.1546051011457
         ],
         "radius_km": 20
-      },
-      "alt_min_m": 0,
-      "alt_max_m": 20000,
-      "zone_type": "no_fly"
+      }
+
     },
     {
       "id": "p1",
@@ -5327,10 +5309,8 @@ mod tests {
             39.63798773661437
           ]
         ]
-      },
-      "alt_min_m": 0,
-      "alt_max_m": 20000,
-      "zone_type": "no_fly"
+      }
+
     }
   ]
 }"#;
@@ -5356,13 +5336,12 @@ mod tests {
         // 圆西侧角落 700m 高山（飞机穿行不经过），穿行带地形 50m → 底部 1500m 应可行。
         let z = Zone {
             id: "rz".into(),
-            zone_type: crate::config::ZoneType::Restricted,
             shape: ZoneShape::Circle {
                 center: [116.14959340327005, 39.597263409766285],
-                radius_km: 20.0,
+                radius_km: 20.0
             },
             alt_min_m: Some(2000.0),
-            alt_max_m: Some(5000.0),
+            alt_max_m: Some(5000.0)
         };
         let start = Geo::new(116.82168446499925, 40.23810827713887).unwrap();
         let target = Geo::new(115.28680713092322, 39.04668499383146).unwrap();
@@ -5383,7 +5362,7 @@ mod tests {
             origin_lat: 39.30,
             cell_lon_deg: 0.05,
             cell_lat_deg: 0.05,
-            h,
+            h
         };
         let pass = restricted_pass_alt(&z, 3000.0, None, Some(&terr), &start, &target, 15.0, None);
         assert_eq!(
@@ -5399,13 +5378,12 @@ mod tests {
         // 圆 [2000,5000]msl，巡航 3000m；start/target 距圆 > 爬升距离。
         let z = Zone {
             id: "rz".into(),
-            zone_type: crate::config::ZoneType::Restricted,
             shape: ZoneShape::Circle {
                 center: [116.14959340327005, 39.597263409766285],
-                radius_km: 20.0,
+                radius_km: 20.0
             },
             alt_min_m: Some(2000.0),
-            alt_max_m: Some(5000.0),
+            alt_max_m: Some(5000.0)
         };
         let start = Geo::new(116.82168446499925, 40.23810827713887).unwrap();
         let target = Geo::new(115.28680713092322, 39.04668499383146).unwrap();
@@ -5422,7 +5400,7 @@ mod tests {
             origin_lat: 39.3,
             cell_lon_deg: 0.05,
             cell_lat_deg: 0.05,
-            h: vec![1450.0f32; 100],
+            h: vec![1450.0f32; 100]
         };
         assert_eq!(
             restricted_pass_alt(&z, 3000.0, None, Some(&terr), &start, &target, 15.0, None),
@@ -5453,13 +5431,12 @@ mod tests {
         // 0m 穿行被 verify alt band + 地形净空拒绝 → 回退锯齿）。
         let z = Zone {
             id: "rz".into(),
-            zone_type: crate::config::ZoneType::Restricted,
             shape: ZoneShape::Circle {
                 center: [115.1103270025858, 39.570299948815645],
-                radius_km: 20.0,
+                radius_km: 20.0
             },
             alt_min_m: Some(0.0),
-            alt_max_m: Some(5000.0),
+            alt_max_m: Some(5000.0)
         };
         let start = Geo::new(116.82168446499925, 40.23810827713887).unwrap();
         let target = Geo::new(113.93832638409175, 38.5937625849369).unwrap();
@@ -5475,13 +5452,12 @@ mod tests {
         // 主管 2026-08-06 二轮：底部被 1450m 地形挡住 → 剖面应为顶部绕飞（5500m 平飞穿行）。
         let z = Zone {
             id: "rz".into(),
-            zone_type: crate::config::ZoneType::Restricted,
             shape: ZoneShape::Circle {
                 center: [116.14959340327005, 39.597263409766285],
-                radius_km: 20.0,
+                radius_km: 20.0
             },
             alt_min_m: Some(2000.0),
-            alt_max_m: Some(5000.0),
+            alt_max_m: Some(5000.0)
         };
         let start_geo = Geo::new(116.82168446499925, 40.23810827713887).unwrap();
         let target_geo = Geo::new(115.28680713092322, 39.04668499383146).unwrap();
@@ -5505,7 +5481,7 @@ mod tests {
             origin_lat: 39.3,
             cell_lon_deg: 0.05,
             cell_lat_deg: 0.05,
-            h: vec![1450.0f32; 100],
+            h: vec![1450.0f32; 100]
         };
         let (segs, mask, _nw) = build_restricted_profiles(
             &seg,
@@ -5573,7 +5549,7 @@ mod tests {
                           "target":{{"lon":115.28680713092322,"lat":39.04668499383146,"alt_m":{alt}}}}}
                     ],
                     "terrain":{{}},
-                    "zones":[{{"id":"rz","zone_type":"restricted","shape":"circle",
+                    "zones":[{{"id":"rz","shape":"circle",
                         "geometry":{{"center":[116.14959340327005,39.597263409766285],"radius_km":20}},
                         "alt_min_m":2000,"alt_max_m":5000}}]
                 }}"#
@@ -5747,16 +5723,15 @@ mod tests {
         // → 底部 1500m 可行（无地形）→ 恒选底部。
         let z = Zone {
             id: "rzp".into(),
-            zone_type: crate::config::ZoneType::Restricted,
             shape: ZoneShape::Polygon {
                 vertices: vec![
                     [116.90767296501929, 40.99465146600213],
                     [115.36066171773774, 40.05644513239613],
                     [116.34715136271842, 40.336691478802884],
-                ],
+                ]
             },
             alt_min_m: Some(2000.0),
-            alt_max_m: Some(6000.0),
+            alt_max_m: Some(6000.0)
         };
         let s = Geo::new(117.5633, 38.9892).unwrap();
         let t = Geo::new(115.0644, 41.1679).unwrap();
@@ -5770,10 +5745,9 @@ mod tests {
         // alt_min=0 → 底部 = -500 负高不可行 → 顶部 6500m
         let z0 = Zone {
             id: "rzp0".into(),
-            zone_type: crate::config::ZoneType::Restricted,
             shape: z.shape.clone(),
             alt_min_m: Some(0.0),
-            alt_max_m: Some(6000.0),
+            alt_max_m: Some(6000.0)
         };
         let pass0 = restricted_pass_alt(&z0, 2282.0, None, None, &s, &t, 15.0, None);
         assert_eq!(
@@ -5834,8 +5808,8 @@ mod tests {
         ]
       },
       "alt_min_m": 2000,
-      "alt_max_m": 6000,
-      "zone_type": "restricted"
+      "alt_max_m": 6000
+
     }
   ]
 }"#;
@@ -5908,8 +5882,8 @@ mod tests {
         ]
       },
       "alt_min_m": 0,
-      "alt_max_m": 6000,
-      "zone_type": "restricted"
+      "alt_max_m": 6000
+
     }
   ]
 }"#;
@@ -5933,15 +5907,14 @@ mod tests {
     fn segment_check_geometry_catches_diagonal_polygon_crossing() {
         // 梯形禁飞区（主管 2026-08-06 场景）：直线斜切穿内部（16 点采样会漏——
         // 几何判定必须拒绝）；绕行折线（先下后右）必须放行。
-        use crate::config::{ZoneShape, ZoneType};
+        use crate::config::ZoneShape;
         let z = Zone {
             id: "trap".into(),
-            zone_type: ZoneType::NoFly,
             shape: ZoneShape::Polygon {
-                vertices: vec![[116.2, 39.9], [116.5, 39.9], [116.5, 40.2], [116.35, 40.2]],
+                vertices: vec![[116.2, 39.9], [116.5, 39.9], [116.5, 40.2], [116.35, 40.2]]
             },
-            alt_min_m: Some(0.0),
-            alt_max_m: Some(12000.0),
+            alt_min_m: None,
+            alt_max_m: None
         };
         let zones = vec![z];
         let check = make_segment_check(&zones, None, 0.0, None, 0.0);
@@ -5969,16 +5942,15 @@ mod tests {
         // 段-圆相交区间仅 ~0.03 宽（t∈[0.592,0.622]），16 点等距采样可能全在圆外
         // → 旧 check（净距 clr≤1e-9 或等距采样）放行 verify 会拒的穿区段。
         // 修复：check 与 verify 同口径（解析二次方程 + [t1,t2] 区间内采样）。
-        use crate::config::{ZoneShape, ZoneType};
+        use crate::config::ZoneShape;
         let z = Zone {
             id: "rz".into(),
-            zone_type: ZoneType::Restricted,
             shape: ZoneShape::Circle {
                 center: [116.27050736818683, 41.08978345198258],
-                radius_km: 50.0,
+                radius_km: 50.0
             },
             alt_min_m: Some(0.0),
-            alt_max_m: Some(5000.0),
+            alt_max_m: Some(5000.0)
         };
         let zones = vec![z];
         let check = make_segment_check(&zones, None, 0.0, None, 0.0);
@@ -6036,10 +6008,8 @@ mod tests {
           39.45
         ],
         "radius_km": 25
-      },
-      "alt_min_m": 0,
-      "alt_max_m": 10000,
-      "zone_type": "no_fly"
+      }
+
     }
   ]
 }"#;
@@ -6083,8 +6053,8 @@ mod tests {
         "radius_km": 25
       },
       "alt_min_m": 0,
-      "alt_max_m": 2000,
-      "zone_type": "restricted"
+      "alt_max_m": 2000
+
     }
   ]
 }"#;
@@ -6126,10 +6096,8 @@ mod tests {
           39.45
         ],
         "radius_km": 25
-      },
-      "alt_min_m": 0,
-      "alt_max_m": 2000,
-      "zone_type": "no_fly"
+      }
+
     }
   ]
 }"#;
@@ -6226,7 +6194,7 @@ mod tests {
         };
         match solve(&input, &params, 0) {
             Err(AppError::DegradedTimeout(_)) => {}
-            other => panic!("expected DegradedTimeout, got {other:?}"),
+            other => panic!("expected DegradedTimeout, got {other:?}")
         }
         // 对照：预算=0（无限）→ 正常 success（现有所有测试默认路径不受影响）
         let out = solve(&input, &SolveParams::default(), 0).unwrap();
@@ -6728,10 +6696,8 @@ mod tests {
             39.7164462210201
           ]
         ]
-      },
-      "alt_min_m": 0,
-      "alt_max_m": 12000,
-      "zone_type": "no_fly"
+      }
+
     },
     {
       "id": "zone_1786150865059",
@@ -6751,10 +6717,8 @@ mod tests {
             42.648718862161275
           ]
         ]
-      },
-      "alt_min_m": 0,
-      "alt_max_m": 12000,
-      "zone_type": "no_fly"
+      }
+
     },
     {
       "id": "zone_1786150891051",
@@ -6774,10 +6738,8 @@ mod tests {
             43.34838640726238
           ]
         ]
-      },
-      "alt_min_m": 0,
-      "alt_max_m": 12000,
-      "zone_type": "no_fly"
+      }
+
     },
     {
       "id": "zone_1786151204171",
@@ -6788,10 +6750,8 @@ mod tests {
           45.97116185501782
         ],
         "radius_km": 50
-      },
-      "alt_min_m": 0,
-      "alt_max_m": 12000,
-      "zone_type": "no_fly"
+      }
+
     },
     {
       "id": "zone_1786151327667",
@@ -6802,10 +6762,8 @@ mod tests {
           49.498587971424286
         ],
         "radius_km": 100
-      },
-      "alt_min_m": 0,
-      "alt_max_m": 12000,
-      "zone_type": "no_fly"
+      }
+
     },
     {
       "id": "rz_1786150991459",
@@ -6818,8 +6776,8 @@ mod tests {
         "radius_km": 100
       },
       "alt_min_m": 0,
-      "alt_max_m": 6000,
-      "zone_type": "restricted"
+      "alt_max_m": 6000
+
     },
     {
       "id": "rz_1786151584275",
@@ -6832,8 +6790,8 @@ mod tests {
         "radius_km": 100
       },
       "alt_min_m": 2000,
-      "alt_max_m": 8000,
-      "zone_type": "restricted"
+      "alt_max_m": 8000
+
     }
   ]
 }"#;
@@ -6935,10 +6893,8 @@ mod tests {
             39.07797084088842
           ]
         ]
-      },
-      "alt_min_m": 0,
-      "alt_max_m": 12000,
-      "zone_type": "no_fly"
+      }
+
     },
     {
       "id": "zone_1786160896845",
@@ -6958,10 +6914,8 @@ mod tests {
             38.71484400273334
           ]
         ]
-      },
-      "alt_min_m": 0,
-      "alt_max_m": 12000,
-      "zone_type": "no_fly"
+      }
+
     },
     {
       "id": "zone_1786160926653",
@@ -6985,10 +6939,8 @@ mod tests {
             41.58646379784794
           ]
         ]
-      },
-      "alt_min_m": 0,
-      "alt_max_m": 12000,
-      "zone_type": "no_fly"
+      }
+
     },
     {
       "id": "rz_1786160994133",
@@ -7001,8 +6953,8 @@ mod tests {
         "radius_km": 50
       },
       "alt_min_m": 1000,
-      "alt_max_m": 4000,
-      "zone_type": "restricted"
+      "alt_max_m": 4000
+
     },
     {
       "id": "rz_1786161169725",
@@ -7015,8 +6967,8 @@ mod tests {
         "radius_km": 100
       },
       "alt_min_m": 500,
-      "alt_max_m": 4500,
-      "zone_type": "restricted"
+      "alt_max_m": 4500
+
     }
   ]
 }"#;
@@ -7041,7 +6993,7 @@ mod tests {
         );
         // 交付路径不得穿 restricted 高度带（verify 圆判定 slack 修复）：
         // 全 3000m 平飞绕行 → 圆内采样点高度都不在 [alt_min, alt_max] 带内
-        for z in input.zones.iter().filter(|z| z.zone_type == ZoneType::Restricted) {
+        for z in input.zones.iter().filter(|z| !z.is_wall()) {
             let crate::config::ZoneShape::Circle { center, radius_km } = z.shape else {
                 continue;
             };
@@ -7141,10 +7093,8 @@ mod tests {
             39.07797084088842
           ]
         ]
-      },
-      "alt_min_m": 0,
-      "alt_max_m": 12000,
-      "zone_type": "no_fly"
+      }
+
     },
     {
       "id": "zone_1786160896845",
@@ -7164,10 +7114,8 @@ mod tests {
             38.71484400273334
           ]
         ]
-      },
-      "alt_min_m": 0,
-      "alt_max_m": 12000,
-      "zone_type": "no_fly"
+      }
+
     },
     {
       "id": "zone_1786160926653",
@@ -7191,10 +7139,8 @@ mod tests {
             41.58646379784794
           ]
         ]
-      },
-      "alt_min_m": 0,
-      "alt_max_m": 12000,
-      "zone_type": "no_fly"
+      }
+
     },
     {
       "id": "rz_1786160994133",
@@ -7207,8 +7153,8 @@ mod tests {
         "radius_km": 50
       },
       "alt_min_m": 1000,
-      "alt_max_m": 4000,
-      "zone_type": "restricted"
+      "alt_max_m": 4000
+
     },
     {
       "id": "rz_1786161169725",
@@ -7221,8 +7167,8 @@ mod tests {
         "radius_km": 100
       },
       "alt_min_m": 500,
-      "alt_max_m": 4500,
-      "zone_type": "restricted"
+      "alt_max_m": 4500
+
     }
   ]
 }"#;
@@ -7246,7 +7192,7 @@ mod tests {
             v.distance_m / 1000.0
         );
         // 交付路径不得穿 restricted 高度带（同 zigzag22 检查）
-        for z in input.zones.iter().filter(|z| z.zone_type == ZoneType::Restricted) {
+        for z in input.zones.iter().filter(|z| !z.is_wall()) {
             let crate::config::ZoneShape::Circle { center, radius_km } = z.shape else {
                 continue;
             };
@@ -7344,10 +7290,8 @@ mod tests {
             39.54513536978776
           ]
         ]
-      },
-      "alt_min_m": 0,
-      "alt_max_m": 12000,
-      "zone_type": "no_fly"
+      }
+
     },
     {
       "id": "rz_1786326782863",
@@ -7360,8 +7304,8 @@ mod tests {
         "radius_km": 40
       },
       "alt_min_m": 2000,
-      "alt_max_m": 6000,
-      "zone_type": "restricted"
+      "alt_max_m": 6000
+
     }
   ]
 }"#;
@@ -7822,7 +7766,7 @@ mod tests {
         ] {
             let terr = match t.sample_at(plon, plat) {
                 crate::terrain::Sample::Land(h) => h,
-                _ => f64::NAN,
+                _ => f64::NAN
             };
             // 路径段 [pts[i], pts[i+1]] 内插值
             let mut interp = f64::NAN;
@@ -8501,10 +8445,8 @@ mod tests {
             42.442633787371435
           ]
         ]
-      },
-      "alt_min_m": 0,
-      "alt_max_m": 12000,
-      "zone_type": "no_fly"
+      }
+
     },
     {
       "id": "rz_1786409547965",
@@ -8517,8 +8459,8 @@ mod tests {
         "radius_km": 100
       },
       "alt_min_m": 3000,
-      "alt_max_m": 6000,
-      "zone_type": "restricted"
+      "alt_max_m": 6000
+
     },
     {
       "id": "rz_1786409606028",
@@ -8531,8 +8473,8 @@ mod tests {
         "radius_km": 100
       },
       "alt_min_m": 2000,
-      "alt_max_m": 6000,
-      "zone_type": "restricted"
+      "alt_max_m": 6000
+
     }
   ]
 }"#;
@@ -8746,10 +8688,8 @@ mod tests {
             40.40008219131184
           ]
         ]
-      },
-      "alt_min_m": 0,
-      "alt_max_m": 12000,
-      "zone_type": "no_fly"
+      }
+
     },
     {
       "id": "rz_1786409547965",
@@ -8762,8 +8702,8 @@ mod tests {
         "radius_km": 100
       },
       "alt_min_m": 3000,
-      "alt_max_m": 6000,
-      "zone_type": "restricted"
+      "alt_max_m": 6000
+
     },
     {
       "id": "rz_1786409606028",
@@ -8776,8 +8716,8 @@ mod tests {
         "radius_km": 100
       },
       "alt_min_m": 2000,
-      "alt_max_m": 6000,
-      "zone_type": "restricted"
+      "alt_max_m": 6000
+
     }
   ]
 }"#;
@@ -8901,10 +8841,8 @@ mod tests {
             40.13334649202884
           ]
         ]
-      },
-      "alt_min_m": 0,
-      "alt_max_m": 12000,
-      "zone_type": "no_fly"
+      }
+
     },
     {
       "id": "rz_1786418172746",
@@ -8917,8 +8855,8 @@ mod tests {
         "radius_km": 20
       },
       "alt_min_m": 1000,
-      "alt_max_m": 6000,
-      "zone_type": "restricted"
+      "alt_max_m": 6000
+
     }
   ]
 }"#;
@@ -9015,10 +8953,8 @@ mod tests {
             40.13334649202884
           ]
         ]
-      },
-      "alt_min_m": 0,
-      "alt_max_m": 12000,
-      "zone_type": "no_fly"
+      }
+
     },
     {
       "id": "rz_1786418172746",
@@ -9031,8 +8967,8 @@ mod tests {
         "radius_km": 20
       },
       "alt_min_m": 1000,
-      "alt_max_m": 6000,
-      "zone_type": "restricted"
+      "alt_max_m": 6000
+
     }
   ]
 }"#;
@@ -9142,10 +9078,8 @@ mod tests {
             40.19722929127514
           ]
         ]
-      },
-      "alt_min_m": 0,
-      "alt_max_m": 12000,
-      "zone_type": "no_fly"
+      }
+
     },
     {
       "id": "rz_1786418172746",
@@ -9158,8 +9092,8 @@ mod tests {
         "radius_km": 20
       },
       "alt_min_m": 1000,
-      "alt_max_m": 6000,
-      "zone_type": "restricted"
+      "alt_max_m": 6000
+
     }
   ]
 }"#;
@@ -9303,10 +9237,8 @@ mod tests {
             39.75
           ]
         ]
-      },
-      "alt_min_m": 0,
-      "alt_max_m": 12000,
-      "zone_type": "no_fly"
+      }
+
     }
   ]
 }"#;
@@ -9386,10 +9318,8 @@ mod tests {
             39.75
           ]
         ]
-      },
-      "alt_min_m": 0,
-      "alt_max_m": 12000,
-      "zone_type": "no_fly"
+      }
+
     }
   ]
 }"#;
@@ -9450,10 +9380,8 @@ mod tests {
             40.5
           ]
         ]
-      },
-      "alt_min_m": 0,
-      "alt_max_m": 10000,
-      "zone_type": "no_fly"
+      }
+
     }
   ]
 }"#;
@@ -9557,10 +9485,8 @@ mod tests {
             39.54988915269062
           ]
         ]
-      },
-      "alt_min_m": 0,
-      "alt_max_m": 12000,
-      "zone_type": "no_fly"
+      }
+
     }
   ]
 }"#;
@@ -9584,7 +9510,7 @@ mod tests {
         );
         // 绕行路径必须离禁飞区多边形 ≥ 2km（inflation）：v1 路径任何段不得进入
         // 三角形近邻（用 zone_segment_clearance_km 复验，与 verify 同口径）。
-        let zone = input.zones.iter().find(|z| z.zone_type == ZoneType::NoFly).unwrap();
+        let zone = input.zones.iter().find(|z| z.is_wall()).unwrap();
         for w in v.path.windows(2) {
             let clr =
                 crate::config::zone_segment_clearance_km(w[0].x, w[0].y, w[1].x, w[1].y, zone);
@@ -9660,10 +9586,8 @@ mod tests {
             41.6
           ]
         ]
-      },
-      "alt_min_m": 0,
-      "alt_max_m": 12000,
-      "zone_type": "no_fly"
+      }
+
     }
   ]
 }"#;
@@ -9696,7 +9620,7 @@ mod tests {
             y_max
         );
         // 硬约束复验：路径段不得穿入禁飞区（与 verify 同口径 clearance ≥ 2km）。
-        let zone = input.zones.iter().find(|z| z.zone_type == ZoneType::NoFly).unwrap();
+        let zone = input.zones.iter().find(|z| z.is_wall()).unwrap();
         for w in v.path.windows(2) {
             let clr =
                 crate::config::zone_segment_clearance_km(w[0].x, w[0].y, w[1].x, w[1].y, zone);
@@ -9896,10 +9820,8 @@ mod tests {
           39.9
         ],
         "radius_km": 100
-      },
-      "alt_min_m": 0,
-      "alt_max_m": 12000,
-      "zone_type": "no_fly"
+      }
+
     },
     {
       "id": "nf_out",
@@ -9910,10 +9832,8 @@ mod tests {
           39.9
         ],
         "radius_km": 130
-      },
-      "alt_min_m": 0,
-      "alt_max_m": 12000,
-      "zone_type": "no_fly"
+      }
+
     }
   ]
 }"#;

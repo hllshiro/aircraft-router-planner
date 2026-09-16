@@ -1877,7 +1877,6 @@ mod chain_tests {
         // M2：同水平面不同高度——区间内违禁、区间外放行
         let z = crate::config::Zone {
             id: "R1".into(),
-            zone_type: crate::config::ZoneType::Restricted,
             shape: crate::config::ZoneShape::Circle {
                 center: [0.5, 0.0],
                 radius_km: 10.0,

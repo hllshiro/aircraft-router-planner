@@ -703,33 +703,32 @@ mod tests {
 
     #[test]
     fn patch_applicable_excludes() {
-        use crate::config::{Zone, ZoneShape, ZoneType};
-        let mk = |t: ZoneType, s: ZoneShape| Zone {
+        use crate::config::{Zone, ZoneShape};
+        let poly_wall = Zone {
             id: "z".into(),
-            zone_type: t,
-            shape: s,
-            alt_min_m: Some(0.0),
-            alt_max_m: Some(10000.0),
-        };
-        let poly_wall = mk(
-            ZoneType::NoFly,
-            ZoneShape::Polygon {
+            shape: ZoneShape::Polygon {
                 vertices: vec![[116.0, 39.0], [117.0, 39.0], [117.0, 40.0]],
             },
-        );
-        let circle_wall = mk(
-            ZoneType::NoFly,
-            ZoneShape::Circle {
+            alt_min_m: None,
+            alt_max_m: None,
+        };
+        let circle_wall = Zone {
+            id: "z".into(),
+            shape: ZoneShape::Circle {
                 center: [116.5, 39.5],
                 radius_km: 10.0,
             },
-        );
-        let restricted = mk(
-            ZoneType::Restricted,
-            ZoneShape::Polygon {
+            alt_min_m: None,
+            alt_max_m: None,
+        };
+        let restricted = Zone {
+            id: "z".into(),
+            shape: ZoneShape::Polygon {
                 vertices: vec![[116.0, 39.0], [117.0, 39.0], [117.0, 40.0]],
             },
-        );
+            alt_min_m: Some(0.0),
+            alt_max_m: Some(10000.0),
+        };
         // 纯多边形硬墙 → 适用
         assert!(patch_applicable(&[poly_wall.clone()], false));
         // 圆障碍 → 适用（P4 放开：切点锚点 2D 水平绕行）
@@ -843,12 +842,11 @@ mod tests {
 
     #[test]
     fn plan_patch_multi_restricted_chord_check() {
-        use crate::config::{Zone, ZoneShape, ZoneType};
+        use crate::config::{Zone, ZoneShape};
         // 限飞区（多边形）覆盖直线路径；高度 3000 在禁行带 [2000, 4000] 内 → 边被拒；
         // 高度 1000（禁行带外底部）→ 直穿合法。
         let z = Zone {
             id: "rz".into(),
-            zone_type: ZoneType::Restricted,
             shape: ZoneShape::Polygon {
                 vertices: vec![
                     [116.30, 39.30],

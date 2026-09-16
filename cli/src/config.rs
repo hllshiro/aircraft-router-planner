@@ -577,13 +577,13 @@ pub fn validate(input: &Input) -> Result<(), AppError> {
             ));
         }
         // 起点在禁飞区
-        for z in input.zones.iter().filter(|z| z.zone_type == ZoneType::NoFly) {
+        for z in input.zones.iter().filter(|z| z.is_wall()) {
             if zone_contains(z, &start) {
                 return Err(AppError::InputInvalid(InputInvalidReason::TargetInNoFly));
             }
         }
         // 目标在禁飞区
-        for z in input.zones.iter().filter(|z| z.zone_type == ZoneType::NoFly) {
+        for z in input.zones.iter().filter(|z| z.is_wall()) {
             if zone_contains(z, &target) {
                 return Err(AppError::InputInvalid(InputInvalidReason::TargetInNoFly));
             }
@@ -591,7 +591,7 @@ pub fn validate(input: &Input) -> Result<(), AppError> {
         // 必经点在禁飞区（P5：必经点不可绕行 → fail-fast，禁飞区绝对禁入语义）。
         for wp in &a.mid_waypoints {
             let g = wp.to_geo()?;
-            for z in input.zones.iter().filter(|z| z.zone_type == ZoneType::NoFly) {
+            for z in input.zones.iter().filter(|z| z.is_wall()) {
                 if zone_contains(z, &g) {
                     return Err(AppError::InputInvalid(
                         InputInvalidReason::MidWaypointInNoFly,
@@ -604,7 +604,7 @@ pub fn validate(input: &Input) -> Result<(), AppError> {
     for r in &input.red_forces.radars {
         let g = Geo::new(r.lon, r.lat)
             .map_err(|_| AppError::InputInvalid(InputInvalidReason::IllegalCoordinate))?;
-        for z in input.zones.iter().filter(|z| z.zone_type == ZoneType::NoFly) {
+        for z in input.zones.iter().filter(|z| z.is_wall()) {
             if zone_contains(z, &g) {
                 return Err(AppError::InputInvalid(
                     InputInvalidReason::RadarOverlapNoFly,
@@ -629,7 +629,7 @@ pub fn validate(input: &Input) -> Result<(), AppError> {
 /// Zone 高度区间校验：Restricted 必须有 [alt_min, alt_max]（lo < hi，有限值）；
 /// NoFly/Obstacle 全高度禁入，不要求 alt（None = 全高度，2026-08-12）。
 fn validate_zone(z: &Zone) -> Result<(), AppError> {
-    if z.zone_type == ZoneType::Restricted {
+    if !z.is_wall() {
         match (z.alt_min_m, z.alt_max_m) {
             (Some(lo), Some(hi)) => {
                 if !(lo.is_finite() && hi.is_finite() && lo < hi) {
@@ -987,7 +987,6 @@ mod tests {
         // 圆：段过圆心 → 0；段距圆心 20km（半径 10km）→ 净距 10km。
         let poly = Zone {
             id: "p".into(),
-            zone_type: ZoneType::NoFly,
             shape: ZoneShape::Polygon {
                 vertices: vec![[116.0, 39.5], [116.5, 39.5], [116.5, 40.0], [116.0, 40.0]],
             },
@@ -1000,7 +999,6 @@ mod tests {
         assert!((c - 11.1).abs() < 1.0, "平行净距 ~11.1km, got {c}");
         let circ = Zone {
             id: "c".into(),
-            zone_type: ZoneType::NoFly,
             shape: ZoneShape::Circle {
                 center: [116.25, 39.75],
                 radius_km: 10.0,
@@ -1033,9 +1031,8 @@ mod tests {
                  "start":{"lon":115.0,"lat":39.0,"alt_m":0},
                  "target":{"lon":116.5,"lat":39.9,"alt_m":0}}
             ],
-            "zones":[{"id":"nf1","zone_type":"no_fly",
-                "shape":"circle","geometry":{"center":[116.5,39.9],"radius_km":10},
-                "alt_min_m":0,"alt_max_m":10000}]
+            "zones":[{"id":"nf1",
+                "shape":"circle","geometry":{"center":[116.5,39.9],"radius_km":10}}]
         }"#;
         let input = Input::from_json_str(s).unwrap();
         match validate(&input) {
@@ -1052,9 +1049,8 @@ mod tests {
                  "start":{"lon":115.0,"lat":39.0,"alt_m":0},
                  "target":{"lon":117.0,"lat":40.0,"alt_m":0}}
             ],
-            "zones":[{"id":"nf1","zone_type":"no_fly",
-                "shape":"polygon","geometry":{"vertices":[[116.0,39.5],[116.5,39.5],[116.5,40.0],[116.0,40.0]]},
-                "alt_min_m":0,"alt_max_m":10000}],
+            "zones":[{"id":"nf1",
+                "shape":"polygon","geometry":{"vertices":[[116.0,39.5],[116.5,39.5],[116.5,40.0],[116.0,40.0]]}}],
             "red_forces":{"radars":[{"id":"r1","lon":116.25,"lat":39.75,"radius_km":100}]}
         }"#;
         let input = Input::from_json_str(s).unwrap();
@@ -1074,9 +1070,8 @@ mod tests {
                  "start":{"lon":115.9,"lat":39.8,"alt_m":3000},
                  "target":{"lon":114.26335909078654,"lat":41.99101176729852,"alt_m":3000}}
             ],
-            "zones":[{"id":"nf1","zone_type":"no_fly",
-                "shape":"circle","geometry":{"center":[116.54581607527983,39.90085583451849],"radius_km":50},
-                "alt_min_m":0,"alt_max_m":12000}]
+            "zones":[{"id":"nf1",
+                "shape":"circle","geometry":{"center":[116.54581607527983,39.90085583451849],"radius_km":50}}]
         }"#;
         let input = Input::from_json_str(s).unwrap();
         if let Err(e) = validate(&input) {
@@ -1089,9 +1084,8 @@ mod tests {
                  "start":{"lon":115.9,"lat":39.8,"alt_m":3000},
                  "target":{"lon":116.8,"lat":40.3,"alt_m":3000}}
             ],
-            "zones":[{"id":"nf1","zone_type":"no_fly",
-                "shape":"circle","geometry":{"center":[116.54581607527983,39.90085583451849],"radius_km":50},
-                "alt_min_m":0,"alt_max_m":12000}]
+            "zones":[{"id":"nf1",
+                "shape":"circle","geometry":{"center":[116.54581607527983,39.90085583451849],"radius_km":50}}]
         }"#;
         let input2 = Input::from_json_str(s2).unwrap();
         match validate(&input2) {
@@ -1110,9 +1104,8 @@ mod tests {
                  "target":{"lon":117.0,"lat":40.0,"alt_m":0},
                  "mid_waypoints":[{"lon":116.5,"lat":39.9,"alt_m":0}]}
             ],
-            "zones":[{"id":"nf1","zone_type":"no_fly",
-                "shape":"circle","geometry":{"center":[116.5,39.9],"radius_km":10},
-                "alt_min_m":0,"alt_max_m":10000}]
+            "zones":[{"id":"nf1",
+                "shape":"circle","geometry":{"center":[116.5,39.9],"radius_km":10}}]
         }"#;
         let input = Input::from_json_str(s).unwrap();
         match validate(&input) {
@@ -1137,11 +1130,11 @@ mod tests {
                  "start":{"lon":115.0,"lat":39.0,"alt_m":0},
                  "target":{"lon":117.0,"lat":40.0,"alt_m":0}}
             ],
-            "zones":[{"id":"nf1","zone_type":"no_fly",
+            "zones":[{"id":"nf1",
                 "shape":"circle","geometry":{"center":[116.5,39.9],"radius_km":10}}]
         }"#;
         let input = Input::from_json_str(s).unwrap();
-        assert_eq!(input.zones[0].zone_type, ZoneType::NoFly);
+        assert!(input.zones[0].is_wall());
         assert!(input.zones[0].alt_min_m.is_none());
         assert!(input.zones[0].alt_max_m.is_none());
         if let Err(e) = validate(&input) {
@@ -1151,15 +1144,16 @@ mod tests {
 
     #[test]
     fn restricted_zone_requires_alt_range() {
-        // 限飞区必须有 [alt_min, alt_max]；缺失 → out_of_bounds 拒绝。
+        // 限飞区（非墙）必须有合法 [alt_min, alt_max]；缺失或无效 → out_of_bounds 拒绝。
         let s = r#"{
             "aircraft":[
                 {"id":"a1",
                  "start":{"lon":115.0,"lat":39.0,"alt_m":0},
                  "target":{"lon":117.0,"lat":40.0,"alt_m":0}}
             ],
-            "zones":[{"id":"rz1","zone_type":"restricted",
-                "shape":"circle","geometry":{"center":[116.5,39.9],"radius_km":10}}]
+            "zones":[{"id":"rz1",
+                "shape":"circle","geometry":{"center":[116.5,39.9],"radius_km":10},
+                "alt_min_m":5000,"alt_max_m":2000}]
         }"#;
         let input = Input::from_json_str(s).unwrap();
         match validate(&input) {
@@ -1169,8 +1163,8 @@ mod tests {
     }
 
     #[test]
-    fn zone_type_deserialized_from_json() {
-        // zone_type 现在直接从 JSON 反序列化（必填字段）。
+    fn zone_is_wall_distinction() {
+        // zone_type 已移除；通过 alt 区间判定：无 alt → is_wall()，有 alt → !is_wall()。
         let s = r#"{
             "aircraft":[
                 {"id":"a1",
@@ -1178,35 +1172,35 @@ mod tests {
                  "target":{"lon":117.0,"lat":40.0,"alt_m":0}}
             ],
             "zones":[
-                {"id":"nf1","zone_type":"no_fly",
+                {"id":"nf1",
                     "shape":"circle","geometry":{"center":[116.5,39.9],"radius_km":10}},
-                {"id":"rz1","zone_type":"restricted",
+                {"id":"rz1",
                     "shape":"circle","geometry":{"center":[116.5,39.9],"radius_km":10},
                     "alt_min_m":0,"alt_max_m":5000},
-                {"id":"ob1","zone_type":"obstacle",
+                {"id":"ob1",
                     "shape":"circle","geometry":{"center":[116.5,39.9],"radius_km":10}}
             ]
         }"#;
         let input = Input::from_json_str(s).unwrap();
-        assert_eq!(input.zones[0].zone_type, ZoneType::NoFly);
-        assert_eq!(input.zones[1].zone_type, ZoneType::Restricted);
-        assert_eq!(input.zones[2].zone_type, ZoneType::Obstacle);
+        assert!(input.zones[0].is_wall());
+        assert!(!input.zones[1].is_wall());
+        assert!(input.zones[2].is_wall());
     }
 
     #[test]
-    fn zone_type_is_valid_field() {
-        // zone_type 现在是 Zone 结构体的必填字段，正常反序列化。
+    fn zone_wall_without_alt_range() {
+        // 无 alt 区间的 zone → is_wall()（全高度禁入），正常反序列化。
         let s = r#"{
             "aircraft":[
                 {"id":"a1",
                  "start":{"lon":115.0,"lat":39.0,"alt_m":0},
                  "target":{"lon":117.0,"lat":40.0,"alt_m":0}}
             ],
-            "zones":[{"id":"nf1","zone_type":"no_fly",
+            "zones":[{"id":"nf1",
                 "shape":"circle","geometry":{"center":[116.5,39.9],"radius_km":10}}]
         }"#;
         let input = Input::from_json_str(s).unwrap();
-        assert_eq!(input.zones[0].zone_type, ZoneType::NoFly);
+        assert!(input.zones[0].is_wall());
     }
 
     #[test]
@@ -1363,7 +1357,6 @@ mod tests {
     fn zone_contains_at_msl_band() {
         let z = Zone {
             id: "z1".into(),
-            zone_type: ZoneType::Restricted,
             shape: ZoneShape::Circle {
                 center: [115.0, 39.0],
                 radius_km: 10.0,

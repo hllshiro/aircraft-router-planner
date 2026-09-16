@@ -116,7 +116,6 @@ fn build_request_body(index: Option<&crate::config::TerrainIndex>) -> String {
             description: "区域数组".into(),
             children: vec![
                 ParamNode { name: "id", type_label: "string", required: true, description: "区域 ID".into(), children: vec![] },
-                ParamNode { name: "zone_type", type_label: "string", required: true, description: "no_fly / restricted / obstacle".into(), children: vec![] },
                 ParamNode { name: "shape", type_label: "tagged-union", required: true, description: "circle / polygon".into(), children: vec![
                     ParamNode { name: "circle", type_label: "object", required: false, description: "".into(), children: vec![
                         ParamNode { name: "center", type_label: "array<f64,2>", required: true, description: "圆心 [lon, lat]".into(), children: vec![] },
