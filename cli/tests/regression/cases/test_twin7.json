@@ -1,63 +1,63 @@
 {
-  "aircraft": [
-    {
-      "id": "a1",
-      "start": {
-        "lon": 115.0,
-        "lat": 39.0,
-        "alt_m": 3000
-      },
-      "target": {
-        "lon": 116.5,
-        "lat": 39.9,
-        "alt_m": 3000
-      }
-    }
-  ],
-  "terrain": {
-    "source": "none"
-  },
-  "zones": [
-    {
-      "id": "circ20",
-      "shape": "circle",
-      "geometry": {
-        "center": [
-          115.6,
-          39.45
-        ],
-        "radius_km": 20
-      },
-      "alt_min_m": 0,
-      "alt_max_m": 12000,
-      "zone_type": "no_fly"
+    "aircraft": [
+        {
+            "id": "a1",
+            "start": {
+                "lon": 115.0,
+                "lat": 39.0,
+                "alt_m": 3000
+            },
+            "target": {
+                "lon": 116.5,
+                "lat": 39.9,
+                "alt_m": 3000
+            }
+        }
+    ],
+    "terrain": {
+        "source": "none"
     },
-    {
-      "id": "para",
-      "shape": "polygon",
-      "geometry": {
-        "vertices": [
-          [
-            115.85000000000001,
-            39.28
-          ],
-          [
-            116.15,
-            39.28
-          ],
-          [
-            116.32000000000001,
-            39.62
-          ],
-          [
-            116.02000000000001,
-            39.62
-          ]
-        ]
-      },
-      "alt_min_m": 0,
-      "alt_max_m": 12000,
-      "zone_type": "no_fly"
-    }
-  ]
+    "zones": [
+        {
+            "id": "circ20",
+            "shape": "circle",
+            "geometry": {
+                "center": [
+                    115.6,
+                    39.45
+                ],
+                "radius_km": 20
+            },
+            "alt_min_m": 0,
+            "alt_max_m": 12000,
+            "zone_type": "no_fly"
+        },
+        {
+            "id": "para",
+            "shape": "polygon",
+            "geometry": {
+                "vertices": [
+                    [
+                        115.85000000000001,
+                        39.28
+                    ],
+                    [
+                        116.15,
+                        39.28
+                    ],
+                    [
+                        116.32000000000001,
+                        39.62
+                    ],
+                    [
+                        116.02000000000001,
+                        39.62
+                    ]
+                ]
+            },
+            "alt_min_m": 0,
+            "alt_max_m": 12000,
+            "zone_type": "no_fly"
+        }
+    ]
 }

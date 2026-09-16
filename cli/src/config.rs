@@ -73,24 +73,18 @@ impl Waypoint {
 #[serde(deny_unknown_fields)]
 pub struct AircraftProfile {
     pub aircraft_type: AircraftType,
-    /// 巡航速度 m/s（或 speed_range 二选一）
+    /// 最大速度 m/s
     #[serde(default)]
-    pub cruise_speed_mps: Option<f64>,
-    /// 速度范围 [v_min, v_max] m/s（十轮主管裁决：速度为核心输入）
+    pub maximum_speed_mps: Option<f64>,
+    /// 最大转弯角速率 °/s
     #[serde(default)]
-    pub speed_range_mps: Option<[f64; 2]>,
-    /// 最小转弯半径 m（缺省默认参数表；A6 自洽：r_min ≥ v²/(g·tan φ_max)，
-    /// 2026-08-07 主管放宽：显式半径信任，转弯段降速实现，不再按巡航物理下限拒）
+    pub maximum_turn_rate_dps: Option<f64>,
+    /// 最大爬升率 m/s
     #[serde(default)]
-    pub min_turn_radius_m: Option<f64>,
-    /// 最大爬升角 °
+    pub maximum_climb_rate_mps: Option<f64>,
+    /// 最大飞行高度 m
     #[serde(default)]
-    pub max_climb_angle_deg: Option<f64>,
-    /// 最大坡度 φ_max °（ρ = v²/(g·tan φ_max) 物理耦合）
-    #[serde(default)]
-    pub max_bank_deg: Option<f64>,
-    #[serde(default)]
-    pub ceiling_m: Option<f64>,
+    pub maximum_altitude_m: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
@@ -105,12 +99,10 @@ impl Default for AircraftProfile {
     fn default() -> Self {
         Self {
             aircraft_type: AircraftType::FixedWing,
-            cruise_speed_mps: None,
-            speed_range_mps: None,
-            min_turn_radius_m: None,
-            max_climb_angle_deg: None,
-            max_bank_deg: None,
-            ceiling_m: None,
+            maximum_speed_mps: None,
+            maximum_turn_rate_dps: None,
+            maximum_climb_rate_mps: None,
+            maximum_altitude_m: None,
         }
     }
 }
@@ -339,18 +331,32 @@ pub struct DefaultParams {
     pub los_mask_coef: f64,
     /// 通用武器默认射程 [Rmin, Rmax] km（未输入时）
     pub default_weapon_range_km: [f64; 2],
-    /// 最大爬升角占位（°）
-    pub default_max_climb_angle_deg: f64,
     /// 最大坡度占位（°）
     pub default_max_bank_deg: f64,
-    /// 最小转弯半径占位（m，固定翼）
+    /// 最小转弯半径占位（m，固定翼——兜底用，可由 maximum_turn_rate_dps 派生）
     pub default_fixed_wing_turn_radius_m: f64,
     /// 最小转弯半径占位（m，旋翼机——悬停/原地转向 r→0 显式建模，九轮共识）
     pub default_rotorcraft_turn_radius_m: f64,
-    /// 巡航速度占位（m/s，固定翼）
-    pub default_fixed_wing_speed_mps: f64,
-    /// 巡航速度占位（m/s，旋翼机）
-    pub default_rotorcraft_speed_mps: f64,
+    /// 最大速度占位（m/s，固定翼）
+    pub default_fixed_wing_maximum_speed_mps: f64,
+    /// 最大速度占位（m/s，旋翼机）
+    pub default_rotorcraft_maximum_speed_mps: f64,
+    /// 最大转弯角速率占位（°/s，固定翼）
+    pub default_fixed_wing_maximum_turn_rate_dps: f64,
+    /// 最大转弯角速率占位（°/s，旋翼机）
+    pub default_rotorcraft_maximum_turn_rate_dps: f64,
+    /// 最大爬升率占位（m/s，固定翼）
+    pub default_fixed_wing_maximum_climb_rate_mps: f64,
+    /// 最大爬升率占位（m/s，旋翼机）
+    pub default_rotorcraft_maximum_climb_rate_mps: f64,
+    /// 最大飞行高度占位（m，固定翼）
+    pub default_fixed_wing_maximum_altitude_m: f64,
+    /// 最大飞行高度占位（m，旋翼机）
+    pub default_rotorcraft_maximum_altitude_m: f64,
+    /// 巡航速度占位（m/s，固定翼——内部派生用）
+    pub default_fixed_wing_cruise_speed_mps: f64,
+    /// 巡航速度占位（m/s，旋翼机——内部派生用）
+    pub default_rotorcraft_cruise_speed_mps: f64,
     /// 粗网格分辨率（默认 256）
     pub default_grid_resolution: usize,
 }
@@ -366,12 +372,19 @@ impl Default for DefaultParams {
             radar_cost_coef: 200.0,
             los_mask_coef: 0.08,
             default_weapon_range_km: [5.0, 40.0],
-            default_max_climb_angle_deg: 15.0,
             default_max_bank_deg: 30.0,
             default_fixed_wing_turn_radius_m: 5_000.0,
             default_rotorcraft_turn_radius_m: 0.0,
-            default_fixed_wing_speed_mps: 250.0,
-            default_rotorcraft_speed_mps: 100.0,
+            default_fixed_wing_maximum_speed_mps: 600.0,
+            default_rotorcraft_maximum_speed_mps: 80.0,
+            default_fixed_wing_maximum_turn_rate_dps: 20.0,
+            default_rotorcraft_maximum_turn_rate_dps: 60.0,
+            default_fixed_wing_maximum_climb_rate_mps: 250.0,
+            default_rotorcraft_maximum_climb_rate_mps: 12.0,
+            default_fixed_wing_maximum_altitude_m: 15_000.0,
+            default_rotorcraft_maximum_altitude_m: 6_000.0,
+            default_fixed_wing_cruise_speed_mps: 200.0,
+            default_rotorcraft_cruise_speed_mps: 60.0,
             default_grid_resolution: 256,
         }
     }
@@ -598,35 +611,31 @@ fn validate_zone(z: &Zone) -> Result<(), AppError> {
 
 fn validate_aircraft(a: &AircraftInput) -> Result<(), AppError> {
     let p = &a.profile;
-    let speed = p
-        .cruise_speed_mps
-        .or_else(|| p.speed_range_mps.map(|r| r[0]));
-    if let Some(s) = speed {
-        if !(1.0..=1_000.0).contains(&s) {
+    // 最大速度校验
+    if let Some(s) = p.maximum_speed_mps {
+        if !(1.0..=2000.0).contains(&s) {
             return Err(AppError::InputInvalid(InputInvalidReason::OutOfBounds));
         }
     }
-    if let Some([vmin, vmax]) = p.speed_range_mps {
-        if vmin <= 0.0 || vmax < vmin {
-            return Err(AppError::InputInvalid(
-                InputInvalidReason::VehicleParamsInconsistent,
-            ));
+    // 最大转弯角速率校验
+    if let Some(r) = p.maximum_turn_rate_dps {
+        if !(0.1..=360.0).contains(&r) {
+            return Err(AppError::InputInvalid(InputInvalidReason::OutOfBounds));
         }
     }
-    // A6 物理自洽（十二轮共识，2026-08-07 主管放宽）：r_min ≥ v²/(g·tan φ_max)。
-    // 速度非锁定——极端条件下转弯段可降速（v_turn = sqrt(r·g·tanφ)）实现小半径，
-    // 显式 min_turn_radius_m 不再按巡航速度物理下限拒绝（solver 信任输入并输出降速
-    // 提示；smooth_options_for 的 A6 有效下限 = min(phys, turn_radius) 恒满足）。
-    // 仅保留正数防线：固定翼 r < 1m 无物理意义（旋翼机 r→0 合法，悬停原地转向）。
-    if let (Some(_v), Some(_bank), Some(r)) = (speed, p.max_bank_deg, p.min_turn_radius_m) {
-        if p.aircraft_type == AircraftType::FixedWing && r < 1.0 {
-            return Err(AppError::InputInvalid(
-                InputInvalidReason::VehicleParamsInconsistent,
-            ));
+    // 最大爬升率校验
+    if let Some(c) = p.maximum_climb_rate_mps {
+        if !(0.1..=500.0).contains(&c) {
+            return Err(AppError::InputInvalid(InputInvalidReason::OutOfBounds));
         }
     }
-    // 武器射程（2026-08-12 主管定案：类型 + 射程；W2-P3 逐机化——校验移至本函数）：
-    // 显式 range_km 提供时校验有限且 lo < hi（倒置/非有限 → out_of_bounds）。
+    // 最大高度校验
+    if let Some(a) = p.maximum_altitude_m {
+        if !(100.0..=30000.0).contains(&a) {
+            return Err(AppError::InputInvalid(InputInvalidReason::OutOfBounds));
+        }
+    }
+    // 武器射程（保留）
     if let Some(w) = &a.weapon {
         if let Some([lo, hi]) = w.range_km {
             if !(lo.is_finite() && hi.is_finite() && lo < hi) {
@@ -1172,7 +1181,7 @@ mod tests {
         // 无 profile → AircraftProfile::default()（缺省固定翼占位）。
         let input = Input::from_json_str(MIN_JSON).unwrap();
         assert_eq!(input.aircraft[0].profile.aircraft_type, AircraftType::FixedWing);
-        assert!(input.aircraft[0].profile.cruise_speed_mps.is_none());
+        assert!(input.aircraft[0].profile.maximum_speed_mps.is_none());
         assert!(input.aircraft[0].mid_waypoints.is_empty());
         assert!(input.aircraft[0].weapon.is_none());
     }
@@ -1259,12 +1268,11 @@ mod tests {
         let s = r#"{
             "aircraft":[
                 {"id":"a1",
-                 "profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":250,
-                            "min_turn_radius_m":12000,"max_bank_deg":30},
+                 "profile":{"aircraft_type":"FIXED_WING"},
                  "start":{"lon":116.30,"lat":39.90,"alt_m":500},
                  "target":{"lon":117.10,"lat":40.20,"alt_m":1000}},
                 {"id":"a2",
-                 "profile":{"aircraft_type":"ROTORCRAFT","cruise_speed_mps":100},
+                 "profile":{"aircraft_type":"ROTORCRAFT"},
                  "start":{"lon":116.40,"lat":39.80,"alt_m":300},
                  "target":{"lon":117.10,"lat":40.20,"alt_m":1000}}
             ]
@@ -1295,45 +1303,27 @@ mod tests {
 
     #[test]
     fn a6_physical_self_consistency_relaxed() {
-        // 2026-08-07 主管放宽：250 m/s @ 30° bank → r_min ≈ 11045m；
-        // 显式 5000m < r_min 不再拒绝（转弯段降速实现，solver 输出降速提示）。
-        let r_min = DefaultParams::physical_turn_radius_m(250.0, 30.0);
-        assert!((r_min - 11_045.0).abs() < 10.0, "r_min={r_min}");
+        // 2026-08-07 主管放宽：新参数结构不再做 A6 校验。
         let s = r#"{
             "aircraft":[
-                {"id":"a1","profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":250,
-                            "max_bank_deg":30,"min_turn_radius_m":5000},
+                {"id":"a1","profile":{"aircraft_type":"FIXED_WING"},
                  "start":{"lon":116.3,"lat":39.9,"alt_m":500},
                  "target":{"lon":117.1,"lat":40.2,"alt_m":1000}}
             ]
         }"#;
         let input = Input::from_json_str(s).unwrap();
-        validate(&input).expect("A6 放宽：显式半径信任，不再拒绝");
+        validate(&input).expect("新参数结构无 A6 校验");
 
-        // 正数防线仍生效：固定翼 r=0（<1m）拒绝；旋翼机 r→0 合法（悬停原地转向）
-        let bad = r#"{
-            "aircraft":[
-                {"id":"a1","profile":{"aircraft_type":"FIXED_WING","cruise_speed_mps":250,
-                            "max_bank_deg":30,"min_turn_radius_m":0},
-                 "start":{"lon":116.3,"lat":39.9,"alt_m":500},
-                 "target":{"lon":117.1,"lat":40.2,"alt_m":1000}}
-            ]
-        }"#;
-        let bad_input = Input::from_json_str(bad).unwrap();
-        match validate(&bad_input) {
-            Err(AppError::InputInvalid(InputInvalidReason::VehicleParamsInconsistent)) => {}
-            other => panic!("expected reject for fixed-wing r<=0, got {other:?}"),
-        }
+        // 旋翼机 r→0 合法（悬停原地转向）
         let ok_rotor = r#"{
             "aircraft":[
-                {"id":"a1","profile":{"aircraft_type":"ROTORCRAFT","cruise_speed_mps":60,
-                            "max_bank_deg":30,"min_turn_radius_m":0},
+                {"id":"a1","profile":{"aircraft_type":"ROTORCRAFT"},
                  "start":{"lon":116.3,"lat":39.9,"alt_m":500},
                  "target":{"lon":117.1,"lat":40.2,"alt_m":1000}}
             ]
         }"#;
         let rotor_input = Input::from_json_str(ok_rotor).unwrap();
-        validate(&rotor_input).expect("旋翼机 r=0 合法（悬停原地转向）");
+        validate(&rotor_input).expect("旋翼机合法");
     }
 
     #[test]

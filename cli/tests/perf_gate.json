@@ -1,87 +1,84 @@
 {
-  "aircraft": [
-    {
-      "id": "v1",
-      "profile": {
-        "aircraft_type": "FIXED_WING",
-        "cruise_speed_mps": 250,
-        "min_turn_radius_m": 442,
-        "max_climb_angle_deg": 15
-      },
-      "mid_waypoints": [
+    "aircraft": [
         {
-          "lon": 115.93932201216278,
-          "lat": 40.56902260128307,
-          "alt_m": 3000
-        },
-        {
-          "lon": 116.82303404686334,
-          "lat": 40.985128256527574,
-          "alt_m": 3000
-        },
-        {
-          "lon": 114.94291773878015,
-          "lat": 40.539877981262535,
-          "alt_m": 3000
+            "id": "v1",
+            "profile": {
+                "aircraft_type": "FIXED_WING"
+            },
+            "mid_waypoints": [
+                {
+                    "lon": 115.93932201216278,
+                    "lat": 40.56902260128307,
+                    "alt_m": 3000
+                },
+                {
+                    "lon": 116.82303404686334,
+                    "lat": 40.985128256527574,
+                    "alt_m": 3000
+                },
+                {
+                    "lon": 114.94291773878015,
+                    "lat": 40.539877981262535,
+                    "alt_m": 3000
+                }
+            ],
+            "start": {
+                "lon": 117.54254529853182,
+                "lat": 38.97385884059154,
+                "alt_m": 3000
+            },
+            "target": {
+                "lon": 114.26335909078654,
+                "lat": 41.99101176729852,
+                "alt_m": 3000.0
+            }
         }
-      ],
-      "start": {
-        "lon": 117.54254529853182,
-        "lat": 38.97385884059154,
-        "alt_m": 3000
-      },
-      "target": {
-        "lon": 114.26335909078654,
-        "lat": 41.99101176729852,
-        "alt_m": 3000.0
-      }
-    }
-  ],
-  "red_forces": {
-    "radars": []
-  },
-  "terrain": {
-    "source": "path",
-    "path": "data/east_asia_7p5as.arpack"
-  },
-  "parameters": {},
-  "zones": [
-    {
-      "id": "zone_1786505241682",
-      "shape": "circle",
-      "geometry": {
-        "center": [
-          116.54581607527983,
-          39.90085583451849
-        ],
-        "radius_km": 50
-      },
-      "alt_min_m": 0,
-      "alt_max_m": 12000,
-      "zone_type": "no_fly"
+    ],
+    "red_forces": {
+        "radars": []
     },
-    {
-      "id": "zone_1786505250521",
-      "shape": "polygon",
-      "geometry": {
-        "vertices": [
-          [
-            116.39286211305897,
-            41.66902053189818
-          ],
-          [
-            114.2862594097929,
-            40.62668441327545
-          ],
-          [
-            115.65231170996907,
-            40.87145931626445
-          ]
-        ]
-      },
-      "alt_min_m": 0,
-      "alt_max_m": 12000,
-      "zone_type": "no_fly"
-    }
-  ]
+    "terrain": {
+        "source": "path",
+        "path": "data/east_asia_7p5as.arpack"
+    },
+    "parameters": {},
+    "zones": [
+        {
+            "id": "zone_1786505241682",
+            "shape": "circle",
+            "geometry": {
+                "center": [
+                    116.54581607527983,
+                    39.90085583451849
+                ],
+                "radius_km": 50
+            },
+            "alt_min_m": 0,
+            "alt_max_m": 12000,
+            "zone_type": "no_fly"
+        },
+        {
+            "id": "zone_1786505250521",
+            "shape": "polygon",
+            "geometry": {
+                "vertices": [
+                    [
+                        116.39286211305897,
+                        41.66902053189818
+                    ],
+                    [
+                        114.2862594097929,
+                        40.62668441327545
+                    ],
+                    [
+                        115.65231170996907,
+                        40.87145931626445
+                    ]
+                ]
+            },
+            "alt_min_m": 0,
+            "alt_max_m": 12000,
+            "zone_type": "no_fly"
+        }
+    ]
 }

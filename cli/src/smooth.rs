@@ -63,50 +63,72 @@ impl Default for SmoothOptions {
 /// Phase 4 M4：机型分流参数派生（AircraftProfile → SmoothOptions + A6 物理下限）。
 ///
 /// 派生规则（技术方案 A6 自洽 + 八轮共识缺省落默认参数表）：
-/// - 速度 v：`cruise_speed_mps` → `speed_range_mps` 中值 → 机型默认
-///   （固定翼 250 m/s / 旋翼机 100 m/s）；
-/// - A6 物理下限 r_phys = v²/(g·tan φ_max)，φ_max = `max_bank_deg` → 默认 30°
-///   （与 Phase 0 标定表一致：442m@50m/s、11039m@250m/s 即此式）；
-/// - 固定翼 turn_radius 信任输入 `min_turn_radius_m` / 默认表 5000m，不再钳到巡航
-///   物理下限（2026-08-07 主管：速度非锁定，转弯段可降速实现小半径；v_turn 由
-///   turn_radius 反算，A6 恒满足）；返回值的第二个分量是 **A6 有效下限** =
-///   min(巡航物理下限, turn_radius)，solver 的 verify A6 检查与预取 slack 用它；
-/// - 旋翼机 r→0 合法（可悬停原地转向，九轮共识），turn_radius 不钳；
-/// - max_climb = `max_climb_angle_deg` → 默认表 15°（固定翼运动学复验用）。
+/// - 最大速度 v：`maximum_speed_mps` → 机型默认
+///   （固定翼 600 m/s / 旋翼机 80 m/s）；
+/// - 巡航速度 v_cruise = min(默认巡航, 最大速度)；
+/// - 最大转弯角速率 ω：`maximum_turn_rate_dps` → 机型默认；
+/// - 转弯半径 r = v_cruise / tan(ω)；
+/// - A6 物理下限 r_phys = v_cruise²/(g·tan φ_max)，φ_max = `max_bank_deg` → 默认 30°；
+/// - 最大爬升率：`maximum_climb_rate_mps` → 机型默认；
+/// - 爬升角 = asin(climb_rate / v_cruise)；
+/// - 旋翼机 r→0 合法（可悬停原地转向，九轮共识），turn_radius 不钳。
 pub fn smooth_options_for(
     profile: &AircraftProfile,
     params: &DefaultParams,
 ) -> (SmoothOptions, f64) {
-    let v = profile
-        .cruise_speed_mps
-        .or_else(|| profile.speed_range_mps.map(|[a, b]| (a + b) / 2.0))
-        .unwrap_or(match profile.aircraft_type {
-            AircraftType::FixedWing => params.default_fixed_wing_speed_mps,
-            AircraftType::Rotorcraft => params.default_rotorcraft_speed_mps,
-        });
-    let bank_deg = profile.max_bank_deg.unwrap_or(params.default_max_bank_deg);
-    let phys_min_radius_m = v * v / (9.81 * bank_deg.to_radians().tan());
-    let base_r = profile
-        .min_turn_radius_m
-        .unwrap_or(match profile.aircraft_type {
+    // 1. 最大速度（用户输入或默认）
+    let max_speed = profile.maximum_speed_mps.unwrap_or(match profile.aircraft_type {
+        AircraftType::FixedWing => params.default_fixed_wing_maximum_speed_mps,
+        AircraftType::Rotorcraft => params.default_rotorcraft_maximum_speed_mps,
+    });
+
+    // 2. 巡航速度 = min(默认巡航, 最大速度)
+    let cruise_default = match profile.aircraft_type {
+        AircraftType::FixedWing => params.default_fixed_wing_cruise_speed_mps,
+        AircraftType::Rotorcraft => params.default_rotorcraft_cruise_speed_mps,
+    };
+    let v = cruise_default.min(max_speed);
+
+    // 3. 最大转弯角速率
+    let turn_rate_dps = profile.maximum_turn_rate_dps.unwrap_or(match profile.aircraft_type {
+        AircraftType::FixedWing => params.default_fixed_wing_maximum_turn_rate_dps,
+        AircraftType::Rotorcraft => params.default_rotorcraft_maximum_turn_rate_dps,
+    });
+
+    // 4. 转弯半径 = v / tan(ω)
+    let turn_radius_m = if turn_rate_dps > 0.1 {
+        v / turn_rate_dps.to_radians().tan()
+    } else {
+        match profile.aircraft_type {
             AircraftType::FixedWing => params.default_fixed_wing_turn_radius_m,
             AircraftType::Rotorcraft => params.default_rotorcraft_turn_radius_m,
-        });
-    let turn_radius_m = match profile.aircraft_type {
-        AircraftType::Rotorcraft => base_r, // r→0 合法，不钳
-        AircraftType::FixedWing => base_r,  // 信任输入/默认表；转弯段降速实现（主管 2026-08-07）
+        }
     };
+
+    // 5. 最大爬升率
+    let climb_rate = profile.maximum_climb_rate_mps.unwrap_or(match profile.aircraft_type {
+        AircraftType::FixedWing => params.default_fixed_wing_maximum_climb_rate_mps,
+        AircraftType::Rotorcraft => params.default_rotorcraft_maximum_climb_rate_mps,
+    });
+
+    // 6. 爬升角 = asin(climb_rate / v)，ratio 钳到 [-1,1] 防 NaN
+    let max_climb_deg = if v > 0.1 {
+        let ratio = (climb_rate / v).clamp(-1.0, 1.0);
+        ratio.asin().to_degrees().clamp(1.0, 60.0)
+    } else {
+        15.0 // fallback
+    };
+
+    // 7. 坡度（不可派生，使用默认）
+    let bank_deg = params.default_max_bank_deg;
+    let phys_min_radius_m = v * v / (9.81 * bank_deg.to_radians().tan());
+
     let opts = SmoothOptions {
         aircraft_type: profile.aircraft_type,
         turn_radius_m,
-        max_climb_deg: profile
-            .max_climb_angle_deg
-            .unwrap_or(params.default_max_climb_angle_deg),
+        max_climb_deg,
         ..Default::default()
     };
-    // A6 有效下限：降速语义下 = min(巡航物理下限, 规划半径)。v_turn 由 turn_radius
-    // 反算（sqrt(r·g·tanφ)），其物理下限恰为 turn_radius——verify 的 A6 检查
-    // `turn_radius < phys` 恒不触发；大半径输入时仍按巡航物理下限兜底。
     (opts, phys_min_radius_m.min(turn_radius_m))
 }
 
@@ -2222,66 +2244,67 @@ mod chain_tests {
         use crate::config::AircraftProfile;
         let p = crate::config::DefaultParams::default();
 
-        // 默认固定翼：v=250 → phys@cruise ≈ 11035；turn_radius = 默认表 5000（信任，
-        // 2026-08-07 起不再钳到 phys）；返回的 A6 有效下限 = min(phys, turn_radius)
+        // 默认固定翼：v=200(巡航)，ω=20°/s → r=200/tan(20°π/180)≈549m；
+        // A6 物理下限 = 200²/(9.81·tan30°)≈7068；返回 min(7068,549)=549
         let prof = AircraftProfile::default();
         let (o, a6) = smooth_options_for(&prof, &p);
-        assert!((a6 - 5000.0).abs() < 1e-9, "a6 = {a6}");
         assert_eq!(o.aircraft_type, AircraftType::FixedWing);
+        // turn_radius = v/tan(ω) = 200/tan(20°)≈549.5
+        let expected_r = 200.0 / 20.0_f64.to_radians().tan();
         assert!(
-            (o.turn_radius_m - 5000.0).abs() < 1e-9,
-            "turn {}",
+            (o.turn_radius_m - expected_r).abs() < 1.0,
+            "turn {} expected {expected_r}",
             o.turn_radius_m
         );
-        // 默认 max_climb = 默认表 15°
-        assert!((o.max_climb_deg - 15.0).abs() < 1e-9);
+        // A6 = min(phys, turn_radius) = min(7068, 549.5) = 549.5
+        let phys = 200.0 * 200.0 / (9.81 * 30.0_f64.to_radians().tan());
+        let expected_a6 = phys.min(expected_r);
+        assert!((a6 - expected_a6).abs() < 1.0, "a6 = {a6} expected {expected_a6}");
+        // max_climb_deg = asin(250/200) = 90° clamp to 60° (250 > 200 → clamp)
+        assert!((o.max_climb_deg - 60.0).abs() < 1e-9);
 
-        // 显式慢速固定翼：v=50 → phys ≈ 442；默认表 5000 更大 → turn_radius = 5000
+        // 显式慢速固定翼：maximum_speed_mps=50 → v=50, ω=20°/s → r=50/tan(20°)≈137.4
         let prof = AircraftProfile {
-            cruise_speed_mps: Some(50.0),
+            maximum_speed_mps: Some(50.0),
             ..Default::default()
         };
         let (o, a6) = smooth_options_for(&prof, &p);
-        assert!((a6 - 441.6).abs() < 1.0, "a6 = {a6}");
-        assert!((o.turn_radius_m - 5000.0).abs() < 1e-9);
+        let expected_r = 50.0 / 20.0_f64.to_radians().tan();
+        assert!((o.turn_radius_m - expected_r).abs() < 1.0, "turn {}", o.turn_radius_m);
+        // A6 = min(phys@50, turn_radius) = min(50²/(9.81·tan30°)≈144, 137) = 137
+        let phys = 50.0 * 50.0 / (9.81 * 30.0_f64.to_radians().tan());
+        let expected_a6 = phys.min(expected_r);
+        assert!((a6 - expected_a6).abs() < 1.0, "a6 = {a6}");
 
-        // 显式 min_turn_radius 大于 phys → 用输入值；A6 有效下限 = 巡航 phys
+        // 显式最大转弯角速率：ω=10°/s → r=200/tan(10°)≈1134
         let prof = AircraftProfile {
-            cruise_speed_mps: Some(250.0),
-            min_turn_radius_m: Some(20_000.0),
+            maximum_turn_rate_dps: Some(10.0),
             ..Default::default()
         };
-        let (o, a6) = smooth_options_for(&prof, &p);
-        assert!((o.turn_radius_m - 20_000.0).abs() < 1e-9);
-        assert!((a6 - 11_035.0).abs() < 2.0, "a6 = {a6}");
-
-        // 显式 min_turn_radius 小于 phys（主管场景 v=250 + r=442）→ 信任输入不再钳制；
-        // 转弯段降速到 v_turn = sqrt(442·g·tan30°) ≈ 50 m/s 实现；A6 有效下限 =
-        // turn_radius → verify 的 A6 检查恒过
-        let prof = AircraftProfile {
-            cruise_speed_mps: Some(250.0),
-            min_turn_radius_m: Some(442.0),
-            ..Default::default()
-        };
-        let (o, a6) = smooth_options_for(&prof, &p);
+        let (o, _a6) = smooth_options_for(&prof, &p);
+        let expected_r = 200.0 / 10.0_f64.to_radians().tan();
         assert!(
-            (o.turn_radius_m - 442.0).abs() < 1e-9,
-            "turn {}",
+            (o.turn_radius_m - expected_r).abs() < 1.0,
+            "turn {} expected {expected_r}",
             o.turn_radius_m
         );
-        assert!((a6 - 442.0).abs() < 1e-9, "a6 = {a6}");
-        let v_turn = (442.0 * 9.81 * 30f64.to_radians().tan()).sqrt();
-        assert!((v_turn - 50.0).abs() < 1.0, "v_turn = {v_turn}");
 
-        // 旋翼机：r→0 合法不钳；speed_range 中值取速；A6 有效下限 = min(phys, 0) = 0
+        // 旋翼机：v=60, ω=60°/s → r=60/tan(60°)≈34.6
         let prof = AircraftProfile {
             aircraft_type: AircraftType::Rotorcraft,
-            speed_range_mps: Some([40.0, 80.0]),
             ..Default::default()
         };
         let (o, a6) = smooth_options_for(&prof, &p);
         assert_eq!(o.aircraft_type, AircraftType::Rotorcraft);
-        assert_eq!(o.turn_radius_m, 0.0);
-        assert_eq!(a6, 0.0);
+        let expected_r = 60.0 / 60.0_f64.to_radians().tan();
+        assert!(
+            (o.turn_radius_m - expected_r).abs() < 1.0,
+            "turn {} expected {expected_r}",
+            o.turn_radius_m
+        );
+        // A6 = min(phys@60, 34.6) = 34.6
+        let phys = 60.0 * 60.0 / (9.81 * 30.0_f64.to_radians().tan());
+        let expected_a6 = phys.min(expected_r);
+        assert!((a6 - expected_a6).abs() < 1.0, "a6 = {a6} expected {expected_a6}");
     }
 }

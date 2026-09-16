@@ -70,12 +70,10 @@ fn build_request_body() -> String {
                 ]},
                 ParamNode { name: "profile", type_label: "object", required: false, description: "机型性能参数", children: &[
                     ParamNode { name: "aircraft_type", type_label: "string", required: true, description: "FIXED_WING / ROTORCRAFT", children: &[] },
-                    ParamNode { name: "cruise_speed_mps", type_label: "f64", required: false, description: "巡航速度 m/s", children: &[] },
-                    ParamNode { name: "speed_range_mps", type_label: "array<f64>", required: false, description: "[v_min, v_max] m/s", children: &[] },
-                    ParamNode { name: "min_turn_radius_m", type_label: "f64", required: false, description: "最小转弯半径 m", children: &[] },
-                    ParamNode { name: "max_climb_angle_deg", type_label: "f64", required: false, description: "最大爬升角 °", children: &[] },
-                    ParamNode { name: "max_bank_deg", type_label: "f64", required: false, description: "最大坡度 °", children: &[] },
-                    ParamNode { name: "ceiling_m", type_label: "f64", required: false, description: "升限 m", children: &[] },
+                    ParamNode { name: "maximum_speed_mps", type_label: "f64", required: false, description: "最大速度 m/s", children: &[] },
+                    ParamNode { name: "maximum_turn_rate_dps", type_label: "f64", required: false, description: "最大转弯角速率 °/s", children: &[] },
+                    ParamNode { name: "maximum_climb_rate_mps", type_label: "f64", required: false, description: "最大爬升率 m/s", children: &[] },
+                    ParamNode { name: "maximum_altitude_m", type_label: "f64", required: false, description: "最大飞行高度 m", children: &[] },
                 ]},
                 ParamNode { name: "mid_waypoints", type_label: "array<object>", required: false, description: "中途必经点", children: &[
                     ParamNode { name: "lon", type_label: "f64", required: true, description: "经度", children: &[] },
