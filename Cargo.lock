@@ -130,6 +130,7 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
+ "serde_yaml_neo",
  "sha2",
  "thiserror 2.0.19",
  "tiff 0.9.1",
@@ -483,6 +484,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "serde_yaml_neo",
  "tiff 0.10.3",
  "tokio",
  "tower-http 0.5.2",
@@ -1907,6 +1909,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_yaml_neo"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "34b209c2fb1a006ef53382f97f8ee5d43b156f61c0db1328638fdfa749af865f"
+dependencies = [
+ "indexmap",
+ "itoa",
+ "ryu",
+ "serde",
+ "unsafe-libyaml",
+]
+
+[[package]]
 name = "sha2"
 version = "0.10.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2375,6 +2390,12 @@ name = "unicode-ident"
 version = "1.0.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
+
+[[package]]
+name = "unsafe-libyaml"
+version = "0.2.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "673aac59facbab8a9007c7f6108d11f63b603f7cabff99fabf650fea5c32b861"
 
 [[package]]
 name = "untrusted"

@@ -21,9 +21,7 @@
     "red_forces": {
         "radars": []
     },
-    "terrain": {
-        "source": "none"
-    },
+    "terrain": {},
     "parameters": {},
     "zones": [
         {

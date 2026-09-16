@@ -17,3 +17,5 @@ tiff = { version = "0.10", features = ["jpeg"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 # 瓦片合并端点 rgba 传输编码（2026-08-13：JSON 数组 → base64，减体积）
 base64 = "0.22"
+# 地形索引（data/index.yaml 解析，纯 Rust 零 C 依赖）
+serde_yaml_neo = "0.11"

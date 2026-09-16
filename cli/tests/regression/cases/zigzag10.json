@@ -37,8 +37,7 @@
         ]
     },
     "terrain": {
-        "source": "path",
-        "path": "data/east_asia_7p5as.arpack"
+        "arpack": "east_asia"
     },
     "parameters": {
         "p_cross": 0.9

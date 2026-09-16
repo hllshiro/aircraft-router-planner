@@ -31,20 +31,9 @@ use arpcli::terrain::{open_source, TerrainSource};
 mod basemap;
 
 /// POST /api/plan — accepts full Input JSON, runs CLI binary, returns result
-async fn plan_route(Json(mut payload): Json<Value>) -> Json<Value> {
-    // 可移植地形路径（2026-08-10）：前端默认 terrain.path 为相对路径
-    // `data/east_asia_7p5as.arpack`（开发模式），独立包地形在 install/ 根——转发 CLI
-    // 前把相对路径解析为绝对路径（resolve_terrain_path 多候选），CLI 一定可打开。
-    // 解析失败（用户显式填了不存在的路径）则保留原样，由 CLI 报错。
-    if let Some(mission) = payload.get_mut("mission") {
-        if let Some(terrain) = mission.get_mut("terrain") {
-            if let Some(Value::String(path)) = terrain.get("path") {
-                if let Ok(abs) = resolve_terrain_path(path) {
-                    terrain["path"] = Value::String(abs.to_string_lossy().into_owned());
-                }
-            }
-        }
-    }
+async fn plan_route(Json(payload): Json<Value>) -> Json<Value> {
+    // terrain 字段现在使用索引 id（arpack/mask），直接透传给 CLI。
+    // CLI 内部通过 data/index.yaml 解析路径，demo-server 不再做路径解析。
     let input_json = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".into());
 
     match run_cli(&input_json) {
@@ -443,9 +432,8 @@ async fn tile_route(Json(payload): Json<TileReq>) -> Json<Value> {
     Json(result)
 }
 
-/// GET /api/data-files — 扫描 data 目录，返回地形/掩膜文件列表。
+/// GET /api/data-files — 读取 data/index.yaml 索引，返回地形/掩膜候选项。
 /// 数据目录：环境变量 DATA_DIR 覆盖，默认 exe 同级 data/。
-/// 文件分类：.arpack/.zstd = terrain，.mask = mask。
 async fn data_files_route() -> Json<Value> {
     let data_dir: PathBuf = std::env::var("DATA_DIR")
         .unwrap_or_else(|_| "data".into())
@@ -456,62 +444,30 @@ async fn data_files_route() -> Json<Value> {
         .map(|d| d.join(&data_dir))
         .unwrap_or(data_dir);
 
-    let mut terrain_files = Vec::new();
-    let mut mask_files = Vec::new();
-
-    if data_dir.is_dir() {
-        if let Ok(entries) = std::fs::read_dir(&data_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if !path.is_file() {
-                    continue;
-                }
-                let ext = path
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .unwrap_or("")
-                    .to_ascii_lowercase();
-                let name = path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("")
-                    .to_string();
-                let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-                let rel_path = format!("data/{}", name);
-
-                match ext.as_str() {
-                    "arpack" | "zstd" => {
-                        terrain_files.push(serde_json::json!({
-                            "name": name,
-                            "path": rel_path,
-                            "size": size,
-                        }));
-                    }
-                    "mask" => {
-                        mask_files.push(serde_json::json!({
-                            "name": name,
-                            "path": rel_path,
-                            "size": size,
-                        }));
-                    }
-                    _ => {}
-                }
-            }
+    let index_path = data_dir.join("index.yaml");
+    if index_path.exists() {
+        match std::fs::read_to_string(&index_path) {
+            Ok(content) => match serde_yaml_neo::from_str::<serde_json::Value>(&content) {
+                Ok(val) => Json(serde_json::json!({
+                    "data_dir": data_dir.to_string_lossy(),
+                    "index": val,
+                })),
+                Err(e) => Json(serde_json::json!({
+                    "data_dir": data_dir.to_string_lossy(),
+                    "error": format!("index.yaml parse error: {e}"),
+                })),
+            },
+            Err(e) => Json(serde_json::json!({
+                "data_dir": data_dir.to_string_lossy(),
+                "error": format!("index.yaml read error: {e}"),
+            })),
         }
+    } else {
+        Json(serde_json::json!({
+            "data_dir": data_dir.to_string_lossy(),
+            "error": "index.yaml not found",
+        }))
     }
-
-    terrain_files.sort_by(|a, b| {
-        a["name"].as_str().unwrap_or("").cmp(b["name"].as_str().unwrap_or(""))
-    });
-    mask_files.sort_by(|a, b| {
-        a["name"].as_str().unwrap_or("").cmp(b["name"].as_str().unwrap_or(""))
-    });
-
-    Json(serde_json::json!({
-        "data_dir": data_dir.to_string_lossy(),
-        "terrain": terrain_files,
-        "mask": mask_files,
-    }))
 }
 
 #[tokio::main]

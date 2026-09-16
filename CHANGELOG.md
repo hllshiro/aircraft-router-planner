@@ -9,6 +9,11 @@
 
 ## [Unreleased]
 
+### Changed
+- **Breaking**: terrain 配置从 `source/path/mask_path`（文件路径）改为 `arpack/mask`（索引 id），对应 `data/index.yaml` 新增索引文件机制。输入 JSON 中 `"terrain": {"source": "path", "path": "data/xxx.arpack"}` 改为 `"terrain": {"arpack": "east_asia"}`。
+- help 输出动态展示可用地形候选项（从 index.yaml 加载）。
+- demo-server `GET /api/data-files` 从扫描文件改为返回 index.yaml 内容。
+
 ## [0.3.0] - 2026-09-15
 
 ### Changed

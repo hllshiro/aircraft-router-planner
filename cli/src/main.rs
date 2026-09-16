@@ -13,7 +13,7 @@
 use std::io::{Read, Write};
 use std::path::PathBuf;
 
-use arpcli::config::{self, Input, Output};
+use arpcli::config::{self, Input, Output, TerrainIndex};
 use arpcli::error::{AppError, ErrorBody, InputInvalidReason};
 use arpcli::solver::{self, SolveParams};
 use arpcli::help;
@@ -59,7 +59,9 @@ fn main() {
     // help 拦截：无参数 / `help` → 显示帮助
     let args: Vec<String> = std::env::args().collect();
     if args.len() == 1 || (args.len() >= 2 && args[1] == "help") {
-        help::print_help(&bin, version);
+        let data_dir = solver::find_data_dir();
+        let terrain_index = data_dir.as_deref().and_then(TerrainIndex::load);
+        help::print_help(&bin, version, terrain_index.as_ref());
         return;
     }
 

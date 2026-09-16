@@ -14,9 +14,7 @@
             }
         }
     ],
-    "terrain": {
-        "source": "none"
-    },
+    "terrain": {},
     "zones": [
         {
             "id": "circ20",

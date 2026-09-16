@@ -8,11 +8,10 @@
 //! Zone 水平几何禁入（高度层 M2）；SmoothOptions 默认值（AircraftProfile 派生 M4）；
 //! 无雷达代价（M3）；逐机显式 start/target（M5 每机 waypoints）。
 
-use std::path::PathBuf;
 use std::time::Instant;
 
 use crate::config::{
-    Input, Output, PathPoint, Stats, TerrainSourceType, AircraftOutput, Zone, ZoneShape, ZoneType,
+    Input, Output, PathPoint, Stats, TerrainIndex, AircraftOutput, Zone, ZoneShape, ZoneType,
     point_in_polygon_xy, pt_seg_dist_km, zone_contains, zone_contains_at,
 };
 use crate::coord::Geo;
@@ -122,6 +121,31 @@ struct AircraftSpec {
     weapon: Option<crate::config::Weapon>,
 }
 
+/// 查找 data 目录（index.yaml 所在目录）。候选顺序：
+///   1) cwd/data
+///   2) exe 同级/data
+///   3) exe 上级/data
+///   4) workspace 根 data（相对路径 ./data）
+pub fn find_data_dir() -> Option<std::path::PathBuf> {
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(cwd) = std::env::current_dir() {
+        candidates.push(cwd.join("data"));
+        // workspace root（cargo test 从 cli/ 运行时 cwd=cli/，data 在上级）
+        candidates.push(cwd.join("..").join("data"));
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            candidates.push(dir.join("data"));
+            candidates.push(dir.join("..").join("data"));
+        }
+    }
+    // 相对路径回退
+    candidates.push(std::path::PathBuf::from("data"));
+    candidates
+        .into_iter()
+        .find(|p| p.join("index.yaml").exists())
+}
+
 /// 端到端解算。elapsed_ms 为端到端耗时（main 计时传入）。
 pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Output, AppError> {
     // P6-B（docs/07 §5）：3s 预算硬护栏。预算含 solve 前耗时（地形加载等）——
@@ -131,77 +155,93 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
     let over_budget = |elapsed_ms: u64| -> bool {
         budget_ms != 0 && elapsed_ms + solve_t0.elapsed().as_millis() as u64 >= budget_ms
     };
-    // 1. 地形源（none = 无地形平面；path = 外部文件；加载失败降级为 none + 警告）。
-    //    主管 2026-08-11：外部格式（GeoTIFF/DTED/SRTM）不需要转换，直接调对应
-    //    解析库取数（`open_source` 按扩展名分派）；ARPK1 走 BuiltinSource（预取）。
+    // 1. 地形源（索引 id 模式：data/index.yaml 解析路径）。
+    //    arpack/mask 字段为索引 id，查找 index.yaml 获取文件名，拼接 data_dir 得到完整路径。
     let mut terrain_warnings: Vec<String> = Vec::new();
-    let terrain: TerrainHandle = match input.terrain.source {
-        TerrainSourceType::None => TerrainHandle::None,
-        TerrainSourceType::Path => {
-            let p = input.terrain.path.clone().map(PathBuf::from);
-            let inner: Option<InnerSource> = match p {
-                Some(ref p) => {
-                    let ext = p
-                        .extension()
-                        .and_then(|e| e.to_str())
-                        .unwrap_or("")
-                        .to_ascii_lowercase();
-                    let result = match ext.as_str() {
-                        "arpack" | "zstd" => {
-                            BuiltinSource::open(p).map(InnerSource::Builtin)
-                        }
-                        _ => crate::terrain::open_source(p).map(InnerSource::Dyn),
-                    };
-                    match result {
-                        Ok(src) => Some(src),
-                        Err(e) => {
-                            let msg = format!(
-                                "terrain path '{}' 加载失败（{}），降级为无地形",
-                                p.display(),
-                                e
-                            );
-                            eprintln!("[warn] {msg}");
-                            terrain_warnings.push(msg);
-                            None
-                        }
-                    }
-                }
-                None => {
-                    let msg = "terrain.source=path 但未提供地形文件（terrain.path），降级为无地形".into();
-                    eprintln!("[warn] {msg}");
-                    terrain_warnings.push(msg);
-                    None
-                }
-            };
-            match inner {
-                None => TerrainHandle::None,
-                Some(inner) => {
-                    let mask = input.terrain.mask_path.clone().map(PathBuf::from);
-                    match mask {
-                        Some(mp) => {
-                            if !mp.exists() {
-                                return Err(AppError::Data(format!(
-                                    "mask file not found: {}（terrain.mask_path）",
-                                    mp.display()
-                                )));
-                            }
-                            let gm = GeoMask::open(&mp)?;
-                            match inner {
-                                InnerSource::Builtin(b) => {
-                                    TerrainHandle::Masked(MaskedSource::new(b, gm))
-                                }
-                                InnerSource::Dyn(d) => {
-                                    TerrainHandle::MaskedExternal(MaskedSource::new(d, gm))
-                                }
-                            }
-                        }
-                        None => match inner {
-                            InnerSource::Builtin(b) => TerrainHandle::Plain(b),
-                            InnerSource::Dyn(d) => TerrainHandle::External(d),
-                        },
+    let data_dir = find_data_dir();
+    let index = data_dir.as_deref().and_then(TerrainIndex::load);
+    let terrain: TerrainHandle = {
+        // 解析 arpack 路径
+        let arpack_path = match (&input.terrain.arpack, &index) {
+            (Some(id), Some(idx)) => idx.find_arpack(id).map(|f| {
+                let mut p = data_dir.clone().unwrap();
+                p.push(f);
+                p
+            }),
+            (Some(_), None) => {
+                let msg = "terrain arpack 索引文件不存在（data/index.yaml），无法加载地形".into();
+                eprintln!("[warn] {msg}");
+                terrain_warnings.push(msg);
+                None
+            }
+            (None, _) => None,
+        };
+        // 解析 mask 路径
+        let mask_path = match (&input.terrain.mask, &index) {
+            (Some(id), Some(idx)) => idx.find_mask(id).map(|f| {
+                let mut p = data_dir.clone().unwrap();
+                p.push(f);
+                p
+            }),
+            (Some(_), None) => {
+                let msg = "terrain mask 索引文件不存在（data/index.yaml），无法加载掩膜".into();
+                eprintln!("[warn] {msg}");
+                terrain_warnings.push(msg);
+                None
+            }
+            (None, _) => None,
+        };
+        // 加载地形
+        let inner: Option<InnerSource> = match arpack_path {
+            Some(ref p) => {
+                let ext = p
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                let result = match ext.as_str() {
+                    "arpack" | "zstd" => BuiltinSource::open(p).map(InnerSource::Builtin),
+                    _ => crate::terrain::open_source(p).map(InnerSource::Dyn),
+                };
+                match result {
+                    Ok(src) => Some(src),
+                    Err(e) => {
+                        let msg = format!(
+                            "terrain arpack '{}' 加载失败（{}），降级为无地形",
+                            p.display(),
+                            e
+                        );
+                        eprintln!("[warn] {msg}");
+                        terrain_warnings.push(msg);
+                        None
                     }
                 }
             }
+            None => None,
+        };
+        match inner {
+            None => TerrainHandle::None,
+            Some(inner) => match mask_path {
+                Some(mp) => {
+                    if !mp.exists() {
+                        return Err(AppError::Data(format!(
+                            "mask file not found: {}（terrain.mask）",
+                            mp.display()
+                        )));
+                    }
+                    let gm = GeoMask::open(&mp)?;
+                    match inner {
+                        InnerSource::Builtin(b) => TerrainHandle::Masked(MaskedSource::new(b, gm)),
+                        InnerSource::Dyn(d) => {
+                            TerrainHandle::MaskedExternal(MaskedSource::new(d, gm))
+                        }
+                    }
+                }
+                None => match inner {
+                    InnerSource::Builtin(b) => TerrainHandle::Plain(b),
+                    InnerSource::Dyn(d) => TerrainHandle::External(d),
+                },
+            },
         }
     };
 
@@ -4338,9 +4378,7 @@ mod tests {
                 }
             }
         ],
-        "terrain": {
-            "source": "none"
-        }
+        "terrain": {}
     }"#;
 
     // ---------- P6-C 多机交叉检测 ----------
@@ -4765,9 +4803,7 @@ mod tests {
       }
     }
   ],
-  "terrain": {
-    "source": "none"
-  },
+  "terrain": {},
   "zones": [
     {
       "id": "nf1",
@@ -4978,9 +5014,7 @@ mod tests {
       }
     }
   ],
-  "terrain": {
-    "source": "none"
-  },
+  "terrain": {},
   "zones": [
     {
       "id": "south",
@@ -5203,9 +5237,7 @@ mod tests {
       }
     }
   ],
-  "terrain": {
-    "source": "none"
-  },
+  "terrain": {},
   "zones": [
     {
       "id": "wall",
@@ -5249,9 +5281,7 @@ mod tests {
       }
     }
   ],
-  "terrain": {
-    "source": "none"
-  },
+  "terrain": {},
   "zones": [
     {
       "id": "c1",
@@ -5542,7 +5572,7 @@ mod tests {
                           "start":{{"lon":116.82168446499925,"lat":40.23810827713887,"alt_m":{alt}}},
                           "target":{{"lon":115.28680713092322,"lat":39.04668499383146,"alt_m":{alt}}}}}
                     ],
-                    "terrain":{{"source":"none"}},
+                    "terrain":{{}},
                     "zones":[{{"id":"rz","zone_type":"restricted","shape":"circle",
                         "geometry":{{"center":[116.14959340327005,39.597263409766285],"radius_km":20}},
                         "alt_min_m":2000,"alt_max_m":5000}}]
@@ -5782,9 +5812,7 @@ mod tests {
       }
     }
   ],
-  "terrain": {
-    "source": "none"
-  },
+  "terrain": {},
   "zones": [
     {
       "id": "rzp",
@@ -5858,9 +5886,7 @@ mod tests {
       }
     }
   ],
-  "terrain": {
-    "source": "none"
-  },
+  "terrain": {},
   "zones": [
     {
       "id": "rzp",
@@ -5999,9 +6025,7 @@ mod tests {
       }
     }
   ],
-  "terrain": {
-    "source": "none"
-  },
+  "terrain": {},
   "zones": [
     {
       "id": "mid",
@@ -6046,9 +6070,7 @@ mod tests {
       }
     }
   ],
-  "terrain": {
-    "source": "none"
-  },
+  "terrain": {},
   "zones": [
     {
       "id": "band",
@@ -6093,9 +6115,7 @@ mod tests {
       }
     }
   ],
-  "terrain": {
-    "source": "none"
-  },
+  "terrain": {},
   "zones": [
     {
       "id": "wall",
@@ -6151,9 +6171,7 @@ mod tests {
                     }
                 ]
             },
-            "terrain": {
-                "source": "none"
-            }
+            "terrain": {}
         }"#;
         let out = solve(&parse(big), &SolveParams::default(), 0).unwrap();
         assert_eq!(out.aircraft[0].status, "planned");
@@ -6199,9 +6217,7 @@ mod tests {
                     }
                 }
             ],
-            "terrain": {
-                "source": "none"
-            }
+            "terrain": {}
         }"#;
         let input = parse(s);
         let params = SolveParams {
@@ -6251,9 +6267,7 @@ mod tests {
                     }
                 ]
             },
-            "terrain": {
-                "source": "none"
-            }
+            "terrain": {}
         }"#;
         let out = solve(&parse(s), &SolveParams::default(), 0).unwrap();
         assert_eq!(out.aircraft[0].status, "planned");
@@ -6303,9 +6317,7 @@ mod tests {
                     }
                 ]
             },
-            "terrain": {
-                "source": "none"
-            }
+            "terrain": {}
         }"#;
         let out = solve(&parse(small), &SolveParams::default(), 0).unwrap();
         assert_eq!(out.aircraft[0].status, "planned");
@@ -6354,9 +6366,7 @@ mod tests {
                     ]
                 }
             ],
-            "terrain": {
-                "source": "none"
-            }
+            "terrain": {}
         }"#;
         let out = solve(&parse(s), &SolveParams::default(), 0).unwrap();
         assert_eq!(out.aircraft[0].status, "planned");
@@ -6434,9 +6444,7 @@ mod tests {
                     ]
                 }
             ],
-            "terrain": {
-                "source": "none"
-            }
+            "terrain": {}
         }"#;
         let out = solve(&parse(s), &SolveParams::default(), 0).unwrap();
         assert_eq!(out.aircraft.len(), 2);
@@ -6498,9 +6506,7 @@ mod tests {
                     ]
                 }
             ],
-            "terrain": {
-                "source": "none"
-            }
+            "terrain": {}
         }"#;
         let out = solve(&parse(s), &SolveParams::default(), 0).unwrap();
         assert_eq!(out.aircraft[0].status, "planned");
@@ -6555,9 +6561,7 @@ mod tests {
                     }
                 }
             ],
-            "terrain": {
-                "source": "none"
-            }
+            "terrain": {}
         }"#;
         let input = parse(s);
         let out = solve(&input, &SolveParams::default(), 0).unwrap();
@@ -6617,9 +6621,7 @@ mod tests {
                     }
                 }
             ],
-            "terrain": {
-                "source": "none"
-            }
+            "terrain": {}
         }"#;
         let input = parse(s);
         let out = solve(&input, &SolveParams::default(), 0).unwrap();
@@ -6664,12 +6666,6 @@ mod tests {
         // 网格楼梯（4048km）。修复：平滑循环中每段（含 mask=true）push 前检查
         // 与前一段输出的边界转角，超限 → arc_transition 插入过渡弧（弹出边界点、
         // 后续段起点同步到弧末点 E）→ 22 点平滑路径 2982km。
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
-        let cand = root.join("data/east_asia_7p5as.arpack");
-        if !cand.exists() {
-            eprintln!("skip zigzag19: real terrain missing ({})", cand.display());
-            return;
-        }
         let s = r#"{
   "aircraft": [
     {
@@ -6708,8 +6704,7 @@ mod tests {
     ]
   },
   "terrain": {
-    "source": "path",
-    "path": "__P__"
+    "arpack": "east_asia"
   },
   "parameters": {
     "p_cross": 0.9
@@ -6842,7 +6837,6 @@ mod tests {
     }
   ]
 }"#;
-        let s = s.replace("__P__", &cand.to_string_lossy().replace('\\', "\\\\"));
         let input = parse(&s);
         let out = solve(&input, &SolveParams::default(), 0).unwrap();
         let v = &out.aircraft[0];
@@ -6879,12 +6873,6 @@ mod tests {
         // 后置 need_wall 画墙水平绕行兜底（宁丑勿违）→ 6 点 3000m 平滑路径 1685km。
         // 另修复 verify/check 圆判定投影误差（segment_circle_intersect_t slack）：
         // 1200km 长段投影偏差 ~0.5km，贴圆擦过（穿入 0.5km）被漏判交付 → 拒。
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
-        let cand = root.join("data/east_asia_7p5as.arpack");
-        if !cand.exists() {
-            eprintln!("skip zigzag22: real terrain missing ({})", cand.display());
-            return;
-        }
         let s = r#"{
   "aircraft": [
     {
@@ -6923,8 +6911,7 @@ mod tests {
     ]
   },
   "terrain": {
-    "source": "path",
-    "path": "__P__"
+    "arpack": "east_asia"
   },
   "parameters": {
     "p_cross": 0.9
@@ -7033,7 +7020,6 @@ mod tests {
     }
   ]
 }"#;
-        let s = s.replace("__P__", &cand.to_string_lossy().replace('\\', "\\\\"));
         let input = parse(&s);
         let out = solve(&input, &SolveParams::default(), 0).unwrap();
         let v = &out.aircraft[0];
@@ -7093,12 +7079,6 @@ mod tests {
         // 修复：desc_in/out_climb 过渡直线穿任何 restricted 圆带内（含端点本身在圆内
         // 带内，退化/零长度段也覆盖）+ 过渡段水平距离 < climb_base（爬升角超 15°）→
         // need_wall 画墙水平绕行兜底 → 6 点 3000m 平滑路径 1712km。
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
-        let cand = root.join("data/east_asia_7p5as.arpack");
-        if !cand.exists() {
-            eprintln!("skip zigzag23: real terrain missing ({})", cand.display());
-            return;
-        }
         let s = r#"{
   "aircraft": [
     {
@@ -7137,8 +7117,7 @@ mod tests {
     ]
   },
   "terrain": {
-    "source": "path",
-    "path": "__P__"
+    "arpack": "east_asia"
   },
   "parameters": {
     "p_cross": 0.9
@@ -7247,7 +7226,6 @@ mod tests {
     }
   ]
 }"#;
-        let s = s.replace("__P__", &cand.to_string_lossy().replace('\\', "\\\\"));
         let input = parse(&s);
         let out = solve(&input, &SolveParams::default(), 0).unwrap();
         let v = &out.aircraft[0];
@@ -7305,12 +7283,6 @@ mod tests {
         // 净空 + 100m」=2250m 重跑 → 平滑 7 点；restricted 底部 1500m 剖面保持。
         // 回归保护：① 抬升不破坏 v1（3000m 不动）；② restricted 墙膨胀/软罚带不因
         // terrain 存在而误调（zigzag21 回归）；③ 抬升只发生在路径撞山（非区域级）。
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
-        let cand = root.join("data/east_asia_7p5as.arpack");
-        if !cand.exists() {
-            eprintln!("skip zigzag24: real terrain missing ({})", cand.display());
-            return;
-        }
         let s = r#"{
   "aircraft": [
     {
@@ -7350,8 +7322,7 @@ mod tests {
     "radars": []
   },
   "terrain": {
-    "source": "path",
-    "path": "__P__"
+    "arpack": "east_asia"
   },
   "parameters": {},
   "zones": [
@@ -7394,7 +7365,6 @@ mod tests {
     }
   ]
 }"#;
-        let s = s.replace("__P__", &cand.to_string_lossy().replace('\\', "\\\\"));
         let input = parse(&s);
         let out = solve(&input, &SolveParams::default(), 0).unwrap();
         let v1 = &out.aircraft[0];
@@ -7452,12 +7422,6 @@ mod tests {
         // 直线地形最高 2040m → 抬升到 2240m 越过山峰。
         // 断言：交付路径沿直线密采样（2000 点）最小净空 ≥ 100m（不撞山）；
         // 平滑交付（≤3 点）；无 smoothing_failed。
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
-        let cand = root.join("data/east_asia_7p5as.arpack");
-        if !cand.exists() {
-            eprintln!("skip zigzag26: real terrain missing ({})", cand.display());
-            return;
-        }
         let s = r#"{
   "aircraft": [
     {
@@ -7481,13 +7445,11 @@ mod tests {
     "radars": []
   },
   "terrain": {
-    "source": "path",
-    "path": "__P__"
+    "arpack": "east_asia"
   },
   "parameters": {},
   "zones": []
 }"#;
-        let s = s.replace("__P__", &cand.to_string_lossy().replace('\\', "\\\\"));
         let input = parse(&s);
         let out = solve(&input, &SolveParams::default(), 0).unwrap();
         let v = &out.aircraft[0];
@@ -7524,7 +7486,10 @@ mod tests {
             v.path.last().unwrap().alt_m
         );
         // 密采样复核：沿输出路径各段采样（间隔 ≤1km），任何点净空 ≥ 100m（不撞山）
-        let t = crate::terrain::open_source(&cand).unwrap();
+        let _data_dir = crate::solver::find_data_dir().expect("data dir for terrain verification");
+        let _index = crate::config::TerrainIndex::load(&_data_dir).expect("terrain index");
+        let _arpack_file = _index.find_arpack("east_asia").expect("arpack id");
+        let t = crate::terrain::open_source(&_data_dir.join(_arpack_file)).unwrap();
         let mut min_clr = f64::INFINITY;
         let mut min_clr_lon = 0.0;
         let mut min_clr_lat = 0.0;
@@ -7568,12 +7533,6 @@ mod tests {
         // terrain_follow_insert 改 250m 峰顶捕获（每段最差峰 1 点）→ 3 点交付。
         // 断言：起点/终点保持 500m；点数 ≤ 30（简化）；相邻点坡度 ≤ 15.5°；
         // 密采样最小净空 ≥ 100m（250m 峰顶捕获 + 保底兜底，不撞山）。
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
-        let cand = root.join("data/east_asia_7p5as.arpack");
-        if !cand.exists() {
-            eprintln!("skip zigzag37: real terrain missing ({})", cand.display());
-            return;
-        }
         let s = r#"{
   "aircraft": [
     {
@@ -7597,13 +7556,11 @@ mod tests {
     "radars": []
   },
   "terrain": {
-    "source": "path",
-    "path": "__P__"
+    "arpack": "east_asia"
   },
   "parameters": {},
   "zones": []
 }"#;
-        let s = s.replace("__P__", &cand.to_string_lossy().replace('\\', "\\\\"));
         let input = parse(&s);
         let out = solve(&input, &SolveParams::default(), 0).unwrap();
         let v = &out.aircraft[0];
@@ -7644,7 +7601,10 @@ mod tests {
             }
         }
         // 密采样复核：沿输出路径各段采样（间隔 ≤1km），任何点净空 ≥ 100m（不撞山）
-        let t = crate::terrain::open_source(&cand).unwrap();
+        let _data_dir = crate::solver::find_data_dir().expect("data dir for terrain verification");
+        let _index = crate::config::TerrainIndex::load(&_data_dir).expect("terrain index");
+        let _arpack_file = _index.find_arpack("east_asia").expect("arpack id");
+        let t = crate::terrain::open_source(&_data_dir.join(_arpack_file)).unwrap();
         let mut min_clr = f64::INFINITY;
         let mut min_clr_lon = 0.0;
         let mut min_clr_lat = 0.0;
@@ -7676,12 +7636,6 @@ mod tests {
     #[test]
     fn zigzag38_diag_waypoint_clears() {
         // 诊断（主管 2026-08-14 必经点输入）：打印密采样最小净空位置，定位穿山段
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
-        let cand = root.join("data/east_asia_7p5as.arpack");
-        if !cand.exists() {
-            eprintln!("skip zigzag38: real terrain missing ({})", cand.display());
-            return;
-        }
         let s = r#"{
   "aircraft": [
     {
@@ -7711,13 +7665,11 @@ mod tests {
     "radars": []
   },
   "terrain": {
-    "source": "path",
-    "path": "__P__"
+    "arpack": "east_asia"
   },
   "parameters": {},
   "zones": []
 }"#;
-        let s = s.replace("__P__", &cand.to_string_lossy().replace('\\', "\\\\"));
         let input = parse(&s);
         let out = solve(&input, &SolveParams::default(), 0).unwrap();
         let v = &out.aircraft[0];
@@ -7762,7 +7714,10 @@ mod tests {
         // v0.21 逐机化后 region 不再含已拍平的 phantom mission.target（目标即每机
         // target）→ 任务区域更紧 → 网格 cell 变细 → 路径与旧版不同，密采样最小净空
         // 实测 90.2m（旧 99m+ 阈值按旧路径标定）；verify 硬闸仍过（planned）。
-        let t = crate::terrain::open_source(&cand).unwrap();
+        let _data_dir = crate::solver::find_data_dir().expect("data dir for terrain verification");
+        let _index = crate::config::TerrainIndex::load(&_data_dir).expect("terrain index");
+        let _arpack_file = _index.find_arpack("east_asia").expect("arpack id");
+        let t = crate::terrain::open_source(&_data_dir.join(_arpack_file)).unwrap();
         let mut min_clr = f64::INFINITY;
         let mut min_clr_lon = 0.0;
         let mut min_clr_lat = 0.0;
@@ -7809,7 +7764,10 @@ mod tests {
             "中间段穿山：最小净空 {min_clr:.1}m < 89.0m (at {min_clr_lon:.4},{min_clr_lat:.4})"
         );
         // 主管指定穿山位置诊断：打印该处地形 + 路径插值高度 + 净空
-        let t = crate::terrain::open_source(&cand).unwrap();
+        let _data_dir = crate::solver::find_data_dir().expect("data dir for terrain verification");
+        let _index = crate::config::TerrainIndex::load(&_data_dir).expect("terrain index");
+        let _arpack_file = _index.find_arpack("east_asia").expect("arpack id");
+        let t = crate::terrain::open_source(&_data_dir.join(_arpack_file)).unwrap();
         for (plon, plat) in [
             (110.1095464514442, 34.54625076296954),
             (110.17114075373888, 34.55149067388675),
@@ -7858,12 +7816,6 @@ mod tests {
         // ③ arc_transition d_m ≤ 0.75×|bc| 截断（弧末点不越过后段下一节点），
         // keep_b（必经点）用物理转弯半径（切点偏差 r·tan(θ/2)≈431m，满足必经点
         // 容差 0.05°≈5.5km 测试断言）。结果：v2 471→10 点平滑，v1 5 点不变。
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
-        let cand = root.join("data/east_asia_7p5as.arpack");
-        if !cand.exists() {
-            eprintln!("skip zigzag25: real terrain missing ({})", cand.display());
-            return;
-        }
         let s = r#"{
   "aircraft": [
     {
@@ -7923,13 +7875,11 @@ mod tests {
     ]
   },
   "terrain": {
-    "source": "path",
-    "path": "__P__"
+    "arpack": "east_asia"
   },
   "parameters": {},
   "zones": []
 }"#;
-        let s = s.replace("__P__", &cand.to_string_lossy().replace('\\', "\\\\"));
         let input = parse(&s);
         let out = solve(&input, &SolveParams::default(), 0).unwrap();
         for (vi, v) in out.aircraft.iter().enumerate() {
@@ -7972,12 +7922,6 @@ mod tests {
         // 到 175°（必经点大转向合法，solver 段边界 arc 切弧处理 ~128°，r×tan(64°)≈906m
         // 物理可行）；非必经点段保持 95°（zigzag11/25 语义保护）。结果：541→14 点平滑，
         // 381.1km（直线拉直），smoothing_failed 消失。
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
-        let cand = root.join("data/east_asia_7p5as.arpack");
-        if !cand.exists() {
-            eprintln!("skip zigzag27: real terrain missing ({})", cand.display());
-            return;
-        }
         let s = r#"{
   "aircraft": [
     {
@@ -8022,13 +7966,11 @@ mod tests {
     "radars": []
   },
   "terrain": {
-    "source": "path",
-    "path": "__P__"
+    "arpack": "east_asia"
   },
   "parameters": {},
   "zones": []
 }"#;
-        let s = s.replace("__P__", &cand.to_string_lossy().replace('\\', "\\\\"));
         let input = parse(&s);
         let out = solve(&input, &SolveParams::default(), 0).unwrap();
         let v = &out.aircraft[0];
@@ -8077,12 +8019,6 @@ mod tests {
         // 修复：radius 检查改三点局部投影（LocalProjection 以三点均值为中心，与
         // arc_transition 生成口径一致）。结果：1017→36 点平滑，770km（之字形直线拉直），
         // smoothing_failed 消失。
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
-        let cand = root.join("data/east_asia_7p5as.arpack");
-        if !cand.exists() {
-            eprintln!("skip zigzag28: real terrain missing ({})", cand.display());
-            return;
-        }
         let s = r#"{
   "aircraft": [
     {
@@ -8157,13 +8093,11 @@ mod tests {
     "radars": []
   },
   "terrain": {
-    "source": "path",
-    "path": "__P__"
+    "arpack": "east_asia"
   },
   "parameters": {},
   "zones": []
 }"#;
-        let s = s.replace("__P__", &cand.to_string_lossy().replace('\\', "\\\\"));
         let input = parse(&s);
         let out = solve(&input, &SolveParams::default(), 0).unwrap();
         let v = &out.aircraft[0];
@@ -8220,12 +8154,6 @@ mod tests {
         // 方向偏差 <3°）。同时地形采样 1km→200m（7.5as ~230m 格距），消除弧后段起点
         // 偏移导致的采样网格相位差漏检窄山峰。结果：2549→95 点平滑（1821km 之字形
         // 拉直），smoothing_failed 消失，23 必经点全部在 5.5km 容差内。
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
-        let cand = root.join("data/east_asia_7p5as.arpack");
-        if !cand.exists() {
-            eprintln!("skip zigzag29: real terrain missing ({})", cand.display());
-            return;
-        }
         let s = r#"{
   "aircraft": [
     {
@@ -8365,13 +8293,11 @@ mod tests {
     "radars": []
   },
   "terrain": {
-    "source": "path",
-    "path": "__P__"
+    "arpack": "east_asia"
   },
   "parameters": {},
   "zones": []
 }"#;
-        let s = s.replace("__P__", &cand.to_string_lossy().replace('\\', "\\\\"));
         let input = parse(&s);
         let out = solve(&input, &SolveParams::default(), 0).unwrap();
         let v = &out.aircraft[0];
@@ -8440,12 +8366,6 @@ mod tests {
         // 地形高度（verify ~200m 采样密于 check，窄峰不漏检），solver 抬升决策与
         // final_rep issues 解析取 max。结果：1789→14 点平滑，1000→2680m（抬升链
         // 2555m→段级 2480m 峰→2680m），smoothing_failed 消失。
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
-        let cand = root.join("data/east_asia_7p5as.arpack");
-        if !cand.exists() {
-            eprintln!("skip zigzag30: real terrain missing ({})", cand.display());
-            return;
-        }
         let s = r#"{
   "aircraft": [
     {
@@ -8509,8 +8429,7 @@ mod tests {
     ]
   },
   "terrain": {
-    "source": "path",
-    "path": "__P__"
+    "arpack": "east_asia"
   },
   "parameters": {
     "p_cross": 0.9
@@ -8569,7 +8488,6 @@ mod tests {
     }
   ]
 }"#;
-        let s = s.replace("__P__", &cand.to_string_lossy().replace('\\', "\\\\"));
         let input = parse(&s);
         let out = solve(&input, &SolveParams::default(), 0).unwrap();
         let v = &out.aircraft[0];
@@ -8627,12 +8545,6 @@ mod tests {
         // 分支 restricted_pass_alt 传**段首尾**（p0/p1，与剖面 in_out 一致）。
         // 结果：v1 13 点平滑（不变）；v2 5468→37 点平滑，13 必经点全过；wp4→wp5 段
         // rz2 底部→顶部 6500m（1421m 峰），wp12→wp13 段 1500m（该穿行带地形 ≤1400m）。
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
-        let cand = root.join("data/east_asia_7p5as.arpack");
-        if !cand.exists() {
-            eprintln!("skip zigzag31: real terrain missing ({})", cand.display());
-            return;
-        }
         let s = r#"{
   "aircraft": [
     {
@@ -8762,8 +8674,7 @@ mod tests {
     ]
   },
   "terrain": {
-    "source": "path",
-    "path": "__P__"
+    "arpack": "east_asia"
   },
   "parameters": {
     "p_cross": 0.9
@@ -8822,7 +8733,6 @@ mod tests {
     }
   ]
 }"#;
-        let s = s.replace("__P__", &cand.to_string_lossy().replace('\\', "\\\\"));
         let input = parse(&s);
         let out = solve(&input, &SolveParams::default(), 0).unwrap();
         // v1：3 必经点（同 zigzag30，抬升 warning）
@@ -8892,12 +8802,6 @@ mod tests {
         // 恢复为 b→c 子段净距（≥ 原值），弧内部转角 ≈ 3θ/4 < 60（θ≤80），verify
         // radius（b,弧中点,E'）≥442（θ=90° 最差 ~902m）；仍不足（转角 ≤65）才豁免。
         // 结果：687→9 点平滑，必经点经过，277.9km（修复前 354.9km）。
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
-        let cand = root.join("data/east_asia_7p5as.arpack");
-        if !cand.exists() {
-            eprintln!("skip zigzag32: real terrain missing ({})", cand.display());
-            return;
-        }
         let s = r#"{
   "aircraft": [
     {
@@ -8927,8 +8831,7 @@ mod tests {
     "radars": []
   },
   "terrain": {
-    "source": "path",
-    "path": "__P__"
+    "arpack": "east_asia"
   },
   "parameters": {},
   "zones": [
@@ -8971,7 +8874,6 @@ mod tests {
     }
   ]
 }"#;
-        let s = s.replace("__P__", &cand.to_string_lossy().replace('\\', "\\\\"));
         let input = parse(&s);
         let out = solve(&input, &SolveParams::default(), 0).unwrap();
         let v = &out.aircraft[0];
@@ -9009,12 +8911,6 @@ mod tests {
         // 重试（min_steps 4..=8：n 增大 → 末段步进减小 → p_{n-1}→E' 趋近出段
         // 方向，n=8 时 33.4°<60）——净距+转角双检。
         // 结果：1061→21 点平滑，必经点偏差 <0.2km，429.6km。
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
-        let cand = root.join("data/east_asia_7p5as.arpack");
-        if !cand.exists() {
-            eprintln!("skip zigzag33: real terrain missing ({})", cand.display());
-            return;
-        }
         let s = r#"{
   "aircraft": [
     {
@@ -9049,8 +8945,7 @@ mod tests {
     "radars": []
   },
   "terrain": {
-    "source": "path",
-    "path": "__P__"
+    "arpack": "east_asia"
   },
   "parameters": {},
   "zones": [
@@ -9093,7 +8988,6 @@ mod tests {
     }
   ]
 }"#;
-        let s = s.replace("__P__", &cand.to_string_lossy().replace('\\', "\\\\"));
         let input = parse(&s);
         let out = solve(&input, &SolveParams::default(), 0).unwrap();
         let v = &out.aircraft[0];
@@ -9134,12 +9028,6 @@ mod tests {
         // 同口径检查真实输出段。
         // 结果：1679→20 点平滑，必经点偏差 <0.3km，562.4km，radar 累计探测
         // 0.0154（路径绕开雷达盘）。
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
-        let cand = root.join("data/east_asia_7p5as.arpack");
-        if !cand.exists() {
-            eprintln!("skip zigzag34: real terrain missing ({})", cand.display());
-            return;
-        }
         let s = r#"{
   "aircraft": [
     {
@@ -9182,8 +9070,7 @@ mod tests {
     ]
   },
   "terrain": {
-    "source": "path",
-    "path": "__P__"
+    "arpack": "east_asia"
   },
   "parameters": {
     "p_cross": 0.9
@@ -9228,7 +9115,6 @@ mod tests {
     }
   ]
 }"#;
-        let s = s.replace("__P__", &cand.to_string_lossy().replace('\\', "\\\\"));
         let input = parse(&s);
         let out = solve(&input, &SolveParams::default(), 0).unwrap();
         let v = &out.aircraft[0];
@@ -9262,15 +9148,6 @@ mod tests {
         // 预检），走空洞/无效数据处理流程：OOB 按 NODATA 5x 高代价**通行**（非
         // 禁行墙），目标在数据内 → 出路径（planned + OOB 降级警告）；全被挡 →
         // no_solution——均为四态可用结果。
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
-        let cand = root.join("data/east_asia_7p5as.arpack");
-        if !cand.exists() {
-            eprintln!(
-                "skip oob_input_point: real terrain missing ({})",
-                cand.display()
-            );
-            return;
-        }
         let s = r#"{
             "aircraft": [
                 {
@@ -9288,11 +9165,9 @@ mod tests {
                 }
             ],
             "terrain": {
-                "source": "path",
-                "path": "__P__"
+                "arpack": "east_asia"
             }
         }"#;
-        let s = s.replace("__P__", &cand.to_string_lossy().replace('\\', "\\\\"));
         let input = parse(&s);
         // 不再 data_error（旧预检 return Err 已删除）
         let out = solve(&input, &SolveParams::default(), 0).unwrap();
@@ -9356,9 +9231,7 @@ mod tests {
   "red_forces": {
     "radars": []
   },
-  "terrain": {
-    "source": "none"
-  },
+  "terrain": {},
   "zones": [
     {
       "id": "wall",
@@ -9441,9 +9314,7 @@ mod tests {
   "red_forces": {
     "radars": []
   },
-  "terrain": {
-    "source": "none"
-  },
+  "terrain": {},
   "zones": [
     {
       "id": "wall",
@@ -9507,9 +9378,7 @@ mod tests {
   "red_forces": {
     "radars": []
   },
-  "terrain": {
-    "source": "none"
-  },
+  "terrain": {},
   "zones": [
     {
       "id": "wall",
@@ -9587,12 +9456,6 @@ mod tests {
         // → 误报 no_solution（grid512 cell 更细恰好命中窄带才成功）。
         // 修复：walled 多边形改"格子矩形与多边形相交"（rect_intersects_polygon），
         // 任何分辨率不漏窄带。grid384/320/288/272/260/256/512 全部 planned。
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
-        let cand = root.join("data/east_asia_7p5as.arpack");
-        if !cand.exists() {
-            eprintln!("skip zigzag35: real terrain missing ({})", cand.display());
-            return;
-        }
         let s = r#"{
   "aircraft": [
     {
@@ -9624,8 +9487,7 @@ mod tests {
     ]
   },
   "terrain": {
-    "source": "path",
-    "path": "__P__"
+    "arpack": "east_asia"
   },
   "parameters": {},
   "zones": [
@@ -9654,7 +9516,6 @@ mod tests {
     }
   ]
 }"#;
-        let s = s.replace("__P__", &cand.to_string_lossy().replace('\\', "\\\\"));
         let input = parse(&s);
         let out = solve(&input, &SolveParams::default(), 0).unwrap();
         let v = &out.aircraft[0];
@@ -9702,12 +9563,6 @@ mod tests {
         // 圆墙 0.03°——zz19 教训：圆墙大余量会让本就贴近任务边界的圆撑出 region，
         // 触发 terrain 墙格点翻转丢 restricted 剖面语义）；grid 等比保持 cell
         // （region 变大 grid 按 base_grid cell 等比上调，软罚带物理宽度不变）。
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
-        let cand = root.join("data/east_asia_7p5as.arpack");
-        if !cand.exists() {
-            eprintln!("skip zigzag36: real terrain missing ({})", cand.display());
-            return;
-        }
         let s = r#"{
   "aircraft": [
     {
@@ -9731,8 +9586,7 @@ mod tests {
     "radars": []
   },
   "terrain": {
-    "source": "path",
-    "path": "__P__"
+    "arpack": "east_asia"
   },
   "parameters": {},
   "zones": [
@@ -9765,7 +9619,6 @@ mod tests {
     }
   ]
 }"#;
-        let s = s.replace("__P__", &cand.to_string_lossy().replace('\\', "\\\\"));
         let input = parse(&s);
         let out = solve(&input, &SolveParams::default(), 0).unwrap();
         let v = &out.aircraft[0];
@@ -9840,9 +9693,7 @@ mod tests {
                     }
                 }
             ],
-            "terrain": {
-                "source": "none"
-            }
+            "terrain": {}
         }"#;
         let input = parse(s);
         let out = solve(&input, &SolveParams::default(), 0).unwrap();
@@ -9887,9 +9738,7 @@ mod tests {
                     }
                 }
             ],
-            "terrain": {
-                "source": "none"
-            }
+            "terrain": {}
         }"#;
         let input = parse(s);
         let out = solve(&input, &SolveParams::default(), 0).unwrap();
@@ -9945,9 +9794,7 @@ mod tests {
                     }
                 }
             ],
-            "terrain": {
-                "source": "none"
-            }
+            "terrain": {}
         }"#;
         let input = parse(s);
         let out = solve(&input, &SolveParams::default(), 0).unwrap();
@@ -9990,9 +9837,7 @@ mod tests {
       }
     }
   ],
-  "terrain": {
-    "source": "none"
-  },
+  "terrain": {},
   "zones": [
     {
       "id": "nf_in",
@@ -10083,9 +9928,7 @@ mod tests {
                     }
                 }
             ],
-            "terrain": {
-                "source": "none"
-            }
+            "terrain": {}
         }"#;
         let input = parse(s);
         let out = solve(&input, &SolveParams::default(), 0).unwrap();
@@ -10134,9 +9977,7 @@ mod tests {
                     }
                 }
             ],
-            "terrain": {
-                "source": "none"
-            }
+            "terrain": {}
         }"#;
         let input = parse(s);
         let out = solve(&input, &SolveParams::default(), 0).unwrap();
@@ -10187,9 +10028,7 @@ mod tests {
                     }
                 }
             ],
-            "terrain": {
-                "source": "none"
-            }
+            "terrain": {}
         }"#;
         let input = parse(s);
         let out = solve(&input, &SolveParams::default(), 0).unwrap();

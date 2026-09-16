@@ -28,33 +28,27 @@ fn cases_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/regression/cases")
 }
 
-/// 真实地形数据文件候选（workspace 根/data/...）
-fn real_terrain_path() -> Option<PathBuf> {
+/// 真实数据目录候选（workspace 根/data/，含 index.yaml）
+fn real_data_dir() -> Option<PathBuf> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
-    let cand = root.join("data/east_asia_7p5as.arpack");
-    cand.exists().then_some(cand)
+    let dir = root.join("data");
+    dir.join("index.yaml").exists().then_some(dir)
 }
 
 /// 解析用例输入并按地形依赖检测改写 terrain：
-/// - 数据存在 → terrain.path 改写为绝对路径（真实地形）；
-/// - 数据缺失 → terrain.source=none（合成平面）。
+/// - 数据目录存在（含 index.yaml）→ 保持索引 id 不变（CLI 内部解析）；
+/// - 数据缺失 → 清空 terrain（合成平面）。
 fn load_case(name: &str) -> Input {
     let p = cases_dir().join(name);
     let raw =
         std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("{name}: read case failed: {e}"));
     let mut input: Input =
         Input::from_json_str(&raw).unwrap_or_else(|e| panic!("{name}: parse failed: {e}"));
-    if input.terrain.source == config::TerrainSourceType::None {
+    if input.terrain.arpack.is_none() {
         return input;
     }
-    match real_terrain_path() {
-        Some(abs) => {
-            input.terrain.path = Some(abs.to_string_lossy().into_owned());
-        }
-        None => {
-            input.terrain.source = config::TerrainSourceType::None;
-            input.terrain.path = None;
-        }
+    if real_data_dir().is_none() {
+        input.terrain = config::TerrainConfig::default();
     }
     input
 }
@@ -143,7 +137,7 @@ fn phase0_feedback_inputs_regression() {
         dir.display()
     );
 
-    let terrain_ok = real_terrain_path().is_some();
+    let terrain_ok = real_data_dir().is_some();
     eprintln!(
         "[regress] {} cases, real terrain = {}",
         names.len(),

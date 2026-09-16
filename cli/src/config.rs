@@ -186,26 +186,70 @@ pub enum ZoneShape {
     Polygon { vertices: Vec<[f64; 2]> },
 }
 
-/// 地形配置（4.2.4 默认场景 / 4.2.5 内置契约）。
+/// 地形配置（索引 id 模式）。
 #[derive(Debug, Clone, Deserialize, Default, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TerrainConfig {
-    /// none（默认，海拔 0 平面）/ path（外部文件；加载失败降级为 none 并警告）
+    /// arpack 数据索引 id（可选；对应 data/index.yaml 中 arpacks[].id）
     #[serde(default)]
-    pub source: TerrainSourceType,
+    pub arpack: Option<String>,
+    /// mask 数据索引 id（可选；对应 data/index.yaml 中 masks[].id）
     #[serde(default)]
-    pub path: Option<String>,
-    /// 海岸掩膜文件（GSHHG 3 态；需显式指定，不自动探测）
-    #[serde(default)]
-    pub mask_path: Option<String>,
+    pub mask: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum TerrainSourceType {
-    #[default]
-    None,
-    Path,
+// ==================== 地形索引（data/index.yaml） ====================
+
+/// 索引条目（arpack / mask 通用）。
+#[derive(Debug, Clone, Deserialize)]
+pub struct TerrainIndexEntry {
+    pub id: String,
+    pub desc: String,
+    pub file: String,
+}
+
+/// 地形数据索引（从 data/index.yaml 加载）。
+#[derive(Debug, Clone, Deserialize)]
+pub struct TerrainIndex {
+    #[serde(default)]
+    pub arpacks: Vec<TerrainIndexEntry>,
+    #[serde(default)]
+    pub masks: Vec<TerrainIndexEntry>,
+}
+
+impl TerrainIndex {
+    /// 从 data/index.yaml 加载索引。
+    pub fn load(data_dir: &std::path::Path) -> Option<Self> {
+        let index_path = data_dir.join("index.yaml");
+        let content = std::fs::read_to_string(&index_path).ok()?;
+        serde_yaml_neo::from_str(&content).ok()
+    }
+
+    /// 根据 id 查找 arpack 文件名（不含目录）。
+    pub fn find_arpack(&self, id: &str) -> Option<&str> {
+        self.arpacks
+            .iter()
+            .find(|e| e.id == id)
+            .map(|e| e.file.as_str())
+    }
+
+    /// 根据 id 查找 mask 文件名（不含目录）。
+    pub fn find_mask(&self, id: &str) -> Option<&str> {
+        self.masks
+            .iter()
+            .find(|e| e.id == id)
+            .map(|e| e.file.as_str())
+    }
+
+    /// 检索所有可用 arpack id 列表。
+    pub fn arpack_ids(&self) -> Vec<&str> {
+        self.arpacks.iter().map(|e| e.id.as_str()).collect()
+    }
+
+    /// 检索所有可用 mask id 列表。
+    pub fn mask_ids(&self) -> Vec<&str> {
+        self.masks.iter().map(|e| e.id.as_str()).collect()
+    }
 }
 
 /// 武器类型（2026-08-12 主管定案：空空导弹 / 空地导弹 / 航空炸弹；2026-08-19 起
