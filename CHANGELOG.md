@@ -10,6 +10,8 @@
 ## [Unreleased]
 
 ### Changed
+- **Breaking**: 三类 Zone（`no_fly_zones`/`restricted_zones`/`obstacles`）合并为统一 `zones` 数组，每个 zone 必须提供 `zone_type` 字段（no_fly / restricted / obstacle）。输入 JSON 中旧三数组改为 `"zones": [...]`。
+- **Breaking**: 飞机性能参数重构——删除 `cruise_speed_mps`/`speed_range_mps`/`min_turn_radius_m`/`max_climb_angle_deg`/`max_bank_deg`/`ceiling_m`，新增 `maximum_speed_mps`/`maximum_turn_rate_dps`/`maximum_climb_rate_mps`/`maximum_altitude_m`（全部可选，有现代战机默认值）。
 - **Breaking**: terrain 配置从 `source/path/mask_path`（文件路径）改为 `arpack/mask`（索引 id），对应 `data/index.yaml` 新增索引文件机制。输入 JSON 中 `"terrain": {"source": "path", "path": "data/xxx.arpack"}` 改为 `"terrain": {"arpack": "east_asia"}`。
 - help 输出动态展示可用地形候选项（从 index.yaml 加载）。
 - demo-server `GET /api/data-files` 从扫描文件改为返回 index.yaml 内容。
