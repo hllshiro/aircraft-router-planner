@@ -833,7 +833,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                     && path_max_terr + clearance >= alt_eff + TERRAIN_MASK_SLACK_M
                 {
                     let new_alt = (path_max_terr + clearance + 100.0).max(v.alt_m);
-                        let ceiling_ok = v.profile.maximum_altitude_m.is_none_or(|c| new_alt <= c);
+                    let ceiling_ok = v.profile.maximum_altitude_m.is_none_or(|c| new_alt <= c);
                     if new_alt > alt_eff + 0.5 && ceiling_ok {
                         terrain_alt_raised = true;
                         alt_eff = new_alt;
@@ -1341,7 +1341,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                     if terr_max > 0.0 {
                         let clearance = opts.clearance_m.max(1.0);
                         let new_alt = (terr_max + clearance + 100.0).max(v.alt_m);
-                    let ceiling_ok = v.profile.maximum_altitude_m.is_none_or(|c| new_alt <= c);
+                        let ceiling_ok = v.profile.maximum_altitude_m.is_none_or(|c| new_alt <= c);
                         if new_alt > alt_eff + 0.5 && ceiling_ok {
                             terrain_alt_raised = true;
                             alt_eff = new_alt;
