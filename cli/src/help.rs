@@ -111,12 +111,13 @@ fn build_request_body() -> String {
             ],
         },
         ParamNode {
-            name: "no_fly_zones",
+            name: "zones",
             type_label: "array<object>",
             required: false,
-            description: "禁飞区",
+            description: "区域数组",
             children: &[
                 ParamNode { name: "id", type_label: "string", required: true, description: "区域 ID", children: &[] },
+                ParamNode { name: "zone_type", type_label: "string", required: true, description: "no_fly / restricted / obstacle", children: &[] },
                 ParamNode { name: "shape", type_label: "tagged-union", required: true, description: "circle / polygon", children: &[
                     ParamNode { name: "circle", type_label: "object", required: false, description: "", children: &[
                         ParamNode { name: "center", type_label: "array<f64,2>", required: true, description: "圆心 [lon, lat]", children: &[] },
@@ -126,48 +127,8 @@ fn build_request_body() -> String {
                         ParamNode { name: "vertices", type_label: "array<array<f64,2>>", required: true, description: "顶点列表", children: &[] },
                     ]},
                 ]},
-                ParamNode { name: "alt_min_m", type_label: "f64", required: false, description: "高度下界（仅限飞区）", children: &[] },
-                ParamNode { name: "alt_max_m", type_label: "f64", required: false, description: "高度上界（仅限飞区）", children: &[] },
-            ],
-        },
-        ParamNode {
-            name: "restricted_zones",
-            type_label: "array<object>",
-            required: false,
-            description: "限飞区",
-            children: &[
-                ParamNode { name: "id", type_label: "string", required: true, description: "区域 ID", children: &[] },
-                ParamNode { name: "shape", type_label: "tagged-union", required: true, description: "circle / polygon", children: &[
-                    ParamNode { name: "circle", type_label: "object", required: false, description: "", children: &[
-                        ParamNode { name: "center", type_label: "array<f64,2>", required: true, description: "圆心 [lon, lat]", children: &[] },
-                        ParamNode { name: "radius_km", type_label: "f64", required: true, description: "半径 km", children: &[] },
-                    ]},
-                    ParamNode { name: "polygon", type_label: "object", required: false, description: "", children: &[
-                        ParamNode { name: "vertices", type_label: "array<array<f64,2>>", required: true, description: "顶点列表", children: &[] },
-                    ]},
-                ]},
-                ParamNode { name: "alt_min_m", type_label: "f64", required: true, description: "高度下界", children: &[] },
-                ParamNode { name: "alt_max_m", type_label: "f64", required: true, description: "高度上界", children: &[] },
-            ],
-        },
-        ParamNode {
-            name: "obstacles",
-            type_label: "array<object>",
-            required: false,
-            description: "障碍物",
-            children: &[
-                ParamNode { name: "id", type_label: "string", required: true, description: "障碍物 ID", children: &[] },
-                ParamNode { name: "shape", type_label: "tagged-union", required: true, description: "circle / polygon", children: &[
-                    ParamNode { name: "circle", type_label: "object", required: false, description: "", children: &[
-                        ParamNode { name: "center", type_label: "array<f64,2>", required: true, description: "圆心 [lon, lat]", children: &[] },
-                        ParamNode { name: "radius_km", type_label: "f64", required: true, description: "半径 km", children: &[] },
-                    ]},
-                    ParamNode { name: "polygon", type_label: "object", required: false, description: "", children: &[
-                        ParamNode { name: "vertices", type_label: "array<array<f64,2>>", required: true, description: "顶点列表", children: &[] },
-                    ]},
-                ]},
-                ParamNode { name: "alt_min_m", type_label: "f64", required: false, description: "高度下界（仅限飞区）", children: &[] },
-                ParamNode { name: "alt_max_m", type_label: "f64", required: false, description: "高度上界（仅限飞区）", children: &[] },
+                ParamNode { name: "alt_min_m", type_label: "f64", required: false, description: "高度下界（restricted 必填）", children: &[] },
+                ParamNode { name: "alt_max_m", type_label: "f64", required: false, description: "高度上界（restricted 必填）", children: &[] },
             ],
         },
         ParamNode {

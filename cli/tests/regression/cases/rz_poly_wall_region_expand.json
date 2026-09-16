@@ -24,8 +24,12 @@
   "red_forces": {
     "radars": []
   },
-  "no_fly_zones": [],
-  "restricted_zones": [
+  "terrain": {
+    "source": "path",
+    "path": "data/east_asia_7p5as.arpack"
+  },
+  "parameters": {},
+  "zones": [
     {
       "id": "rz_1786526741843",
       "shape": "polygon",
@@ -46,13 +50,8 @@
         ]
       },
       "alt_min_m": 2000,
-      "alt_max_m": 6000
+      "alt_max_m": 6000,
+      "zone_type": "restricted"
     }
-  ],
-  "obstacles": [],
-  "terrain": {
-    "source": "path",
-    "path": "data/east_asia_7p5as.arpack"
-  },
-  "parameters": {}
+  ]
 }

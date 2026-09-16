@@ -26,8 +26,8 @@ const INPUT_ZONE_NO_TERRAIN: &str = r#"{
       "target": {"lon": 116.5, "lat": 39.9, "alt_m": 3000}
     }
   ],
-  "no_fly_zones": [
-    {"id": "mid", "shape": "circle",
+  "zones": [
+    {"id": "mid", "zone_type": "no_fly", "shape": "circle",
      "geometry": {"center": [115.75, 39.45], "radius_km": 15},
      "alt_min_m": 0, "alt_max_m": 10000}
   ]

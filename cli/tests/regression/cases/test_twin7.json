@@ -14,7 +14,10 @@
       }
     }
   ],
-  "no_fly_zones": [
+  "terrain": {
+    "source": "none"
+  },
+  "zones": [
     {
       "id": "circ20",
       "shape": "circle",
@@ -26,7 +29,8 @@
         "radius_km": 20
       },
       "alt_min_m": 0,
-      "alt_max_m": 12000
+      "alt_max_m": 12000,
+      "zone_type": "no_fly"
     },
     {
       "id": "para",
@@ -52,10 +56,8 @@
         ]
       },
       "alt_min_m": 0,
-      "alt_max_m": 12000
+      "alt_max_m": 12000,
+      "zone_type": "no_fly"
     }
-  ],
-  "terrain": {
-    "source": "none"
-  }
+  ]
 }

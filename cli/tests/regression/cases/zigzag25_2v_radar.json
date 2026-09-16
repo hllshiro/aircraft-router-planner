@@ -64,12 +64,10 @@
       }
     ]
   },
-  "no_fly_zones": [],
-  "restricted_zones": [],
-  "obstacles": [],
   "terrain": {
     "source": "path",
     "path": "data/east_asia_7p5as.arpack"
   },
-  "parameters": {}
+  "parameters": {},
+  "zones": []
 }

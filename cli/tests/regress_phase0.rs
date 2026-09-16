@@ -105,10 +105,7 @@ fn point_violates(z: &Zone, p: &Geo, alt_m: f64) -> bool {
 
 /// 核心断言：输出路径逐点不穿任何 zone。
 fn assert_path_clear(input: &Input, out: &config::Output, name: &str) {
-    let mut zones = input.no_fly_zones.clone();
-    zones.extend(input.restricted_zones.clone());
-    zones.extend(input.obstacles.clone());
-    if zones.is_empty() {
+    if input.zones.is_empty() {
         return;
     }
     for v in &out.aircraft {
@@ -117,7 +114,7 @@ fn assert_path_clear(input: &Input, out: &config::Output, name: &str) {
                 Ok(g) => g,
                 Err(_) => continue,
             };
-            for z in &zones {
+            for z in &input.zones {
                 if point_violates(z, &geo, pt.alt_m) {
                     panic!(
                         "{name}: aircraft {} path point {i} (lon={}, lat={}, alt={}) violates zone {} ({:?})",

@@ -24,8 +24,11 @@
   "red_forces": {
     "radars": []
   },
-  "no_fly_zones": [],
-  "restricted_zones": [
+  "terrain": {
+    "source": "none"
+  },
+  "parameters": {},
+  "zones": [
     {
       "id": "rzp",
       "shape": "polygon",
@@ -50,12 +53,8 @@
         ]
       },
       "alt_min_m": 2000,
-      "alt_max_m": 5000
+      "alt_max_m": 5000,
+      "zone_type": "restricted"
     }
-  ],
-  "obstacles": [],
-  "terrain": {
-    "source": "none"
-  },
-  "parameters": {}
+  ]
 }

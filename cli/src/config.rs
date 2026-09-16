@@ -1,11 +1,11 @@
 //! 输入/输出 JSON 契约（技术方案 4.2.1 / 4.5 + Phase 1；v0.21 契约统一与飞行器化）。
 //!
-//! - 输入：顶层 `aircraft[]`（逐机显式 start/target/profile/weapon，mission 包裹层已拍平）+ 红方雷达、三区、地形、参数覆盖；
+//! - 输入：顶层 `aircraft[]`（逐机显式 start/target/profile/weapon，mission 包裹层已拍平）+ 红方雷达、统一 zones[]、地形、参数覆盖；
 //! - 输出：`status` 四态 + 错误体 + 飞行器结果 + 统计；
 //! - `InputValidator`：畸形/退化输入在解析层即拦截 → `input_invalid` + 原因码。
 //!
 //! 严格契约：`deny_unknown_fields`（未知字段 = 畸形，属 MalformedJson）；
-//! `zone_type` 不由 JSON 提供，由解析层按所属数组注入（三数组是类型唯一标记）。
+//! `zone_type` 从 JSON 直接反序列化（每个 zone 必须提供）。
 
 use crate::coord::Geo;
 use crate::error::{AppError, InputInvalidReason};
@@ -22,12 +22,9 @@ pub struct Input {
     pub aircraft: Vec<AircraftInput>,
     #[serde(default)]
     pub red_forces: RedForces,
+    /// 统一区域数组（替代旧版 no_fly_zones / restricted_zones / obstacles）。
     #[serde(default)]
-    pub no_fly_zones: Vec<Zone>,
-    #[serde(default)]
-    pub restricted_zones: Vec<Zone>,
-    #[serde(default)]
-    pub obstacles: Vec<Zone>,
+    pub zones: Vec<Zone>,
     #[serde(default)]
     pub terrain: TerrainConfig,
     #[serde(default)]
@@ -154,9 +151,7 @@ fn default_antenna_m() -> f64 {
 #[serde(deny_unknown_fields)]
 pub struct Zone {
     pub id: String,
-    /// 区域类型。**不由 JSON 提供**（`deny_unknown_fields` 会拒绝 zone_type 键）；
-    /// 由 `Input::from_json_str` 按所属数组注入（no_fly_zones→NoFly / restricted_zones→Restricted / obstacles→Obstacle）。
-    #[serde(skip)]
+    /// 区域类型（必填字段，从 JSON 反序列化）。
     pub zone_type: ZoneType,
     #[serde(flatten)]
     pub shape: ZoneShape,
@@ -505,18 +500,8 @@ pub struct Stats {
 
 impl Input {
     /// 从 JSON 字符串解析（畸形 JSON → input_invalid: malformed_json）。
-    /// 解析后按所属数组注入 zone_type（三数组是类型唯一标记）。
     pub fn from_json_str(s: &str) -> Result<Self, AppError> {
-        let mut input: Self = serde_json::from_str(s).map_err(AppError::Json)?;
-        for z in &mut input.no_fly_zones {
-            z.zone_type = ZoneType::NoFly;
-        }
-        for z in &mut input.restricted_zones {
-            z.zone_type = ZoneType::Restricted;
-        }
-        for z in &mut input.obstacles {
-            z.zone_type = ZoneType::Obstacle;
-        }
+        let input: Self = serde_json::from_str(s).map_err(AppError::Json)?;
         Ok(input)
     }
 }
@@ -546,13 +531,13 @@ pub fn validate(input: &Input) -> Result<(), AppError> {
             ));
         }
         // 起点在禁飞区
-        for z in &input.no_fly_zones {
+        for z in input.zones.iter().filter(|z| z.zone_type == ZoneType::NoFly) {
             if zone_contains(z, &start) {
                 return Err(AppError::InputInvalid(InputInvalidReason::TargetInNoFly));
             }
         }
         // 目标在禁飞区
-        for z in &input.no_fly_zones {
+        for z in input.zones.iter().filter(|z| z.zone_type == ZoneType::NoFly) {
             if zone_contains(z, &target) {
                 return Err(AppError::InputInvalid(InputInvalidReason::TargetInNoFly));
             }
@@ -560,7 +545,7 @@ pub fn validate(input: &Input) -> Result<(), AppError> {
         // 必经点在禁飞区（P5：必经点不可绕行 → fail-fast，禁飞区绝对禁入语义）。
         for wp in &a.mid_waypoints {
             let g = wp.to_geo()?;
-            for z in &input.no_fly_zones {
+            for z in input.zones.iter().filter(|z| z.zone_type == ZoneType::NoFly) {
                 if zone_contains(z, &g) {
                     return Err(AppError::InputInvalid(
                         InputInvalidReason::MidWaypointInNoFly,
@@ -573,7 +558,7 @@ pub fn validate(input: &Input) -> Result<(), AppError> {
     for r in &input.red_forces.radars {
         let g = Geo::new(r.lon, r.lat)
             .map_err(|_| AppError::InputInvalid(InputInvalidReason::IllegalCoordinate))?;
-        for z in &input.no_fly_zones {
+        for z in input.zones.iter().filter(|z| z.zone_type == ZoneType::NoFly) {
             if zone_contains(z, &g) {
                 return Err(AppError::InputInvalid(
                     InputInvalidReason::RadarOverlapNoFly,
@@ -589,12 +574,7 @@ pub fn validate(input: &Input) -> Result<(), AppError> {
     // Zone 高度区间（2026-08-12 主管：禁飞区无高度范围）：限飞区必须有
     // [alt_min, alt_max]（alt_min < alt_max，有限值）；禁飞/障碍全高度禁入，
     // 不要求 alt（可省略）。
-    for z in input
-        .no_fly_zones
-        .iter()
-        .chain(&input.restricted_zones)
-        .chain(&input.obstacles)
-    {
+    for z in &input.zones {
         validate_zone(z)?;
     }
     Ok(())
@@ -1011,7 +991,7 @@ mod tests {
                  "start":{"lon":115.0,"lat":39.0,"alt_m":0},
                  "target":{"lon":116.5,"lat":39.9,"alt_m":0}}
             ],
-            "no_fly_zones":[{"id":"nf1",
+            "zones":[{"id":"nf1","zone_type":"no_fly",
                 "shape":"circle","geometry":{"center":[116.5,39.9],"radius_km":10},
                 "alt_min_m":0,"alt_max_m":10000}]
         }"#;
@@ -1030,7 +1010,7 @@ mod tests {
                  "start":{"lon":115.0,"lat":39.0,"alt_m":0},
                  "target":{"lon":117.0,"lat":40.0,"alt_m":0}}
             ],
-            "no_fly_zones":[{"id":"nf1",
+            "zones":[{"id":"nf1","zone_type":"no_fly",
                 "shape":"polygon","geometry":{"vertices":[[116.0,39.5],[116.5,39.5],[116.5,40.0],[116.0,40.0]]},
                 "alt_min_m":0,"alt_max_m":10000}],
             "red_forces":{"radars":[{"id":"r1","lon":116.25,"lat":39.75,"radius_km":100}]}
@@ -1052,7 +1032,7 @@ mod tests {
                  "start":{"lon":115.9,"lat":39.8,"alt_m":3000},
                  "target":{"lon":114.26335909078654,"lat":41.99101176729852,"alt_m":3000}}
             ],
-            "no_fly_zones":[{"id":"nf1",
+            "zones":[{"id":"nf1","zone_type":"no_fly",
                 "shape":"circle","geometry":{"center":[116.54581607527983,39.90085583451849],"radius_km":50},
                 "alt_min_m":0,"alt_max_m":12000}]
         }"#;
@@ -1067,7 +1047,7 @@ mod tests {
                  "start":{"lon":115.9,"lat":39.8,"alt_m":3000},
                  "target":{"lon":116.8,"lat":40.3,"alt_m":3000}}
             ],
-            "no_fly_zones":[{"id":"nf1",
+            "zones":[{"id":"nf1","zone_type":"no_fly",
                 "shape":"circle","geometry":{"center":[116.54581607527983,39.90085583451849],"radius_km":50},
                 "alt_min_m":0,"alt_max_m":12000}]
         }"#;
@@ -1088,7 +1068,7 @@ mod tests {
                  "target":{"lon":117.0,"lat":40.0,"alt_m":0},
                  "mid_waypoints":[{"lon":116.5,"lat":39.9,"alt_m":0}]}
             ],
-            "no_fly_zones":[{"id":"nf1",
+            "zones":[{"id":"nf1","zone_type":"no_fly",
                 "shape":"circle","geometry":{"center":[116.5,39.9],"radius_km":10},
                 "alt_min_m":0,"alt_max_m":10000}]
         }"#;
@@ -1115,13 +1095,13 @@ mod tests {
                  "start":{"lon":115.0,"lat":39.0,"alt_m":0},
                  "target":{"lon":117.0,"lat":40.0,"alt_m":0}}
             ],
-            "no_fly_zones":[{"id":"nf1",
+            "zones":[{"id":"nf1","zone_type":"no_fly",
                 "shape":"circle","geometry":{"center":[116.5,39.9],"radius_km":10}}]
         }"#;
         let input = Input::from_json_str(s).unwrap();
-        assert_eq!(input.no_fly_zones[0].zone_type, ZoneType::NoFly);
-        assert!(input.no_fly_zones[0].alt_min_m.is_none());
-        assert!(input.no_fly_zones[0].alt_max_m.is_none());
+        assert_eq!(input.zones[0].zone_type, ZoneType::NoFly);
+        assert!(input.zones[0].alt_min_m.is_none());
+        assert!(input.zones[0].alt_max_m.is_none());
         if let Err(e) = validate(&input) {
             panic!("expected ok (no_fly without alt), got {e:?}");
         }
@@ -1136,7 +1116,7 @@ mod tests {
                  "start":{"lon":115.0,"lat":39.0,"alt_m":0},
                  "target":{"lon":117.0,"lat":40.0,"alt_m":0}}
             ],
-            "restricted_zones":[{"id":"rz1",
+            "zones":[{"id":"rz1","zone_type":"restricted",
                 "shape":"circle","geometry":{"center":[116.5,39.9],"radius_km":10}}]
         }"#;
         let input = Input::from_json_str(s).unwrap();
@@ -1147,42 +1127,44 @@ mod tests {
     }
 
     #[test]
-    fn zone_injection_by_array() {
-        // 三数组各解析一条 → 按所属数组注入 zone_type（三数组是类型唯一标记）。
+    fn zone_type_deserialized_from_json() {
+        // zone_type 现在直接从 JSON 反序列化（必填字段）。
         let s = r#"{
             "aircraft":[
                 {"id":"a1",
                  "start":{"lon":115.0,"lat":39.0,"alt_m":0},
                  "target":{"lon":117.0,"lat":40.0,"alt_m":0}}
             ],
-            "no_fly_zones":[{"id":"nf1",
-                "shape":"circle","geometry":{"center":[116.5,39.9],"radius_km":10}}],
-            "restricted_zones":[{"id":"rz1",
-                "shape":"circle","geometry":{"center":[116.5,39.9],"radius_km":10},
-                "alt_min_m":0,"alt_max_m":5000}],
-            "obstacles":[{"id":"ob1",
-                "shape":"circle","geometry":{"center":[116.5,39.9],"radius_km":10}}]
+            "zones":[
+                {"id":"nf1","zone_type":"no_fly",
+                    "shape":"circle","geometry":{"center":[116.5,39.9],"radius_km":10}},
+                {"id":"rz1","zone_type":"restricted",
+                    "shape":"circle","geometry":{"center":[116.5,39.9],"radius_km":10},
+                    "alt_min_m":0,"alt_max_m":5000},
+                {"id":"ob1","zone_type":"obstacle",
+                    "shape":"circle","geometry":{"center":[116.5,39.9],"radius_km":10}}
+            ]
         }"#;
         let input = Input::from_json_str(s).unwrap();
-        assert_eq!(input.no_fly_zones[0].zone_type, ZoneType::NoFly);
-        assert_eq!(input.restricted_zones[0].zone_type, ZoneType::Restricted);
-        assert_eq!(input.obstacles[0].zone_type, ZoneType::Obstacle);
+        assert_eq!(input.zones[0].zone_type, ZoneType::NoFly);
+        assert_eq!(input.zones[1].zone_type, ZoneType::Restricted);
+        assert_eq!(input.zones[2].zone_type, ZoneType::Obstacle);
     }
 
     #[test]
-    fn zone_type_key_rejected() {
-        // zone_type 键不再属于 JSON 契约（由解析层按数组注入）→ 畸形。
+    fn zone_type_is_valid_field() {
+        // zone_type 现在是 Zone 结构体的必填字段，正常反序列化。
         let s = r#"{
             "aircraft":[
                 {"id":"a1",
                  "start":{"lon":115.0,"lat":39.0,"alt_m":0},
                  "target":{"lon":117.0,"lat":40.0,"alt_m":0}}
             ],
-            "no_fly_zones":[{"id":"nf1","zone_type":"no_fly",
+            "zones":[{"id":"nf1","zone_type":"no_fly",
                 "shape":"circle","geometry":{"center":[116.5,39.9],"radius_km":10}}]
         }"#;
-        let err = Input::from_json_str(s).unwrap_err();
-        assert!(matches!(err, AppError::Json(_)));
+        let input = Input::from_json_str(s).unwrap();
+        assert_eq!(input.zones[0].zone_type, ZoneType::NoFly);
     }
 
     #[test]

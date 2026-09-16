@@ -24,7 +24,12 @@
   "red_forces": {
     "radars": []
   },
-  "no_fly_zones": [
+  "terrain": {
+    "source": "path",
+    "path": "data/east_asia_7p5as.arpack"
+  },
+  "parameters": {},
+  "zones": [
     {
       "id": "zone_1785981861143",
       "shape": "circle",
@@ -36,10 +41,9 @@
         "radius_km": 10
       },
       "alt_min_m": 0,
-      "alt_max_m": 12000
-    }
-  ],
-  "restricted_zones": [
+      "alt_max_m": 12000,
+      "zone_type": "no_fly"
+    },
     {
       "id": "rz_1785977075924",
       "shape": "circle",
@@ -51,13 +55,8 @@
         "radius_km": 20
       },
       "alt_min_m": 1000,
-      "alt_max_m": 5000
+      "alt_max_m": 5000,
+      "zone_type": "restricted"
     }
-  ],
-  "obstacles": [],
-  "terrain": {
-    "source": "path",
-    "path": "data/east_asia_7p5as.arpack"
-  },
-  "parameters": {}
+  ]
 }

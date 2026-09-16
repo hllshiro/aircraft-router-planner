@@ -68,7 +68,14 @@
       }
     ]
   },
-  "no_fly_zones": [
+  "terrain": {
+    "source": "path",
+    "path": "data/east_asia_7p5as.arpack"
+  },
+  "parameters": {
+    "p_cross": 0.9
+  },
+  "zones": [
     {
       "id": "zone_1786409515324",
       "shape": "polygon",
@@ -89,10 +96,9 @@
         ]
       },
       "alt_min_m": 0,
-      "alt_max_m": 12000
-    }
-  ],
-  "restricted_zones": [
+      "alt_max_m": 12000,
+      "zone_type": "no_fly"
+    },
     {
       "id": "rz_1786409547965",
       "shape": "circle",
@@ -104,7 +110,8 @@
         "radius_km": 100
       },
       "alt_min_m": 3000,
-      "alt_max_m": 6000
+      "alt_max_m": 6000,
+      "zone_type": "restricted"
     },
     {
       "id": "rz_1786409606028",
@@ -117,15 +124,8 @@
         "radius_km": 100
       },
       "alt_min_m": 2000,
-      "alt_max_m": 6000
+      "alt_max_m": 6000,
+      "zone_type": "restricted"
     }
-  ],
-  "obstacles": [],
-  "terrain": {
-    "source": "path",
-    "path": "data/east_asia_7p5as.arpack"
-  },
-  "parameters": {
-    "p_cross": 0.9
-  }
+  ]
 }

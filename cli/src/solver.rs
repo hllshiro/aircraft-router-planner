@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use crate::config::{
-    Input, Output, PathPoint, Stats, TerrainSourceType, AircraftOutput, Zone, ZoneShape,
+    Input, Output, PathPoint, Stats, TerrainSourceType, AircraftOutput, Zone, ZoneShape, ZoneType,
     point_in_polygon_xy, pt_seg_dist_km, zone_contains, zone_contains_at,
 };
 use crate::coord::Geo;
@@ -261,8 +261,9 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
         })
         .collect();
     let restricted_wall_zs: Vec<&Zone> = input
-        .restricted_zones
+        .zones
         .iter()
+        .filter(|z| z.zone_type == ZoneType::Restricted)
         .filter(|z| {
             specs.iter().zip(&spec_climb).any(|(s, (mcd, ceil))| {
                 restricted_blocks_alt(z, s.alt_m)
@@ -281,9 +282,8 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
         })
         .collect();
     let wall_zones = input
-        .no_fly_zones
+        .zones
         .iter()
-        .chain(input.obstacles.iter())
         .filter(|z| z.is_wall())
         .chain(restricted_wall_zs.iter().copied());
     let region = expand_region_for_walls(base_region, wall_zones, REGION_PAD_DEG);
@@ -305,10 +305,8 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
     // 也不变粗（无锯齿/贴墙 clearance 风险）。
     let base_span_km = base_region.span_deg * 111.32;
     let has_poly_wall = input
-        .no_fly_zones
+        .zones
         .iter()
-        .chain(input.restricted_zones.iter())
-        .chain(input.obstacles.iter())
         .any(|z| z.is_wall() && matches!(z.shape, ZoneShape::Polygon { .. }));
     let target_cell = if has_poly_wall { 600.0 } else { 1100.0 };
     let auto_grid = if base_region.span_deg > 2.5 {
@@ -333,17 +331,11 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
         base_region.span_deg
     );
 
-    // 4. Zone 集合（no_fly + restricted + obstacles）
+    // 4. Zone 集合
     //    代价场墙策略（M2 高度层）：
     //    - NoFly/Obstacle → 全高度水平墙（代价场 INF）——保守禁入；
     //    - Restricted → 不画墙（高度区间外可穿越），由 Theta* check + verify 高度判定。
-    let all_zones: Vec<Zone> = input
-        .no_fly_zones
-        .iter()
-        .chain(input.restricted_zones.iter())
-        .chain(input.obstacles.iter())
-        .cloned()
-        .collect();
+    let all_zones: Vec<Zone> = input.zones.clone();
     let nofly = circle_index(&all_zones.iter().collect::<Vec<_>>());
 
     // 4b. 参数合并 + 禁飞区膨胀距离（主管 2026-08-06：绕飞太贴边→考虑飞机机动）。
@@ -1410,9 +1402,9 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                     if crate::patch::patch_enabled()
                         && crate::patch::patch_applicable(
                             &input
-                                .no_fly_zones
+                                .zones
                                 .iter()
-                                .chain(input.obstacles.iter())
+                                .filter(|z| z.is_wall())
                                 .cloned()
                                 .collect::<Vec<_>>(),
                             ctx.terrain.is_some(),
@@ -1426,22 +1418,24 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                         );
                         if !clusters.is_empty() && skeleton.len() >= 2 {
                             let wall_polys: Vec<&Zone> = input
-                                .no_fly_zones
+                                .zones
                                 .iter()
-                                .chain(input.obstacles.iter())
                                 .filter(|z| {
                                     z.is_wall() && matches!(z.shape, ZoneShape::Polygon { .. })
                                 })
                                 .collect();
                             let circle_walls: Vec<&Zone> = input
-                                .no_fly_zones
+                                .zones
                                 .iter()
-                                .chain(input.obstacles.iter())
                                 .filter(|z| {
                                     z.is_wall() && matches!(z.shape, ZoneShape::Circle { .. })
                                 })
                                 .collect();
-                            let restricted: Vec<&Zone> = input.restricted_zones.iter().collect();
+                            let restricted: Vec<&Zone> = input
+                                .zones
+                                .iter()
+                                .filter(|z| z.zone_type == ZoneType::Restricted)
+                                .collect();
                             let inflation_m = (opts.turn_radius_m * 0.5).clamp(2_000.0, 10_000.0);
                             let radar_opt = if input.red_forces.radars.is_empty() {
                                 None
@@ -4760,44 +4754,45 @@ mod tests {
         // P8 ③ 集成：目标贴禁飞区墙外侧 → 目标 cell 被膨胀墙覆盖（不可达）
         // → 目标半径放宽到墙外可达 cell（degradation 标注），不静默 no_solution。
         let s = r#"{
-            "aircraft": [
-                {
-                    "id": "v1",
-                    "profile": {
-                        "aircraft_type": "FIXED_WING",
-                        "cruise_speed_mps": 250
-                    },
-                    "start": {
-                        "lon": 115.0,
-                        "lat": 39.0,
-                        "alt_m": 3000
-                    },
-                    "target": {
-                        "lon": 116.53,
-                        "lat": 39.9,
-                        "alt_m": 3000
-                    }
-                }
-            ],
-            "no_fly_zones": [
-                {
-                    "id": "nf1",
-                    "shape": "circle",
-                    "geometry": {
-                        "center": [
-                            116.5,
-                            39.9
-                        ],
-                        "radius_km": 5
-                    },
-                    "alt_min_m": 0,
-                    "alt_max_m": 12000
-                }
-            ],
-            "terrain": {
-                "source": "none"
-            }
-        }"#;
+  "aircraft": [
+    {
+      "id": "v1",
+      "profile": {
+        "aircraft_type": "FIXED_WING",
+        "cruise_speed_mps": 250
+      },
+      "start": {
+        "lon": 115.0,
+        "lat": 39.0,
+        "alt_m": 3000
+      },
+      "target": {
+        "lon": 116.53,
+        "lat": 39.9,
+        "alt_m": 3000
+      }
+    }
+  ],
+  "terrain": {
+    "source": "none"
+  },
+  "zones": [
+    {
+      "id": "nf1",
+      "shape": "circle",
+      "geometry": {
+        "center": [
+          116.5,
+          39.9
+        ],
+        "radius_km": 5
+      },
+      "alt_min_m": 0,
+      "alt_max_m": 12000,
+      "zone_type": "no_fly"
+    }
+  ]
+}"#;
         let out = solve(&parse(s), &SolveParams::default(), 0).unwrap();
         assert_eq!(out.aircraft[0].status, "planned", "应放宽到达而非无解");
         let has_relax = out
@@ -4974,135 +4969,139 @@ mod tests {
         // → 粗层 FMM 无解 → 走廊细分（grid 翻倍重建代价场）重试 → 仍无解 →
         // no_solution + degradation 标注（细分触发可观测；不 panic、不假成功）。
         let s = r#"{
-            "aircraft": [
-                {
-                    "id": "v1",
-                    "profile": {
-                        "aircraft_type": "FIXED_WING",
-                        "cruise_speed_mps": 250
-                    },
-                    "start": {
-                        "lon": 114.5,
-                        "lat": 38.5,
-                        "alt_m": 3000
-                    },
-                    "target": {
-                        "lon": 116.5,
-                        "lat": 39.9,
-                        "alt_m": 3000
-                    }
-                }
-            ],
-            "no_fly_zones": [
-                {
-                    "id": "south",
-                    "shape": "polygon",
-                    "geometry": {
-                        "vertices": [
-                            [
-                                114.8,
-                                39.0
-                            ],
-                            [
-                                117.2,
-                                39.0
-                            ],
-                            [
-                                117.2,
-                                39.3
-                            ],
-                            [
-                                114.8,
-                                39.3
-                            ]
-                        ]
-                    },
-                    "alt_min_m": 0,
-                    "alt_max_m": 12000
-                },
-                {
-                    "id": "north",
-                    "shape": "polygon",
-                    "geometry": {
-                        "vertices": [
-                            [
-                                114.8,
-                                40.2
-                            ],
-                            [
-                                117.2,
-                                40.2
-                            ],
-                            [
-                                117.2,
-                                40.5
-                            ],
-                            [
-                                114.8,
-                                40.5
-                            ]
-                        ]
-                    },
-                    "alt_min_m": 0,
-                    "alt_max_m": 12000
-                },
-                {
-                    "id": "west",
-                    "shape": "polygon",
-                    "geometry": {
-                        "vertices": [
-                            [
-                                114.8,
-                                39.0
-                            ],
-                            [
-                                115.2,
-                                39.0
-                            ],
-                            [
-                                115.2,
-                                40.5
-                            ],
-                            [
-                                114.8,
-                                40.5
-                            ]
-                        ]
-                    },
-                    "alt_min_m": 0,
-                    "alt_max_m": 12000
-                },
-                {
-                    "id": "east",
-                    "shape": "polygon",
-                    "geometry": {
-                        "vertices": [
-                            [
-                                116.8,
-                                39.0
-                            ],
-                            [
-                                117.2,
-                                39.0
-                            ],
-                            [
-                                117.2,
-                                40.5
-                            ],
-                            [
-                                116.8,
-                                40.5
-                            ]
-                        ]
-                    },
-                    "alt_min_m": 0,
-                    "alt_max_m": 12000
-                }
-            ],
-            "terrain": {
-                "source": "none"
-            }
-        }"#;
+  "aircraft": [
+    {
+      "id": "v1",
+      "profile": {
+        "aircraft_type": "FIXED_WING",
+        "cruise_speed_mps": 250
+      },
+      "start": {
+        "lon": 114.5,
+        "lat": 38.5,
+        "alt_m": 3000
+      },
+      "target": {
+        "lon": 116.5,
+        "lat": 39.9,
+        "alt_m": 3000
+      }
+    }
+  ],
+  "terrain": {
+    "source": "none"
+  },
+  "zones": [
+    {
+      "id": "south",
+      "shape": "polygon",
+      "geometry": {
+        "vertices": [
+          [
+            114.8,
+            39.0
+          ],
+          [
+            117.2,
+            39.0
+          ],
+          [
+            117.2,
+            39.3
+          ],
+          [
+            114.8,
+            39.3
+          ]
+        ]
+      },
+      "alt_min_m": 0,
+      "alt_max_m": 12000,
+      "zone_type": "no_fly"
+    },
+    {
+      "id": "north",
+      "shape": "polygon",
+      "geometry": {
+        "vertices": [
+          [
+            114.8,
+            40.2
+          ],
+          [
+            117.2,
+            40.2
+          ],
+          [
+            117.2,
+            40.5
+          ],
+          [
+            114.8,
+            40.5
+          ]
+        ]
+      },
+      "alt_min_m": 0,
+      "alt_max_m": 12000,
+      "zone_type": "no_fly"
+    },
+    {
+      "id": "west",
+      "shape": "polygon",
+      "geometry": {
+        "vertices": [
+          [
+            114.8,
+            39.0
+          ],
+          [
+            115.2,
+            39.0
+          ],
+          [
+            115.2,
+            40.5
+          ],
+          [
+            114.8,
+            40.5
+          ]
+        ]
+      },
+      "alt_min_m": 0,
+      "alt_max_m": 12000,
+      "zone_type": "no_fly"
+    },
+    {
+      "id": "east",
+      "shape": "polygon",
+      "geometry": {
+        "vertices": [
+          [
+            116.8,
+            39.0
+          ],
+          [
+            117.2,
+            39.0
+          ],
+          [
+            117.2,
+            40.5
+          ],
+          [
+            116.8,
+            40.5
+          ]
+        ]
+      },
+      "alt_min_m": 0,
+      "alt_max_m": 12000,
+      "zone_type": "no_fly"
+    }
+  ]
+}"#;
         let out = solve(&parse(s), &SolveParams::default(), 0).unwrap();
         assert_eq!(out.aircraft[0].status, "no_solution", "封闭环应无解");
         let has_refine = out
@@ -5199,40 +5198,41 @@ mod tests {
     fn m1_no_solution_when_target_blocked() {
         // 目标被巨型禁飞区完全覆盖 → 回溯失败 → no_solution
         let s = r#"{
-            "aircraft": [
-                {
-                    "id": "v1",
-                    "start": {
-                        "lon": 115.0,
-                        "lat": 39.0,
-                        "alt_m": 3000
-                    },
-                    "target": {
-                        "lon": 116.5,
-                        "lat": 39.9,
-                        "alt_m": 3000
-                    }
-                }
-            ],
-            "no_fly_zones": [
-                {
-                    "id": "wall",
-                    "shape": "circle",
-                    "geometry": {
-                        "center": [
-                            116.5,
-                            39.9
-                        ],
-                        "radius_km": 30
-                    },
-                    "alt_min_m": 0,
-                    "alt_max_m": 10000
-                }
-            ],
-            "terrain": {
-                "source": "none"
-            }
-        }"#;
+  "aircraft": [
+    {
+      "id": "v1",
+      "start": {
+        "lon": 115.0,
+        "lat": 39.0,
+        "alt_m": 3000
+      },
+      "target": {
+        "lon": 116.5,
+        "lat": 39.9,
+        "alt_m": 3000
+      }
+    }
+  ],
+  "terrain": {
+    "source": "none"
+  },
+  "zones": [
+    {
+      "id": "wall",
+      "shape": "circle",
+      "geometry": {
+        "center": [
+          116.5,
+          39.9
+        ],
+        "radius_km": 30
+      },
+      "alt_min_m": 0,
+      "alt_max_m": 10000,
+      "zone_type": "no_fly"
+    }
+  ]
+}"#;
         let input = parse(s);
         let out = solve(&input, &SolveParams::default(), 0).unwrap();
         assert_eq!(out.aircraft[0].status, "no_solution");
@@ -5244,74 +5244,76 @@ mod tests {
         // FMM 贴膨胀墙走 → Theta* 拉直 clearance 差 ~1 格 → 全链失败回退 362 点锯齿。
         // 5c2 过渡带软罚后必须平滑（≤10 点且无 smoothing_failed）。
         let s = r#"{
-            "aircraft": [
-                {
-                    "id": "v1",
-                    "start": {
-                        "lon": 116.7188493150615,
-                        "lat": 40.20313810412108,
-                        "alt_m": 3000
-                    },
-                    "target": {
-                        "lon": 115.44547741980215,
-                        "lat": 38.63800678240428,
-                        "alt_m": 3000
-                    }
-                }
-            ],
-            "no_fly_zones": [
-                {
-                    "id": "c1",
-                    "shape": "circle",
-                    "geometry": {
-                        "center": [
-                            115.90510756361434,
-                            39.1546051011457
-                        ],
-                        "radius_km": 20
-                    },
-                    "alt_min_m": 0,
-                    "alt_max_m": 20000
-                },
-                {
-                    "id": "p1",
-                    "shape": "polygon",
-                    "geometry": {
-                        "vertices": [
-                            [
-                                116.10919779988855,
-                                39.40629934778061
-                            ],
-                            [
-                                116.66748158411933,
-                                39.2812425371292
-                            ],
-                            [
-                                116.63856029155627,
-                                39.72638339128002
-                            ],
-                            [
-                                116.21277919960414,
-                                39.78606996932337
-                            ],
-                            [
-                                115.82845032806537,
-                                39.89839427431206
-                            ],
-                            [
-                                115.56298632103817,
-                                39.63798773661437
-                            ]
-                        ]
-                    },
-                    "alt_min_m": 0,
-                    "alt_max_m": 20000
-                }
-            ],
-            "terrain": {
-                "source": "none"
-            }
-        }"#;
+  "aircraft": [
+    {
+      "id": "v1",
+      "start": {
+        "lon": 116.7188493150615,
+        "lat": 40.20313810412108,
+        "alt_m": 3000
+      },
+      "target": {
+        "lon": 115.44547741980215,
+        "lat": 38.63800678240428,
+        "alt_m": 3000
+      }
+    }
+  ],
+  "terrain": {
+    "source": "none"
+  },
+  "zones": [
+    {
+      "id": "c1",
+      "shape": "circle",
+      "geometry": {
+        "center": [
+          115.90510756361434,
+          39.1546051011457
+        ],
+        "radius_km": 20
+      },
+      "alt_min_m": 0,
+      "alt_max_m": 20000,
+      "zone_type": "no_fly"
+    },
+    {
+      "id": "p1",
+      "shape": "polygon",
+      "geometry": {
+        "vertices": [
+          [
+            116.10919779988855,
+            39.40629934778061
+          ],
+          [
+            116.66748158411933,
+            39.2812425371292
+          ],
+          [
+            116.63856029155627,
+            39.72638339128002
+          ],
+          [
+            116.21277919960414,
+            39.78606996932337
+          ],
+          [
+            115.82845032806537,
+            39.89839427431206
+          ],
+          [
+            115.56298632103817,
+            39.63798773661437
+          ]
+        ]
+      },
+      "alt_min_m": 0,
+      "alt_max_m": 20000,
+      "zone_type": "no_fly"
+    }
+  ]
+}"#;
         let input = parse(s);
         let out = solve(&input, &SolveParams::default(), 42).unwrap();
         let v = &out.aircraft[0];
@@ -5551,7 +5553,7 @@ mod tests {
                           "target":{{"lon":115.28680713092322,"lat":39.04668499383146,"alt_m":{alt}}}}}
                     ],
                     "terrain":{{"source":"none"}},
-                    "restricted_zones":[{{"id":"rz","shape":"circle",
+                    "zones":[{{"id":"rz","zone_type":"restricted","shape":"circle",
                         "geometry":{{"center":[116.14959340327005,39.597263409766285],"radius_km":20}},
                         "alt_min_m":2000,"alt_max_m":5000}}]
                 }}"#
@@ -5775,49 +5777,50 @@ mod tests {
         // 三角形挡在 start→target 直线上，巡航 3000m 在区间内 → 底部 1500m 剖面直穿
         //（desc→1500 平飞→climb），不水平绕行、不回退密集锯齿。
         let s = r#"{
-            "aircraft": [
-                {
-                    "id": "v1",
-                    "start": {
-                        "lon": 117.56330714245705,
-                        "lat": 38.98919664864976,
-                        "alt_m": 3000
-                    },
-                    "target": {
-                        "lon": 115.0643644570711,
-                        "lat": 41.16789261835432,
-                        "alt_m": 3000
-                    }
-                }
-            ],
-            "restricted_zones": [
-                {
-                    "id": "rzp",
-                    "shape": "polygon",
-                    "geometry": {
-                        "vertices": [
-                            [
-                                116.90767296501929,
-                                40.99465146600213
-                            ],
-                            [
-                                115.36066171773774,
-                                40.05644513239613
-                            ],
-                            [
-                                116.34715136271842,
-                                40.336691478802884
-                            ]
-                        ]
-                    },
-                    "alt_min_m": 2000,
-                    "alt_max_m": 6000
-                }
-            ],
-            "terrain": {
-                "source": "none"
-            }
-        }"#;
+  "aircraft": [
+    {
+      "id": "v1",
+      "start": {
+        "lon": 117.56330714245705,
+        "lat": 38.98919664864976,
+        "alt_m": 3000
+      },
+      "target": {
+        "lon": 115.0643644570711,
+        "lat": 41.16789261835432,
+        "alt_m": 3000
+      }
+    }
+  ],
+  "terrain": {
+    "source": "none"
+  },
+  "zones": [
+    {
+      "id": "rzp",
+      "shape": "polygon",
+      "geometry": {
+        "vertices": [
+          [
+            116.90767296501929,
+            40.99465146600213
+          ],
+          [
+            115.36066171773774,
+            40.05644513239613
+          ],
+          [
+            116.34715136271842,
+            40.336691478802884
+          ]
+        ]
+      },
+      "alt_min_m": 2000,
+      "alt_max_m": 6000,
+      "zone_type": "restricted"
+    }
+  ]
+}"#;
         let input = parse(s);
         let out = solve(&input, &SolveParams::default(), 42).unwrap();
         let v = &out.aircraft[0];
@@ -5850,49 +5853,50 @@ mod tests {
         // 多边形 restricted [0,6000]msl：底部 -500 负高不可行 → 顶部 6500m 绕飞剖面
         //（多边形内部 6500m 平飞，高于区间上界 6000）。
         let s = r#"{
-            "aircraft": [
-                {
-                    "id": "v1",
-                    "start": {
-                        "lon": 117.56330714245705,
-                        "lat": 38.98919664864976,
-                        "alt_m": 3000
-                    },
-                    "target": {
-                        "lon": 115.0643644570711,
-                        "lat": 41.16789261835432,
-                        "alt_m": 3000
-                    }
-                }
-            ],
-            "restricted_zones": [
-                {
-                    "id": "rzp",
-                    "shape": "polygon",
-                    "geometry": {
-                        "vertices": [
-                            [
-                                116.90767296501929,
-                                40.99465146600213
-                            ],
-                            [
-                                115.36066171773774,
-                                40.05644513239613
-                            ],
-                            [
-                                116.34715136271842,
-                                40.336691478802884
-                            ]
-                        ]
-                    },
-                    "alt_min_m": 0,
-                    "alt_max_m": 6000
-                }
-            ],
-            "terrain": {
-                "source": "none"
-            }
-        }"#;
+  "aircraft": [
+    {
+      "id": "v1",
+      "start": {
+        "lon": 117.56330714245705,
+        "lat": 38.98919664864976,
+        "alt_m": 3000
+      },
+      "target": {
+        "lon": 115.0643644570711,
+        "lat": 41.16789261835432,
+        "alt_m": 3000
+      }
+    }
+  ],
+  "terrain": {
+    "source": "none"
+  },
+  "zones": [
+    {
+      "id": "rzp",
+      "shape": "polygon",
+      "geometry": {
+        "vertices": [
+          [
+            116.90767296501929,
+            40.99465146600213
+          ],
+          [
+            115.36066171773774,
+            40.05644513239613
+          ],
+          [
+            116.34715136271842,
+            40.336691478802884
+          ]
+        ]
+      },
+      "alt_min_m": 0,
+      "alt_max_m": 6000,
+      "zone_type": "restricted"
+    }
+  ]
+}"#;
         let input = parse(s);
         let out = solve(&input, &SolveParams::default(), 42).unwrap();
         let v = &out.aircraft[0];
@@ -5990,40 +5994,41 @@ mod tests {
     fn m1_detours_around_zone() {
         // 挡路禁飞区（圆心在中点）→ 路径绕行（折线长度 > 直线）
         let s = r#"{
-            "aircraft": [
-                {
-                    "id": "v1",
-                    "start": {
-                        "lon": 115.0,
-                        "lat": 39.0,
-                        "alt_m": 3000
-                    },
-                    "target": {
-                        "lon": 116.5,
-                        "lat": 39.9,
-                        "alt_m": 3000
-                    }
-                }
-            ],
-            "no_fly_zones": [
-                {
-                    "id": "mid",
-                    "shape": "circle",
-                    "geometry": {
-                        "center": [
-                            115.75,
-                            39.45
-                        ],
-                        "radius_km": 25
-                    },
-                    "alt_min_m": 0,
-                    "alt_max_m": 10000
-                }
-            ],
-            "terrain": {
-                "source": "none"
-            }
-        }"#;
+  "aircraft": [
+    {
+      "id": "v1",
+      "start": {
+        "lon": 115.0,
+        "lat": 39.0,
+        "alt_m": 3000
+      },
+      "target": {
+        "lon": 116.5,
+        "lat": 39.9,
+        "alt_m": 3000
+      }
+    }
+  ],
+  "terrain": {
+    "source": "none"
+  },
+  "zones": [
+    {
+      "id": "mid",
+      "shape": "circle",
+      "geometry": {
+        "center": [
+          115.75,
+          39.45
+        ],
+        "radius_km": 25
+      },
+      "alt_min_m": 0,
+      "alt_max_m": 10000,
+      "zone_type": "no_fly"
+    }
+  ]
+}"#;
         let input = parse(s);
         let out = solve(&input, &SolveParams::default(), 0).unwrap();
         assert_eq!(out.aircraft[0].status, "planned");
@@ -6036,40 +6041,41 @@ mod tests {
     fn m2_restricted_band_does_not_wall() {
         // Restricted 高度层 [0, 2000]m：巡航 3000m 在区间外 → 可穿越（直达，不绕行）
         let s = r#"{
-            "aircraft": [
-                {
-                    "id": "v1",
-                    "start": {
-                        "lon": 115.0,
-                        "lat": 39.0,
-                        "alt_m": 3000
-                    },
-                    "target": {
-                        "lon": 116.5,
-                        "lat": 39.9,
-                        "alt_m": 3000
-                    }
-                }
-            ],
-            "restricted_zones": [
-                {
-                    "id": "band",
-                    "shape": "circle",
-                    "geometry": {
-                        "center": [
-                            115.75,
-                            39.45
-                        ],
-                        "radius_km": 25
-                    },
-                    "alt_min_m": 0,
-                    "alt_max_m": 2000
-                }
-            ],
-            "terrain": {
-                "source": "none"
-            }
-        }"#;
+  "aircraft": [
+    {
+      "id": "v1",
+      "start": {
+        "lon": 115.0,
+        "lat": 39.0,
+        "alt_m": 3000
+      },
+      "target": {
+        "lon": 116.5,
+        "lat": 39.9,
+        "alt_m": 3000
+      }
+    }
+  ],
+  "terrain": {
+    "source": "none"
+  },
+  "zones": [
+    {
+      "id": "band",
+      "shape": "circle",
+      "geometry": {
+        "center": [
+          115.75,
+          39.45
+        ],
+        "radius_km": 25
+      },
+      "alt_min_m": 0,
+      "alt_max_m": 2000,
+      "zone_type": "restricted"
+    }
+  ]
+}"#;
         let input = parse(s);
         let out = solve(&input, &SolveParams::default(), 0).unwrap();
         assert_eq!(out.aircraft[0].status, "planned");
@@ -6082,40 +6088,41 @@ mod tests {
     fn m2_nofly_wall_blocks_regardless_of_altitude() {
         // NoFly 同位置：全高度墙 → 绕行（距离显著大于直线）
         let s = r#"{
-            "aircraft": [
-                {
-                    "id": "v1",
-                    "start": {
-                        "lon": 115.0,
-                        "lat": 39.0,
-                        "alt_m": 3000
-                    },
-                    "target": {
-                        "lon": 116.5,
-                        "lat": 39.9,
-                        "alt_m": 3000
-                    }
-                }
-            ],
-            "no_fly_zones": [
-                {
-                    "id": "wall",
-                    "shape": "circle",
-                    "geometry": {
-                        "center": [
-                            115.75,
-                            39.45
-                        ],
-                        "radius_km": 25
-                    },
-                    "alt_min_m": 0,
-                    "alt_max_m": 2000
-                }
-            ],
-            "terrain": {
-                "source": "none"
-            }
-        }"#;
+  "aircraft": [
+    {
+      "id": "v1",
+      "start": {
+        "lon": 115.0,
+        "lat": 39.0,
+        "alt_m": 3000
+      },
+      "target": {
+        "lon": 116.5,
+        "lat": 39.9,
+        "alt_m": 3000
+      }
+    }
+  ],
+  "terrain": {
+    "source": "none"
+  },
+  "zones": [
+    {
+      "id": "wall",
+      "shape": "circle",
+      "geometry": {
+        "center": [
+          115.75,
+          39.45
+        ],
+        "radius_km": 25
+      },
+      "alt_min_m": 0,
+      "alt_max_m": 2000,
+      "zone_type": "no_fly"
+    }
+  ]
+}"#;
         let input = parse(s);
         let out = solve(&input, &SolveParams::default(), 0).unwrap();
         assert_eq!(out.aircraft[0].status, "planned");
@@ -6690,177 +6697,181 @@ mod tests {
             return;
         }
         let s = r#"{
-            "aircraft": [
-                {
-                    "id": "v1",
-                    "profile": {
-                        "aircraft_type": "FIXED_WING",
-                        "cruise_speed_mps": 250,
-                        "min_turn_radius_m": 442,
-                        "max_climb_angle_deg": 15
-                    },
-                    "start": {
-                        "lon": 126.56263413053458,
-                        "lat": 30.32884201287228,
-                        "alt_m": 3000
-                    },
-                    "target": {
-                        "lon": 106.37660123285819,
-                        "lat": 51.14912421163358,
-                        "alt_m": 3000
-                    },
-                    "mid_waypoints": []
-                }
-            ],
-            "red_forces": {
-                "radars": [
-                    {
-                        "id": "radar_1786151025411",
-                        "lon": 113.98758157631866,
-                        "lat": 40.493383922561435,
-                        "radius_km": 100,
-                        "alt_m": 10
-                    },
-                    {
-                        "id": "radar_1786151487443",
-                        "lon": 109.16900472287948,
-                        "lat": 46.82742249911229,
-                        "radius_km": 100,
-                        "alt_m": 10
-                    }
-                ]
-            },
-            "no_fly_zones": [
-                {
-                    "id": "zone_1786150842284",
-                    "shape": "polygon",
-                    "geometry": {
-                        "vertices": [
-                            [
-                                114.40468979438141,
-                                42.65722021983792
-                            ],
-                            [
-                                110.62088557896168,
-                                38.988188308928834
-                            ],
-                            [
-                                112.81262578575785,
-                                39.7164462210201
-                            ]
-                        ]
-                    },
-                    "alt_min_m": 0,
-                    "alt_max_m": 12000
-                },
-                {
-                    "id": "zone_1786150865059",
-                    "shape": "polygon",
-                    "geometry": {
-                        "vertices": [
-                            [
-                                118.0683305776591,
-                                44.76739249108195
-                            ],
-                            [
-                                114.57960742739121,
-                                41.61506064153377
-                            ],
-                            [
-                                117.27464739502655,
-                                42.648718862161275
-                            ]
-                        ]
-                    },
-                    "alt_min_m": 0,
-                    "alt_max_m": 12000
-                },
-                {
-                    "id": "zone_1786150891051",
-                    "shape": "polygon",
-                    "geometry": {
-                        "vertices": [
-                            [
-                                117.0676237684419,
-                                46.341013239879814
-                            ],
-                            [
-                                113.7376472130683,
-                                43.26605614623792
-                            ],
-                            [
-                                116.16387600630392,
-                                43.34838640726238
-                            ]
-                        ]
-                    },
-                    "alt_min_m": 0,
-                    "alt_max_m": 12000
-                },
-                {
-                    "id": "zone_1786151204171",
-                    "shape": "circle",
-                    "geometry": {
-                        "center": [
-                            111.525601573293,
-                            45.97116185501782
-                        ],
-                        "radius_km": 50
-                    },
-                    "alt_min_m": 0,
-                    "alt_max_m": 12000
-                },
-                {
-                    "id": "zone_1786151327667",
-                    "shape": "circle",
-                    "geometry": {
-                        "center": [
-                            107.23020272260999,
-                            49.498587971424286
-                        ],
-                        "radius_km": 100
-                    },
-                    "alt_min_m": 0,
-                    "alt_max_m": 12000
-                }
-            ],
-            "restricted_zones": [
-                {
-                    "id": "rz_1786150991459",
-                    "shape": "circle",
-                    "geometry": {
-                        "center": [
-                            115.86408593793746,
-                            40.956574434371106
-                        ],
-                        "radius_km": 100
-                    },
-                    "alt_min_m": 0,
-                    "alt_max_m": 6000
-                },
-                {
-                    "id": "rz_1786151584275",
-                    "shape": "circle",
-                    "geometry": {
-                        "center": [
-                            113.31470106587476,
-                            42.70043214171731
-                        ],
-                        "radius_km": 100
-                    },
-                    "alt_min_m": 2000,
-                    "alt_max_m": 8000
-                }
-            ],
-            "obstacles": [],
-            "terrain": {
-                "source": "path",
-                "path": "__P__"
-            },
-            "parameters": {
-                "p_cross": 0.9
-            }
-        }"#;
+  "aircraft": [
+    {
+      "id": "v1",
+      "profile": {
+        "aircraft_type": "FIXED_WING",
+        "cruise_speed_mps": 250,
+        "min_turn_radius_m": 442,
+        "max_climb_angle_deg": 15
+      },
+      "start": {
+        "lon": 126.56263413053458,
+        "lat": 30.32884201287228,
+        "alt_m": 3000
+      },
+      "target": {
+        "lon": 106.37660123285819,
+        "lat": 51.14912421163358,
+        "alt_m": 3000
+      },
+      "mid_waypoints": []
+    }
+  ],
+  "red_forces": {
+    "radars": [
+      {
+        "id": "radar_1786151025411",
+        "lon": 113.98758157631866,
+        "lat": 40.493383922561435,
+        "radius_km": 100,
+        "alt_m": 10
+      },
+      {
+        "id": "radar_1786151487443",
+        "lon": 109.16900472287948,
+        "lat": 46.82742249911229,
+        "radius_km": 100,
+        "alt_m": 10
+      }
+    ]
+  },
+  "terrain": {
+    "source": "path",
+    "path": "__P__"
+  },
+  "parameters": {
+    "p_cross": 0.9
+  },
+  "zones": [
+    {
+      "id": "zone_1786150842284",
+      "shape": "polygon",
+      "geometry": {
+        "vertices": [
+          [
+            114.40468979438141,
+            42.65722021983792
+          ],
+          [
+            110.62088557896168,
+            38.988188308928834
+          ],
+          [
+            112.81262578575785,
+            39.7164462210201
+          ]
+        ]
+      },
+      "alt_min_m": 0,
+      "alt_max_m": 12000,
+      "zone_type": "no_fly"
+    },
+    {
+      "id": "zone_1786150865059",
+      "shape": "polygon",
+      "geometry": {
+        "vertices": [
+          [
+            118.0683305776591,
+            44.76739249108195
+          ],
+          [
+            114.57960742739121,
+            41.61506064153377
+          ],
+          [
+            117.27464739502655,
+            42.648718862161275
+          ]
+        ]
+      },
+      "alt_min_m": 0,
+      "alt_max_m": 12000,
+      "zone_type": "no_fly"
+    },
+    {
+      "id": "zone_1786150891051",
+      "shape": "polygon",
+      "geometry": {
+        "vertices": [
+          [
+            117.0676237684419,
+            46.341013239879814
+          ],
+          [
+            113.7376472130683,
+            43.26605614623792
+          ],
+          [
+            116.16387600630392,
+            43.34838640726238
+          ]
+        ]
+      },
+      "alt_min_m": 0,
+      "alt_max_m": 12000,
+      "zone_type": "no_fly"
+    },
+    {
+      "id": "zone_1786151204171",
+      "shape": "circle",
+      "geometry": {
+        "center": [
+          111.525601573293,
+          45.97116185501782
+        ],
+        "radius_km": 50
+      },
+      "alt_min_m": 0,
+      "alt_max_m": 12000,
+      "zone_type": "no_fly"
+    },
+    {
+      "id": "zone_1786151327667",
+      "shape": "circle",
+      "geometry": {
+        "center": [
+          107.23020272260999,
+          49.498587971424286
+        ],
+        "radius_km": 100
+      },
+      "alt_min_m": 0,
+      "alt_max_m": 12000,
+      "zone_type": "no_fly"
+    },
+    {
+      "id": "rz_1786150991459",
+      "shape": "circle",
+      "geometry": {
+        "center": [
+          115.86408593793746,
+          40.956574434371106
+        ],
+        "radius_km": 100
+      },
+      "alt_min_m": 0,
+      "alt_max_m": 6000,
+      "zone_type": "restricted"
+    },
+    {
+      "id": "rz_1786151584275",
+      "shape": "circle",
+      "geometry": {
+        "center": [
+          113.31470106587476,
+          42.70043214171731
+        ],
+        "radius_km": 100
+      },
+      "alt_min_m": 2000,
+      "alt_max_m": 8000,
+      "zone_type": "restricted"
+    }
+  ]
+}"#;
         let s = s.replace("__P__", &cand.to_string_lossy().replace('\\', "\\\\"));
         let input = parse(&s);
         let out = solve(&input, &SolveParams::default(), 0).unwrap();
@@ -6909,155 +6920,157 @@ mod tests {
             return;
         }
         let s = r#"{
-            "aircraft": [
-                {
-                    "id": "v1",
-                    "profile": {
-                        "aircraft_type": "FIXED_WING",
-                        "cruise_speed_mps": 250,
-                        "min_turn_radius_m": 442,
-                        "max_climb_angle_deg": 15
-                    },
-                    "start": {
-                        "lon": 122.9207839850354,
-                        "lat": 34.08860812240517,
-                        "alt_m": 3000
-                    },
-                    "target": {
-                        "lon": 112.42397536890363,
-                        "lat": 44.77935701405758,
-                        "alt_m": 3000
-                    },
-                    "mid_waypoints": []
-                }
-            ],
-            "red_forces": {
-                "radars": [
-                    {
-                        "id": "radar_1786161064845",
-                        "lon": 112.831513368294,
-                        "lat": 43.96813072477223,
-                        "radius_km": 50,
-                        "alt_m": 10
-                    },
-                    {
-                        "id": "radar_1786161114205",
-                        "lon": 113.3041431982615,
-                        "lat": 41.11010411517771,
-                        "radius_km": 50,
-                        "alt_m": 10
-                    }
-                ]
-            },
-            "no_fly_zones": [
-                {
-                    "id": "zone_1786160882933",
-                    "shape": "polygon",
-                    "geometry": {
-                        "vertices": [
-                            [
-                                115.8706565717089,
-                                39.78344941000123
-                            ],
-                            [
-                                114.7159667887149,
-                                38.93519569445941
-                            ],
-                            [
-                                115.2867088987491,
-                                39.07797084088842
-                            ]
-                        ]
-                    },
-                    "alt_min_m": 0,
-                    "alt_max_m": 12000
-                },
-                {
-                    "id": "zone_1786160896845",
-                    "shape": "polygon",
-                    "geometry": {
-                        "vertices": [
-                            [
-                                118.18296859187262,
-                                39.84855590795146
-                            ],
-                            [
-                                116.61186105129381,
-                                38.74876499516125
-                            ],
-                            [
-                                117.56074185629024,
-                                38.71484400273334
-                            ]
-                        ]
-                    },
-                    "alt_min_m": 0,
-                    "alt_max_m": 12000
-                },
-                {
-                    "id": "zone_1786160926653",
-                    "shape": "polygon",
-                    "geometry": {
-                        "vertices": [
-                            [
-                                115.2637148745787,
-                                42.16339247467029
-                            ],
-                            [
-                                113.72404261848064,
-                                41.18665997544362
-                            ],
-                            [
-                                114.42958291361323,
-                                41.129943488801175
-                            ],
-                            [
-                                115.10906620487548,
-                                41.58646379784794
-                            ]
-                        ]
-                    },
-                    "alt_min_m": 0,
-                    "alt_max_m": 12000
-                }
-            ],
-            "restricted_zones": [
-                {
-                    "id": "rz_1786160994133",
-                    "shape": "circle",
-                    "geometry": {
-                        "center": [
-                            115.55242377844469,
-                            39.53680791293585
-                        ],
-                        "radius_km": 50
-                    },
-                    "alt_min_m": 1000,
-                    "alt_max_m": 4000
-                },
-                {
-                    "id": "rz_1786161169725",
-                    "shape": "circle",
-                    "geometry": {
-                        "center": [
-                            116.3037514968375,
-                            38.447119717716134
-                        ],
-                        "radius_km": 100
-                    },
-                    "alt_min_m": 500,
-                    "alt_max_m": 4500
-                }
-            ],
-            "obstacles": [],
-            "terrain": {
-                "source": "path",
-                "path": "__P__"
-            },
-            "parameters": {
-                "p_cross": 0.9
-            }
-        }"#;
+  "aircraft": [
+    {
+      "id": "v1",
+      "profile": {
+        "aircraft_type": "FIXED_WING",
+        "cruise_speed_mps": 250,
+        "min_turn_radius_m": 442,
+        "max_climb_angle_deg": 15
+      },
+      "start": {
+        "lon": 122.9207839850354,
+        "lat": 34.08860812240517,
+        "alt_m": 3000
+      },
+      "target": {
+        "lon": 112.42397536890363,
+        "lat": 44.77935701405758,
+        "alt_m": 3000
+      },
+      "mid_waypoints": []
+    }
+  ],
+  "red_forces": {
+    "radars": [
+      {
+        "id": "radar_1786161064845",
+        "lon": 112.831513368294,
+        "lat": 43.96813072477223,
+        "radius_km": 50,
+        "alt_m": 10
+      },
+      {
+        "id": "radar_1786161114205",
+        "lon": 113.3041431982615,
+        "lat": 41.11010411517771,
+        "radius_km": 50,
+        "alt_m": 10
+      }
+    ]
+  },
+  "terrain": {
+    "source": "path",
+    "path": "__P__"
+  },
+  "parameters": {
+    "p_cross": 0.9
+  },
+  "zones": [
+    {
+      "id": "zone_1786160882933",
+      "shape": "polygon",
+      "geometry": {
+        "vertices": [
+          [
+            115.8706565717089,
+            39.78344941000123
+          ],
+          [
+            114.7159667887149,
+            38.93519569445941
+          ],
+          [
+            115.2867088987491,
+            39.07797084088842
+          ]
+        ]
+      },
+      "alt_min_m": 0,
+      "alt_max_m": 12000,
+      "zone_type": "no_fly"
+    },
+    {
+      "id": "zone_1786160896845",
+      "shape": "polygon",
+      "geometry": {
+        "vertices": [
+          [
+            118.18296859187262,
+            39.84855590795146
+          ],
+          [
+            116.61186105129381,
+            38.74876499516125
+          ],
+          [
+            117.56074185629024,
+            38.71484400273334
+          ]
+        ]
+      },
+      "alt_min_m": 0,
+      "alt_max_m": 12000,
+      "zone_type": "no_fly"
+    },
+    {
+      "id": "zone_1786160926653",
+      "shape": "polygon",
+      "geometry": {
+        "vertices": [
+          [
+            115.2637148745787,
+            42.16339247467029
+          ],
+          [
+            113.72404261848064,
+            41.18665997544362
+          ],
+          [
+            114.42958291361323,
+            41.129943488801175
+          ],
+          [
+            115.10906620487548,
+            41.58646379784794
+          ]
+        ]
+      },
+      "alt_min_m": 0,
+      "alt_max_m": 12000,
+      "zone_type": "no_fly"
+    },
+    {
+      "id": "rz_1786160994133",
+      "shape": "circle",
+      "geometry": {
+        "center": [
+          115.55242377844469,
+          39.53680791293585
+        ],
+        "radius_km": 50
+      },
+      "alt_min_m": 1000,
+      "alt_max_m": 4000,
+      "zone_type": "restricted"
+    },
+    {
+      "id": "rz_1786161169725",
+      "shape": "circle",
+      "geometry": {
+        "center": [
+          116.3037514968375,
+          38.447119717716134
+        ],
+        "radius_km": 100
+      },
+      "alt_min_m": 500,
+      "alt_max_m": 4500,
+      "zone_type": "restricted"
+    }
+  ]
+}"#;
         let s = s.replace("__P__", &cand.to_string_lossy().replace('\\', "\\\\"));
         let input = parse(&s);
         let out = solve(&input, &SolveParams::default(), 0).unwrap();
@@ -7080,7 +7093,7 @@ mod tests {
         );
         // 交付路径不得穿 restricted 高度带（verify 圆判定 slack 修复）：
         // 全 3000m 平飞绕行 → 圆内采样点高度都不在 [alt_min, alt_max] 带内
-        for z in &input.restricted_zones {
+        for z in input.zones.iter().filter(|z| z.zone_type == ZoneType::Restricted) {
             let crate::config::ZoneShape::Circle { center, radius_km } = z.shape else {
                 continue;
             };
@@ -7125,155 +7138,157 @@ mod tests {
             return;
         }
         let s = r#"{
-            "aircraft": [
-                {
-                    "id": "v1",
-                    "profile": {
-                        "aircraft_type": "FIXED_WING",
-                        "cruise_speed_mps": 250,
-                        "min_turn_radius_m": 442,
-                        "max_climb_angle_deg": 15
-                    },
-                    "start": {
-                        "lon": 122.9207839850354,
-                        "lat": 34.08860812240517,
-                        "alt_m": 3000
-                    },
-                    "target": {
-                        "lon": 112.42397536890363,
-                        "lat": 44.77935701405758,
-                        "alt_m": 3000
-                    },
-                    "mid_waypoints": []
-                }
-            ],
-            "red_forces": {
-                "radars": [
-                    {
-                        "id": "radar_1786161064845",
-                        "lon": 112.831513368294,
-                        "lat": 43.96813072477223,
-                        "radius_km": 50,
-                        "alt_m": 10
-                    },
-                    {
-                        "id": "radar_1786161114205",
-                        "lon": 113.3041431982615,
-                        "lat": 41.11010411517771,
-                        "radius_km": 50,
-                        "alt_m": 10
-                    }
-                ]
-            },
-            "no_fly_zones": [
-                {
-                    "id": "zone_1786160882933",
-                    "shape": "polygon",
-                    "geometry": {
-                        "vertices": [
-                            [
-                                115.8706565717089,
-                                39.78344941000123
-                            ],
-                            [
-                                114.7159667887149,
-                                38.93519569445941
-                            ],
-                            [
-                                115.2867088987491,
-                                39.07797084088842
-                            ]
-                        ]
-                    },
-                    "alt_min_m": 0,
-                    "alt_max_m": 12000
-                },
-                {
-                    "id": "zone_1786160896845",
-                    "shape": "polygon",
-                    "geometry": {
-                        "vertices": [
-                            [
-                                118.18296859187262,
-                                39.84855590795146
-                            ],
-                            [
-                                116.61186105129381,
-                                38.74876499516125
-                            ],
-                            [
-                                117.56074185629024,
-                                38.71484400273334
-                            ]
-                        ]
-                    },
-                    "alt_min_m": 0,
-                    "alt_max_m": 12000
-                },
-                {
-                    "id": "zone_1786160926653",
-                    "shape": "polygon",
-                    "geometry": {
-                        "vertices": [
-                            [
-                                115.2637148745787,
-                                42.16339247467029
-                            ],
-                            [
-                                113.72404261848064,
-                                41.18665997544362
-                            ],
-                            [
-                                114.42958291361323,
-                                41.129943488801175
-                            ],
-                            [
-                                115.10906620487548,
-                                41.58646379784794
-                            ]
-                        ]
-                    },
-                    "alt_min_m": 0,
-                    "alt_max_m": 12000
-                }
-            ],
-            "restricted_zones": [
-                {
-                    "id": "rz_1786160994133",
-                    "shape": "circle",
-                    "geometry": {
-                        "center": [
-                            115.55242377844469,
-                            39.53680791293585
-                        ],
-                        "radius_km": 50
-                    },
-                    "alt_min_m": 1000,
-                    "alt_max_m": 4000
-                },
-                {
-                    "id": "rz_1786161169725",
-                    "shape": "circle",
-                    "geometry": {
-                        "center": [
-                            116.04433455541918,
-                            38.19552566014898
-                        ],
-                        "radius_km": 100
-                    },
-                    "alt_min_m": 500,
-                    "alt_max_m": 4500
-                }
-            ],
-            "obstacles": [],
-            "terrain": {
-                "source": "path",
-                "path": "__P__"
-            },
-            "parameters": {
-                "p_cross": 0.9
-            }
-        }"#;
+  "aircraft": [
+    {
+      "id": "v1",
+      "profile": {
+        "aircraft_type": "FIXED_WING",
+        "cruise_speed_mps": 250,
+        "min_turn_radius_m": 442,
+        "max_climb_angle_deg": 15
+      },
+      "start": {
+        "lon": 122.9207839850354,
+        "lat": 34.08860812240517,
+        "alt_m": 3000
+      },
+      "target": {
+        "lon": 112.42397536890363,
+        "lat": 44.77935701405758,
+        "alt_m": 3000
+      },
+      "mid_waypoints": []
+    }
+  ],
+  "red_forces": {
+    "radars": [
+      {
+        "id": "radar_1786161064845",
+        "lon": 112.831513368294,
+        "lat": 43.96813072477223,
+        "radius_km": 50,
+        "alt_m": 10
+      },
+      {
+        "id": "radar_1786161114205",
+        "lon": 113.3041431982615,
+        "lat": 41.11010411517771,
+        "radius_km": 50,
+        "alt_m": 10
+      }
+    ]
+  },
+  "terrain": {
+    "source": "path",
+    "path": "__P__"
+  },
+  "parameters": {
+    "p_cross": 0.9
+  },
+  "zones": [
+    {
+      "id": "zone_1786160882933",
+      "shape": "polygon",
+      "geometry": {
+        "vertices": [
+          [
+            115.8706565717089,
+            39.78344941000123
+          ],
+          [
+            114.7159667887149,
+            38.93519569445941
+          ],
+          [
+            115.2867088987491,
+            39.07797084088842
+          ]
+        ]
+      },
+      "alt_min_m": 0,
+      "alt_max_m": 12000,
+      "zone_type": "no_fly"
+    },
+    {
+      "id": "zone_1786160896845",
+      "shape": "polygon",
+      "geometry": {
+        "vertices": [
+          [
+            118.18296859187262,
+            39.84855590795146
+          ],
+          [
+            116.61186105129381,
+            38.74876499516125
+          ],
+          [
+            117.56074185629024,
+            38.71484400273334
+          ]
+        ]
+      },
+      "alt_min_m": 0,
+      "alt_max_m": 12000,
+      "zone_type": "no_fly"
+    },
+    {
+      "id": "zone_1786160926653",
+      "shape": "polygon",
+      "geometry": {
+        "vertices": [
+          [
+            115.2637148745787,
+            42.16339247467029
+          ],
+          [
+            113.72404261848064,
+            41.18665997544362
+          ],
+          [
+            114.42958291361323,
+            41.129943488801175
+          ],
+          [
+            115.10906620487548,
+            41.58646379784794
+          ]
+        ]
+      },
+      "alt_min_m": 0,
+      "alt_max_m": 12000,
+      "zone_type": "no_fly"
+    },
+    {
+      "id": "rz_1786160994133",
+      "shape": "circle",
+      "geometry": {
+        "center": [
+          115.55242377844469,
+          39.53680791293585
+        ],
+        "radius_km": 50
+      },
+      "alt_min_m": 1000,
+      "alt_max_m": 4000,
+      "zone_type": "restricted"
+    },
+    {
+      "id": "rz_1786161169725",
+      "shape": "circle",
+      "geometry": {
+        "center": [
+          116.04433455541918,
+          38.19552566014898
+        ],
+        "radius_km": 100
+      },
+      "alt_min_m": 500,
+      "alt_max_m": 4500,
+      "zone_type": "restricted"
+    }
+  ]
+}"#;
         let s = s.replace("__P__", &cand.to_string_lossy().replace('\\', "\\\\"));
         let input = parse(&s);
         let out = solve(&input, &SolveParams::default(), 0).unwrap();
@@ -7295,7 +7310,7 @@ mod tests {
             v.distance_m / 1000.0
         );
         // 交付路径不得穿 restricted 高度带（同 zigzag22 检查）
-        for z in &input.restricted_zones {
+        for z in input.zones.iter().filter(|z| z.zone_type == ZoneType::Restricted) {
             let crate::config::ZoneShape::Circle { center, radius_km } = z.shape else {
                 continue;
             };
@@ -7339,97 +7354,96 @@ mod tests {
             return;
         }
         let s = r#"{
-            "aircraft": [
-                {
-                    "id": "v1",
-                    "profile": {
-                        "aircraft_type": "FIXED_WING",
-                        "cruise_speed_mps": 250,
-                        "min_turn_radius_m": 442,
-                        "max_climb_angle_deg": 15
-                    },
-                    "start": {
-                        "lon": 117.5708068837583,
-                        "lat": 38.97929027731468,
-                        "alt_m": 3000
-                    },
-                    "target": {
-                        "lon": 114.62855523087296,
-                        "lat": 41.481418330201244,
-                        "alt_m": 3000.0
-                    },
-                    "mid_waypoints": []
-                },
-                {
-                    "id": "v2",
-                    "profile": {
-                        "aircraft_type": "FIXED_WING",
-                        "cruise_speed_mps": 250,
-                        "min_turn_radius_m": 442,
-                        "max_climb_angle_deg": 15
-                    },
-                    "start": {
-                        "lon": 116.55201554900877,
-                        "lat": 38.54836682471938,
-                        "alt_m": 1000
-                    },
-                    "target": {
-                        "lon": 116.06634800292873,
-                        "lat": 42.00165253451988,
-                        "alt_m": 1500.0
-                    },
-                    "mid_waypoints": []
-                }
-            ],
-            "red_forces": {
-                "radars": []
-            },
-            "no_fly_zones": [
-                {
-                    "id": "zone_1786326750206",
-                    "shape": "polygon",
-                    "geometry": {
-                        "vertices": [
-                            [
-                                116.29703178143244,
-                                40.659872167707796
-                            ],
-                            [
-                                115.20946822222263,
-                                39.507896098494335
-                            ],
-                            [
-                                115.73653221684515,
-                                39.54513536978776
-                            ]
-                        ]
-                    },
-                    "alt_min_m": 0,
-                    "alt_max_m": 12000
-                }
-            ],
-            "restricted_zones": [
-                {
-                    "id": "rz_1786326782863",
-                    "shape": "circle",
-                    "geometry": {
-                        "center": [
-                            116.60669517425168,
-                            39.793491838843366
-                        ],
-                        "radius_km": 40
-                    },
-                    "alt_min_m": 2000,
-                    "alt_max_m": 6000
-                }
-            ],
-            "obstacles": [],
-            "terrain": {
-                "source": "path",
-                "path": "__P__"
-            },
-            "parameters": {}
-        }"#;
+  "aircraft": [
+    {
+      "id": "v1",
+      "profile": {
+        "aircraft_type": "FIXED_WING",
+        "cruise_speed_mps": 250,
+        "min_turn_radius_m": 442,
+        "max_climb_angle_deg": 15
+      },
+      "start": {
+        "lon": 117.5708068837583,
+        "lat": 38.97929027731468,
+        "alt_m": 3000
+      },
+      "target": {
+        "lon": 114.62855523087296,
+        "lat": 41.481418330201244,
+        "alt_m": 3000.0
+      },
+      "mid_waypoints": []
+    },
+    {
+      "id": "v2",
+      "profile": {
+        "aircraft_type": "FIXED_WING",
+        "cruise_speed_mps": 250,
+        "min_turn_radius_m": 442,
+        "max_climb_angle_deg": 15
+      },
+      "start": {
+        "lon": 116.55201554900877,
+        "lat": 38.54836682471938,
+        "alt_m": 1000
+      },
+      "target": {
+        "lon": 116.06634800292873,
+        "lat": 42.00165253451988,
+        "alt_m": 1500.0
+      },
+      "mid_waypoints": []
+    }
+  ],
+  "red_forces": {
+    "radars": []
+  },
+  "terrain": {
+    "source": "path",
+    "path": "__P__"
+  },
+  "parameters": {},
+  "zones": [
+    {
+      "id": "zone_1786326750206",
+      "shape": "polygon",
+      "geometry": {
+        "vertices": [
+          [
+            116.29703178143244,
+            40.659872167707796
+          ],
+          [
+            115.20946822222263,
+            39.507896098494335
+          ],
+          [
+            115.73653221684515,
+            39.54513536978776
+          ]
+        ]
+      },
+      "alt_min_m": 0,
+      "alt_max_m": 12000,
+      "zone_type": "no_fly"
+    },
+    {
+      "id": "rz_1786326782863",
+      "shape": "circle",
+      "geometry": {
+        "center": [
+          116.60669517425168,
+          39.793491838843366
+        ],
+        "radius_km": 40
+      },
+      "alt_min_m": 2000,
+      "alt_max_m": 6000,
+      "zone_type": "restricted"
+    }
+  ]
+}"#;
         let s = s.replace("__P__", &cand.to_string_lossy().replace('\\', "\\\\"));
         let input = parse(&s);
         let out = solve(&input, &SolveParams::default(), 0).unwrap();
@@ -7495,40 +7509,38 @@ mod tests {
             return;
         }
         let s = r#"{
-            "aircraft": [
-                {
-                    "id": "v1",
-                    "profile": {
-                        "aircraft_type": "FIXED_WING",
-                        "cruise_speed_mps": 250,
-                        "min_turn_radius_m": 442,
-                        "max_climb_angle_deg": 15
-                    },
-                    "start": {
-                        "lon": 117.57051750925365,
-                        "lat": 38.9816070217835,
-                        "alt_m": 500
-                    },
-                    "target": {
-                        "lon": 115.46093981532285,
-                        "lat": 40.8762471499978,
-                        "alt_m": 2000.0
-                    },
-                    "mid_waypoints": []
-                }
-            ],
-            "red_forces": {
-                "radars": []
-            },
-            "no_fly_zones": [],
-            "restricted_zones": [],
-            "obstacles": [],
-            "terrain": {
-                "source": "path",
-                "path": "__P__"
-            },
-            "parameters": {}
-        }"#;
+  "aircraft": [
+    {
+      "id": "v1",
+      "profile": {
+        "aircraft_type": "FIXED_WING",
+        "cruise_speed_mps": 250,
+        "min_turn_radius_m": 442,
+        "max_climb_angle_deg": 15
+      },
+      "start": {
+        "lon": 117.57051750925365,
+        "lat": 38.9816070217835,
+        "alt_m": 500
+      },
+      "target": {
+        "lon": 115.46093981532285,
+        "lat": 40.8762471499978,
+        "alt_m": 2000.0
+      },
+      "mid_waypoints": []
+    }
+  ],
+  "red_forces": {
+    "radars": []
+  },
+  "terrain": {
+    "source": "path",
+    "path": "__P__"
+  },
+  "parameters": {},
+  "zones": []
+}"#;
         let s = s.replace("__P__", &cand.to_string_lossy().replace('\\', "\\\\"));
         let input = parse(&s);
         let out = solve(&input, &SolveParams::default(), 0).unwrap();
@@ -7617,40 +7629,38 @@ mod tests {
             return;
         }
         let s = r#"{
-            "aircraft": [
-                {
-                    "id": "v1",
-                    "profile": {
-                        "aircraft_type": "FIXED_WING",
-                        "cruise_speed_mps": 250,
-                        "min_turn_radius_m": 442,
-                        "max_climb_angle_deg": 15
-                    },
-                    "start": {
-                        "lon": 108.80355022508975,
-                        "lat": 34.36335179705683,
-                        "alt_m": 500
-                    },
-                    "target": {
-                        "lon": 114.60616311030468,
-                        "lat": 35.47949267040714,
-                        "alt_m": 500.0
-                    },
-                    "mid_waypoints": []
-                }
-            ],
-            "red_forces": {
-                "radars": []
-            },
-            "no_fly_zones": [],
-            "restricted_zones": [],
-            "obstacles": [],
-            "terrain": {
-                "source": "path",
-                "path": "__P__"
-            },
-            "parameters": {}
-        }"#;
+  "aircraft": [
+    {
+      "id": "v1",
+      "profile": {
+        "aircraft_type": "FIXED_WING",
+        "cruise_speed_mps": 250,
+        "min_turn_radius_m": 442,
+        "max_climb_angle_deg": 15
+      },
+      "start": {
+        "lon": 108.80355022508975,
+        "lat": 34.36335179705683,
+        "alt_m": 500
+      },
+      "target": {
+        "lon": 114.60616311030468,
+        "lat": 35.47949267040714,
+        "alt_m": 500.0
+      },
+      "mid_waypoints": []
+    }
+  ],
+  "red_forces": {
+    "radars": []
+  },
+  "terrain": {
+    "source": "path",
+    "path": "__P__"
+  },
+  "parameters": {},
+  "zones": []
+}"#;
         let s = s.replace("__P__", &cand.to_string_lossy().replace('\\', "\\\\"));
         let input = parse(&s);
         let out = solve(&input, &SolveParams::default(), 0).unwrap();
@@ -7731,46 +7741,44 @@ mod tests {
             return;
         }
         let s = r#"{
-            "aircraft": [
-                {
-                    "id": "v1",
-                    "profile": {
-                        "aircraft_type": "FIXED_WING",
-                        "cruise_speed_mps": 250,
-                        "min_turn_radius_m": 442,
-                        "max_climb_angle_deg": 15
-                    },
-                    "start": {
-                        "lon": 108.5977738058285,
-                        "lat": 34.41492692430844,
-                        "alt_m": 509.46948220662387
-                    },
-                    "target": {
-                        "lon": 114.60995162291289,
-                        "lat": 35.076567074698545,
-                        "alt_m": 500.0
-                    },
-                    "mid_waypoints": [
-                        {
-                            "lon": 110.81014859597492,
-                            "lat": 34.6052448050566,
-                            "alt_m": 600
-                        }
-                    ]
-                }
-            ],
-            "red_forces": {
-                "radars": []
-            },
-            "no_fly_zones": [],
-            "restricted_zones": [],
-            "obstacles": [],
-            "terrain": {
-                "source": "path",
-                "path": "__P__"
-            },
-            "parameters": {}
-        }"#;
+  "aircraft": [
+    {
+      "id": "v1",
+      "profile": {
+        "aircraft_type": "FIXED_WING",
+        "cruise_speed_mps": 250,
+        "min_turn_radius_m": 442,
+        "max_climb_angle_deg": 15
+      },
+      "start": {
+        "lon": 108.5977738058285,
+        "lat": 34.41492692430844,
+        "alt_m": 509.46948220662387
+      },
+      "target": {
+        "lon": 114.60995162291289,
+        "lat": 35.076567074698545,
+        "alt_m": 500.0
+      },
+      "mid_waypoints": [
+        {
+          "lon": 110.81014859597492,
+          "lat": 34.6052448050566,
+          "alt_m": 600
+        }
+      ]
+    }
+  ],
+  "red_forces": {
+    "radars": []
+  },
+  "terrain": {
+    "source": "path",
+    "path": "__P__"
+  },
+  "parameters": {},
+  "zones": []
+}"#;
         let s = s.replace("__P__", &cand.to_string_lossy().replace('\\', "\\\\"));
         let input = parse(&s);
         let out = solve(&input, &SolveParams::default(), 0).unwrap();
@@ -7919,80 +7927,78 @@ mod tests {
             return;
         }
         let s = r#"{
-            "aircraft": [
-                {
-                    "id": "v1",
-                    "profile": {
-                        "aircraft_type": "FIXED_WING",
-                        "cruise_speed_mps": 250,
-                        "min_turn_radius_m": 442,
-                        "max_climb_angle_deg": 15
-                    },
-                    "start": {
-                        "lon": 116.92977366719182,
-                        "lat": 40.4410563361943,
-                        "alt_m": 300
-                    },
-                    "target": {
-                        "lon": 115.49957776796042,
-                        "lat": 39.577093261324855,
-                        "alt_m": 3000.0
-                    },
-                    "mid_waypoints": [
-                        {
-                            "lon": 116.5031580680477,
-                            "lat": 39.61768508544036,
-                            "alt_m": 300
-                        }
-                    ]
-                },
-                {
-                    "id": "v2",
-                    "profile": {
-                        "aircraft_type": "FIXED_WING",
-                        "cruise_speed_mps": 250,
-                        "min_turn_radius_m": 442,
-                        "max_climb_angle_deg": 15
-                    },
-                    "start": {
-                        "lon": 116.63273135458661,
-                        "lat": 40.66380307890914,
-                        "alt_m": 300
-                    },
-                    "target": {
-                        "lon": 115.49957776796042,
-                        "lat": 39.577093261324855,
-                        "alt_m": 3000.0
-                    },
-                    "mid_waypoints": [
-                        {
-                            "lon": 116.44919168873186,
-                            "lat": 39.56474547305474,
-                            "alt_m": 300
-                        }
-                    ]
-                }
-            ],
-            "red_forces": {
-                "radars": [
-                    {
-                        "id": "radar_1786332337392",
-                        "lon": 116.76131203011676,
-                        "lat": 39.93279959421326,
-                        "radius_km": 50,
-                        "alt_m": 10
-                    }
-                ]
-            },
-            "no_fly_zones": [],
-            "restricted_zones": [],
-            "obstacles": [],
-            "terrain": {
-                "source": "path",
-                "path": "__P__"
-            },
-            "parameters": {}
-        }"#;
+  "aircraft": [
+    {
+      "id": "v1",
+      "profile": {
+        "aircraft_type": "FIXED_WING",
+        "cruise_speed_mps": 250,
+        "min_turn_radius_m": 442,
+        "max_climb_angle_deg": 15
+      },
+      "start": {
+        "lon": 116.92977366719182,
+        "lat": 40.4410563361943,
+        "alt_m": 300
+      },
+      "target": {
+        "lon": 115.49957776796042,
+        "lat": 39.577093261324855,
+        "alt_m": 3000.0
+      },
+      "mid_waypoints": [
+        {
+          "lon": 116.5031580680477,
+          "lat": 39.61768508544036,
+          "alt_m": 300
+        }
+      ]
+    },
+    {
+      "id": "v2",
+      "profile": {
+        "aircraft_type": "FIXED_WING",
+        "cruise_speed_mps": 250,
+        "min_turn_radius_m": 442,
+        "max_climb_angle_deg": 15
+      },
+      "start": {
+        "lon": 116.63273135458661,
+        "lat": 40.66380307890914,
+        "alt_m": 300
+      },
+      "target": {
+        "lon": 115.49957776796042,
+        "lat": 39.577093261324855,
+        "alt_m": 3000.0
+      },
+      "mid_waypoints": [
+        {
+          "lon": 116.44919168873186,
+          "lat": 39.56474547305474,
+          "alt_m": 300
+        }
+      ]
+    }
+  ],
+  "red_forces": {
+    "radars": [
+      {
+        "id": "radar_1786332337392",
+        "lon": 116.76131203011676,
+        "lat": 39.93279959421326,
+        "radius_km": 50,
+        "alt_m": 10
+      }
+    ]
+  },
+  "terrain": {
+    "source": "path",
+    "path": "__P__"
+  },
+  "parameters": {},
+  "zones": []
+}"#;
         let s = s.replace("__P__", &cand.to_string_lossy().replace('\\', "\\\\"));
         let input = parse(&s);
         let out = solve(&input, &SolveParams::default(), 0).unwrap();
@@ -8043,61 +8049,59 @@ mod tests {
             return;
         }
         let s = r#"{
-            "aircraft": [
-                {
-                    "id": "v1",
-                    "profile": {
-                        "aircraft_type": "FIXED_WING",
-                        "cruise_speed_mps": 250,
-                        "min_turn_radius_m": 442,
-                        "max_climb_angle_deg": 15
-                    },
-                    "start": {
-                        "lon": 117.57051750925365,
-                        "lat": 38.9816070217835,
-                        "alt_m": 500
-                    },
-                    "target": {
-                        "lon": 115.46093981532285,
-                        "lat": 40.8762471499978,
-                        "alt_m": 2000.0
-                    },
-                    "mid_waypoints": [
-                        {
-                            "lon": 117.38220298919144,
-                            "lat": 39.522437439199145,
-                            "alt_m": 500
-                        },
-                        {
-                            "lon": 116.97334657489195,
-                            "lat": 39.26884298384281,
-                            "alt_m": 500
-                        },
-                        {
-                            "lon": 117.35493646681157,
-                            "lat": 39.25372350847514,
-                            "alt_m": 500
-                        },
-                        {
-                            "lon": 116.82900640317098,
-                            "lat": 39.839899568556554,
-                            "alt_m": 500
-                        }
-                    ]
-                }
-            ],
-            "red_forces": {
-                "radars": []
-            },
-            "no_fly_zones": [],
-            "restricted_zones": [],
-            "obstacles": [],
-            "terrain": {
-                "source": "path",
-                "path": "__P__"
-            },
-            "parameters": {}
-        }"#;
+  "aircraft": [
+    {
+      "id": "v1",
+      "profile": {
+        "aircraft_type": "FIXED_WING",
+        "cruise_speed_mps": 250,
+        "min_turn_radius_m": 442,
+        "max_climb_angle_deg": 15
+      },
+      "start": {
+        "lon": 117.57051750925365,
+        "lat": 38.9816070217835,
+        "alt_m": 500
+      },
+      "target": {
+        "lon": 115.46093981532285,
+        "lat": 40.8762471499978,
+        "alt_m": 2000.0
+      },
+      "mid_waypoints": [
+        {
+          "lon": 117.38220298919144,
+          "lat": 39.522437439199145,
+          "alt_m": 500
+        },
+        {
+          "lon": 116.97334657489195,
+          "lat": 39.26884298384281,
+          "alt_m": 500
+        },
+        {
+          "lon": 117.35493646681157,
+          "lat": 39.25372350847514,
+          "alt_m": 500
+        },
+        {
+          "lon": 116.82900640317098,
+          "lat": 39.839899568556554,
+          "alt_m": 500
+        }
+      ]
+    }
+  ],
+  "red_forces": {
+    "radars": []
+  },
+  "terrain": {
+    "source": "path",
+    "path": "__P__"
+  },
+  "parameters": {},
+  "zones": []
+}"#;
         let s = s.replace("__P__", &cand.to_string_lossy().replace('\\', "\\\\"));
         let input = parse(&s);
         let out = solve(&input, &SolveParams::default(), 0).unwrap();
@@ -8154,91 +8158,89 @@ mod tests {
             return;
         }
         let s = r#"{
-            "aircraft": [
-                {
-                    "id": "v1",
-                    "profile": {
-                        "aircraft_type": "FIXED_WING",
-                        "cruise_speed_mps": 250,
-                        "min_turn_radius_m": 442,
-                        "max_climb_angle_deg": 15
-                    },
-                    "start": {
-                        "lon": 117.57051750925365,
-                        "lat": 38.9816070217835,
-                        "alt_m": 500
-                    },
-                    "target": {
-                        "lon": 115.46093981532285,
-                        "lat": 40.8762471499978,
-                        "alt_m": 2000.0
-                    },
-                    "mid_waypoints": [
-                        {
-                            "lon": 117.5310926755737,
-                            "lat": 39.36711249439876,
-                            "alt_m": 500
-                        },
-                        {
-                            "lon": 117.27112137218157,
-                            "lat": 39.56318138239763,
-                            "alt_m": 500
-                        },
-                        {
-                            "lon": 117.34900609147277,
-                            "lat": 39.17993766070357,
-                            "alt_m": 500
-                        },
-                        {
-                            "lon": 117.02306561461393,
-                            "lat": 39.4989067016085,
-                            "alt_m": 500
-                        },
-                        {
-                            "lon": 116.81964533225553,
-                            "lat": 39.16459697832345,
-                            "alt_m": 500
-                        },
-                        {
-                            "lon": 117.61912491286566,
-                            "lat": 39.56928673239517,
-                            "alt_m": 500
-                        },
-                        {
-                            "lon": 117.34789241305992,
-                            "lat": 38.91485862893048,
-                            "alt_m": 500
-                        },
-                        {
-                            "lon": 117.73424167310449,
-                            "lat": 39.2810150397907,
-                            "alt_m": 500
-                        },
-                        {
-                            "lon": 117.71147898319053,
-                            "lat": 38.91563411936639,
-                            "alt_m": 500
-                        },
-                        {
-                            "lon": 116.69698769455375,
-                            "lat": 38.92250726143136,
-                            "alt_m": 500
-                        }
-                    ]
-                }
-            ],
-            "red_forces": {
-                "radars": []
-            },
-            "no_fly_zones": [],
-            "restricted_zones": [],
-            "obstacles": [],
-            "terrain": {
-                "source": "path",
-                "path": "__P__"
-            },
-            "parameters": {}
-        }"#;
+  "aircraft": [
+    {
+      "id": "v1",
+      "profile": {
+        "aircraft_type": "FIXED_WING",
+        "cruise_speed_mps": 250,
+        "min_turn_radius_m": 442,
+        "max_climb_angle_deg": 15
+      },
+      "start": {
+        "lon": 117.57051750925365,
+        "lat": 38.9816070217835,
+        "alt_m": 500
+      },
+      "target": {
+        "lon": 115.46093981532285,
+        "lat": 40.8762471499978,
+        "alt_m": 2000.0
+      },
+      "mid_waypoints": [
+        {
+          "lon": 117.5310926755737,
+          "lat": 39.36711249439876,
+          "alt_m": 500
+        },
+        {
+          "lon": 117.27112137218157,
+          "lat": 39.56318138239763,
+          "alt_m": 500
+        },
+        {
+          "lon": 117.34900609147277,
+          "lat": 39.17993766070357,
+          "alt_m": 500
+        },
+        {
+          "lon": 117.02306561461393,
+          "lat": 39.4989067016085,
+          "alt_m": 500
+        },
+        {
+          "lon": 116.81964533225553,
+          "lat": 39.16459697832345,
+          "alt_m": 500
+        },
+        {
+          "lon": 117.61912491286566,
+          "lat": 39.56928673239517,
+          "alt_m": 500
+        },
+        {
+          "lon": 117.34789241305992,
+          "lat": 38.91485862893048,
+          "alt_m": 500
+        },
+        {
+          "lon": 117.73424167310449,
+          "lat": 39.2810150397907,
+          "alt_m": 500
+        },
+        {
+          "lon": 117.71147898319053,
+          "lat": 38.91563411936639,
+          "alt_m": 500
+        },
+        {
+          "lon": 116.69698769455375,
+          "lat": 38.92250726143136,
+          "alt_m": 500
+        }
+      ]
+    }
+  ],
+  "red_forces": {
+    "radars": []
+  },
+  "terrain": {
+    "source": "path",
+    "path": "__P__"
+  },
+  "parameters": {},
+  "zones": []
+}"#;
         let s = s.replace("__P__", &cand.to_string_lossy().replace('\\', "\\\\"));
         let input = parse(&s);
         let out = solve(&input, &SolveParams::default(), 0).unwrap();
@@ -8303,156 +8305,154 @@ mod tests {
             return;
         }
         let s = r#"{
-            "aircraft": [
-                {
-                    "id": "v1",
-                    "profile": {
-                        "aircraft_type": "FIXED_WING",
-                        "cruise_speed_mps": 250,
-                        "min_turn_radius_m": 442,
-                        "max_climb_angle_deg": 15
-                    },
-                    "start": {
-                        "lon": 117.57051750925365,
-                        "lat": 38.9816070217835,
-                        "alt_m": 500
-                    },
-                    "target": {
-                        "lon": 115.46093981532285,
-                        "lat": 40.8762471499978,
-                        "alt_m": 2000.0
-                    },
-                    "mid_waypoints": [
-                        {
-                            "lon": 117.11783474006214,
-                            "lat": 39.46984164454213,
-                            "alt_m": 500
-                        },
-                        {
-                            "lon": 117.47656872164231,
-                            "lat": 39.05202611607821,
-                            "alt_m": 500
-                        },
-                        {
-                            "lon": 116.90637588798378,
-                            "lat": 39.4496563699438,
-                            "alt_m": 500
-                        },
-                        {
-                            "lon": 117.36422085502315,
-                            "lat": 38.99039201054334,
-                            "alt_m": 500
-                        },
-                        {
-                            "lon": 116.79495413353128,
-                            "lat": 39.3882830409556,
-                            "alt_m": 500
-                        },
-                        {
-                            "lon": 117.2970385812442,
-                            "lat": 38.92409889966998,
-                            "alt_m": 500
-                        },
-                        {
-                            "lon": 116.64313344054925,
-                            "lat": 39.34130967422113,
-                            "alt_m": 500
-                        },
-                        {
-                            "lon": 117.21571916145582,
-                            "lat": 38.88579602285712,
-                            "alt_m": 500
-                        },
-                        {
-                            "lon": 117.0496252060799,
-                            "lat": 39.69033181045541,
-                            "alt_m": 500
-                        },
-                        {
-                            "lon": 117.59846930948892,
-                            "lat": 39.14600125973928,
-                            "alt_m": 500
-                        },
-                        {
-                            "lon": 117.19239519871157,
-                            "lat": 39.77515291467246,
-                            "alt_m": 500
-                        },
-                        {
-                            "lon": 117.75328904873285,
-                            "lat": 39.265771413168174,
-                            "alt_m": 500
-                        },
-                        {
-                            "lon": 117.37639341129983,
-                            "lat": 39.899859443956274,
-                            "alt_m": 500
-                        },
-                        {
-                            "lon": 117.82723727925679,
-                            "lat": 39.4482470117936,
-                            "alt_m": 500
-                        },
-                        {
-                            "lon": 117.4781831630707,
-                            "lat": 40.02988393385804,
-                            "alt_m": 500
-                        },
-                        {
-                            "lon": 117.91417815346816,
-                            "lat": 39.566639775283306,
-                            "alt_m": 500
-                        },
-                        {
-                            "lon": 116.35343384512255,
-                            "lat": 39.21191424808533,
-                            "alt_m": 500
-                        },
-                        {
-                            "lon": 117.13763274937696,
-                            "lat": 40.007607829090794,
-                            "alt_m": 500
-                        },
-                        {
-                            "lon": 116.54022244694409,
-                            "lat": 39.61959713191777,
-                            "alt_m": 500
-                        },
-                        {
-                            "lon": 116.94054105824308,
-                            "lat": 40.15250255474903,
-                            "alt_m": 500
-                        },
-                        {
-                            "lon": 116.33463652719644,
-                            "lat": 39.77092757783807,
-                            "alt_m": 500
-                        },
-                        {
-                            "lon": 116.77908228189388,
-                            "lat": 40.31455957166121,
-                            "alt_m": 500
-                        },
-                        {
-                            "lon": 116.40841749032751,
-                            "lat": 40.11731272727076,
-                            "alt_m": 500
-                        }
-                    ]
-                }
-            ],
-            "red_forces": {
-                "radars": []
-            },
-            "no_fly_zones": [],
-            "restricted_zones": [],
-            "obstacles": [],
-            "terrain": {
-                "source": "path",
-                "path": "__P__"
-            },
-            "parameters": {}
-        }"#;
+  "aircraft": [
+    {
+      "id": "v1",
+      "profile": {
+        "aircraft_type": "FIXED_WING",
+        "cruise_speed_mps": 250,
+        "min_turn_radius_m": 442,
+        "max_climb_angle_deg": 15
+      },
+      "start": {
+        "lon": 117.57051750925365,
+        "lat": 38.9816070217835,
+        "alt_m": 500
+      },
+      "target": {
+        "lon": 115.46093981532285,
+        "lat": 40.8762471499978,
+        "alt_m": 2000.0
+      },
+      "mid_waypoints": [
+        {
+          "lon": 117.11783474006214,
+          "lat": 39.46984164454213,
+          "alt_m": 500
+        },
+        {
+          "lon": 117.47656872164231,
+          "lat": 39.05202611607821,
+          "alt_m": 500
+        },
+        {
+          "lon": 116.90637588798378,
+          "lat": 39.4496563699438,
+          "alt_m": 500
+        },
+        {
+          "lon": 117.36422085502315,
+          "lat": 38.99039201054334,
+          "alt_m": 500
+        },
+        {
+          "lon": 116.79495413353128,
+          "lat": 39.3882830409556,
+          "alt_m": 500
+        },
+        {
+          "lon": 117.2970385812442,
+          "lat": 38.92409889966998,
+          "alt_m": 500
+        },
+        {
+          "lon": 116.64313344054925,
+          "lat": 39.34130967422113,
+          "alt_m": 500
+        },
+        {
+          "lon": 117.21571916145582,
+          "lat": 38.88579602285712,
+          "alt_m": 500
+        },
+        {
+          "lon": 117.0496252060799,
+          "lat": 39.69033181045541,
+          "alt_m": 500
+        },
+        {
+          "lon": 117.59846930948892,
+          "lat": 39.14600125973928,
+          "alt_m": 500
+        },
+        {
+          "lon": 117.19239519871157,
+          "lat": 39.77515291467246,
+          "alt_m": 500
+        },
+        {
+          "lon": 117.75328904873285,
+          "lat": 39.265771413168174,
+          "alt_m": 500
+        },
+        {
+          "lon": 117.37639341129983,
+          "lat": 39.899859443956274,
+          "alt_m": 500
+        },
+        {
+          "lon": 117.82723727925679,
+          "lat": 39.4482470117936,
+          "alt_m": 500
+        },
+        {
+          "lon": 117.4781831630707,
+          "lat": 40.02988393385804,
+          "alt_m": 500
+        },
+        {
+          "lon": 117.91417815346816,
+          "lat": 39.566639775283306,
+          "alt_m": 500
+        },
+        {
+          "lon": 116.35343384512255,
+          "lat": 39.21191424808533,
+          "alt_m": 500
+        },
+        {
+          "lon": 117.13763274937696,
+          "lat": 40.007607829090794,
+          "alt_m": 500
+        },
+        {
+          "lon": 116.54022244694409,
+          "lat": 39.61959713191777,
+          "alt_m": 500
+        },
+        {
+          "lon": 116.94054105824308,
+          "lat": 40.15250255474903,
+          "alt_m": 500
+        },
+        {
+          "lon": 116.33463652719644,
+          "lat": 39.77092757783807,
+          "alt_m": 500
+        },
+        {
+          "lon": 116.77908228189388,
+          "lat": 40.31455957166121,
+          "alt_m": 500
+        },
+        {
+          "lon": 116.40841749032751,
+          "lat": 40.11731272727076,
+          "alt_m": 500
+        }
+      ]
+    }
+  ],
+  "red_forces": {
+    "radars": []
+  },
+  "terrain": {
+    "source": "path",
+    "path": "__P__"
+  },
+  "parameters": {},
+  "zones": []
+}"#;
         let s = s.replace("__P__", &cand.to_string_lossy().replace('\\', "\\\\"));
         let input = parse(&s);
         let out = solve(&input, &SolveParams::default(), 0).unwrap();
@@ -8529,136 +8529,136 @@ mod tests {
             return;
         }
         let s = r#"{
-            "aircraft": [
-                {
-                    "id": "v1",
-                    "profile": {
-                        "aircraft_type": "FIXED_WING",
-                        "cruise_speed_mps": 250,
-                        "min_turn_radius_m": 442,
-                        "max_climb_angle_deg": 15
-                    },
-                    "start": {
-                        "lon": 121.32158437921957,
-                        "lat": 35.345605078916044,
-                        "alt_m": 1000
-                    },
-                    "target": {
-                        "lon": 106.6800083196283,
-                        "lat": 49.891931490296315,
-                        "alt_m": 3000.0
-                    },
-                    "mid_waypoints": [
-                        {
-                            "lon": 122.3852641802933,
-                            "lat": 37.91301080822844,
-                            "alt_m": 1000
-                        },
-                        {
-                            "lon": 118.45106783248693,
-                            "lat": 36.09407976700374,
-                            "alt_m": 1000
-                        },
-                        {
-                            "lon": 119.64410040053079,
-                            "lat": 38.42608749463845,
-                            "alt_m": 1000
-                        }
-                    ]
-                },
-                {
-                    "id": "v2",
-                    "profile": {
-                        "aircraft_type": "FIXED_WING",
-                        "cruise_speed_mps": 500,
-                        "min_turn_radius_m": 800,
-                        "max_climb_angle_deg": 15
-                    },
-                    "start": {
-                        "lon": 103.80007749527002,
-                        "lat": 32.492118851168414,
-                        "alt_m": 5000
-                    },
-                    "target": {
-                        "lon": 124.7360092361736,
-                        "lat": 53.31522760700038,
-                        "alt_m": 3000.0
-                    },
-                    "mid_waypoints": []
-                }
-            ],
-            "red_forces": {
-                "radars": [
-                    {
-                        "id": "radar_1786409721004",
-                        "lon": 113.00786729664442,
-                        "lat": 46.21627287139257,
-                        "radius_km": 200,
-                        "alt_m": 10
-                    }
-                ]
-            },
-            "no_fly_zones": [
-                {
-                    "id": "zone_1786409515324",
-                    "shape": "polygon",
-                    "geometry": {
-                        "vertices": [
-                            [
-                                112.56383008070333,
-                                44.4855055439424
-                            ],
-                            [
-                                117.93020756431244,
-                                40.51747800244875
-                            ],
-                            [
-                                110.16677625965431,
-                                42.442633787371435
-                            ]
-                        ]
-                    },
-                    "alt_min_m": 0,
-                    "alt_max_m": 12000
-                }
-            ],
-            "restricted_zones": [
-                {
-                    "id": "rz_1786409547965",
-                    "shape": "circle",
-                    "geometry": {
-                        "center": [
-                            106.7843768348038,
-                            36.24901461339551
-                        ],
-                        "radius_km": 100
-                    },
-                    "alt_min_m": 3000,
-                    "alt_max_m": 6000
-                },
-                {
-                    "id": "rz_1786409606028",
-                    "shape": "circle",
-                    "geometry": {
-                        "center": [
-                            112.99788589051144,
-                            45.6335833104839
-                        ],
-                        "radius_km": 100
-                    },
-                    "alt_min_m": 2000,
-                    "alt_max_m": 6000
-                }
-            ],
-            "obstacles": [],
-            "terrain": {
-                "source": "path",
-                "path": "__P__"
-            },
-            "parameters": {
-                "p_cross": 0.9
-            }
-        }"#;
+  "aircraft": [
+    {
+      "id": "v1",
+      "profile": {
+        "aircraft_type": "FIXED_WING",
+        "cruise_speed_mps": 250,
+        "min_turn_radius_m": 442,
+        "max_climb_angle_deg": 15
+      },
+      "start": {
+        "lon": 121.32158437921957,
+        "lat": 35.345605078916044,
+        "alt_m": 1000
+      },
+      "target": {
+        "lon": 106.6800083196283,
+        "lat": 49.891931490296315,
+        "alt_m": 3000.0
+      },
+      "mid_waypoints": [
+        {
+          "lon": 122.3852641802933,
+          "lat": 37.91301080822844,
+          "alt_m": 1000
+        },
+        {
+          "lon": 118.45106783248693,
+          "lat": 36.09407976700374,
+          "alt_m": 1000
+        },
+        {
+          "lon": 119.64410040053079,
+          "lat": 38.42608749463845,
+          "alt_m": 1000
+        }
+      ]
+    },
+    {
+      "id": "v2",
+      "profile": {
+        "aircraft_type": "FIXED_WING",
+        "cruise_speed_mps": 500,
+        "min_turn_radius_m": 800,
+        "max_climb_angle_deg": 15
+      },
+      "start": {
+        "lon": 103.80007749527002,
+        "lat": 32.492118851168414,
+        "alt_m": 5000
+      },
+      "target": {
+        "lon": 124.7360092361736,
+        "lat": 53.31522760700038,
+        "alt_m": 3000.0
+      },
+      "mid_waypoints": []
+    }
+  ],
+  "red_forces": {
+    "radars": [
+      {
+        "id": "radar_1786409721004",
+        "lon": 113.00786729664442,
+        "lat": 46.21627287139257,
+        "radius_km": 200,
+        "alt_m": 10
+      }
+    ]
+  },
+  "terrain": {
+    "source": "path",
+    "path": "__P__"
+  },
+  "parameters": {
+    "p_cross": 0.9
+  },
+  "zones": [
+    {
+      "id": "zone_1786409515324",
+      "shape": "polygon",
+      "geometry": {
+        "vertices": [
+          [
+            112.56383008070333,
+            44.4855055439424
+          ],
+          [
+            117.93020756431244,
+            40.51747800244875
+          ],
+          [
+            110.16677625965431,
+            42.442633787371435
+          ]
+        ]
+      },
+      "alt_min_m": 0,
+      "alt_max_m": 12000,
+      "zone_type": "no_fly"
+    },
+    {
+      "id": "rz_1786409547965",
+      "shape": "circle",
+      "geometry": {
+        "center": [
+          106.7843768348038,
+          36.24901461339551
+        ],
+        "radius_km": 100
+      },
+      "alt_min_m": 3000,
+      "alt_max_m": 6000,
+      "zone_type": "restricted"
+    },
+    {
+      "id": "rz_1786409606028",
+      "shape": "circle",
+      "geometry": {
+        "center": [
+          112.99788589051144,
+          45.6335833104839
+        ],
+        "radius_km": 100
+      },
+      "alt_min_m": 2000,
+      "alt_max_m": 6000,
+      "zone_type": "restricted"
+    }
+  ]
+}"#;
         let s = s.replace("__P__", &cand.to_string_lossy().replace('\\', "\\\\"));
         let input = parse(&s);
         let out = solve(&input, &SolveParams::default(), 0).unwrap();
@@ -8724,202 +8724,202 @@ mod tests {
             return;
         }
         let s = r#"{
-            "aircraft": [
-                {
-                    "id": "v1",
-                    "profile": {
-                        "aircraft_type": "FIXED_WING",
-                        "cruise_speed_mps": 250,
-                        "min_turn_radius_m": 442,
-                        "max_climb_angle_deg": 15
-                    },
-                    "start": {
-                        "lon": 121.32158437921957,
-                        "lat": 35.345605078916044,
-                        "alt_m": 1000
-                    },
-                    "target": {
-                        "lon": 106.6800083196283,
-                        "lat": 49.891931490296315,
-                        "alt_m": 3000.0
-                    },
-                    "mid_waypoints": [
-                        {
-                            "lon": 122.3852641802933,
-                            "lat": 37.91301080822844,
-                            "alt_m": 1000
-                        },
-                        {
-                            "lon": 118.45106783248693,
-                            "lat": 36.09407976700374,
-                            "alt_m": 1000
-                        },
-                        {
-                            "lon": 119.64410040053079,
-                            "lat": 38.42608749463845,
-                            "alt_m": 1000
-                        }
-                    ]
-                },
-                {
-                    "id": "v2",
-                    "profile": {
-                        "aircraft_type": "FIXED_WING",
-                        "cruise_speed_mps": 500,
-                        "min_turn_radius_m": 800,
-                        "max_climb_angle_deg": 15
-                    },
-                    "start": {
-                        "lon": 103.80007749527002,
-                        "lat": 32.492118851168414,
-                        "alt_m": 5000
-                    },
-                    "target": {
-                        "lon": 124.7360092361736,
-                        "lat": 53.31522760700038,
-                        "alt_m": 3000.0
-                    },
-                    "mid_waypoints": [
-                        {
-                            "lon": 109.97496463623962,
-                            "lat": 40.89240709612281,
-                            "alt_m": 5000
-                        },
-                        {
-                            "lon": 105.05176607466912,
-                            "lat": 45.12560078345386,
-                            "alt_m": 5000
-                        },
-                        {
-                            "lon": 107.45453837531355,
-                            "lat": 47.33920209644489,
-                            "alt_m": 5000
-                        },
-                        {
-                            "lon": 117.35985238233839,
-                            "lat": 44.39524022248522,
-                            "alt_m": 5000
-                        },
-                        {
-                            "lon": 123.01092994596729,
-                            "lat": 42.94575095184553,
-                            "alt_m": 5000
-                        },
-                        {
-                            "lon": 117.84672376061431,
-                            "lat": 38.80107785870063,
-                            "alt_m": 5000
-                        },
-                        {
-                            "lon": 112.72724669014056,
-                            "lat": 37.192877051433356,
-                            "alt_m": 5000
-                        },
-                        {
-                            "lon": 108.30767125147409,
-                            "lat": 38.39729311871755,
-                            "alt_m": 5000
-                        },
-                        {
-                            "lon": 105.43569482275211,
-                            "lat": 40.72490772213813,
-                            "alt_m": 5000
-                        },
-                        {
-                            "lon": 105.07165169750732,
-                            "lat": 44.17689617497171,
-                            "alt_m": 5000
-                        },
-                        {
-                            "lon": 106.27781114030425,
-                            "lat": 46.905803587744295,
-                            "alt_m": 5000
-                        },
-                        {
-                            "lon": 109.75971033327446,
-                            "lat": 46.304227978356174,
-                            "alt_m": 5000
-                        },
-                        {
-                            "lon": 118.23811461480165,
-                            "lat": 44.09728961713801,
-                            "alt_m": 5000
-                        }
-                    ]
-                }
-            ],
-            "red_forces": {
-                "radars": [
-                    {
-                        "id": "radar_1786409721004",
-                        "lon": 113.00786729664442,
-                        "lat": 46.21627287139257,
-                        "radius_km": 200,
-                        "alt_m": 10
-                    }
-                ]
-            },
-            "no_fly_zones": [
-                {
-                    "id": "zone_1786409515324",
-                    "shape": "polygon",
-                    "geometry": {
-                        "vertices": [
-                            [
-                                118.17769472280284,
-                                40.45820431372051
-                            ],
-                            [
-                                107.63203137395895,
-                                44.11758744295661
-                            ],
-                            [
-                                112.15118325335442,
-                                40.40008219131184
-                            ]
-                        ]
-                    },
-                    "alt_min_m": 0,
-                    "alt_max_m": 12000
-                }
-            ],
-            "restricted_zones": [
-                {
-                    "id": "rz_1786409547965",
-                    "shape": "circle",
-                    "geometry": {
-                        "center": [
-                            106.78464665022119,
-                            36.00663895579695
-                        ],
-                        "radius_km": 100
-                    },
-                    "alt_min_m": 3000,
-                    "alt_max_m": 6000
-                },
-                {
-                    "id": "rz_1786409606028",
-                    "shape": "circle",
-                    "geometry": {
-                        "center": [
-                            112.99788589051144,
-                            45.6335833104839
-                        ],
-                        "radius_km": 100
-                    },
-                    "alt_min_m": 2000,
-                    "alt_max_m": 6000
-                }
-            ],
-            "obstacles": [],
-            "terrain": {
-                "source": "path",
-                "path": "__P__"
-            },
-            "parameters": {
-                "p_cross": 0.9
-            }
-        }"#;
+  "aircraft": [
+    {
+      "id": "v1",
+      "profile": {
+        "aircraft_type": "FIXED_WING",
+        "cruise_speed_mps": 250,
+        "min_turn_radius_m": 442,
+        "max_climb_angle_deg": 15
+      },
+      "start": {
+        "lon": 121.32158437921957,
+        "lat": 35.345605078916044,
+        "alt_m": 1000
+      },
+      "target": {
+        "lon": 106.6800083196283,
+        "lat": 49.891931490296315,
+        "alt_m": 3000.0
+      },
+      "mid_waypoints": [
+        {
+          "lon": 122.3852641802933,
+          "lat": 37.91301080822844,
+          "alt_m": 1000
+        },
+        {
+          "lon": 118.45106783248693,
+          "lat": 36.09407976700374,
+          "alt_m": 1000
+        },
+        {
+          "lon": 119.64410040053079,
+          "lat": 38.42608749463845,
+          "alt_m": 1000
+        }
+      ]
+    },
+    {
+      "id": "v2",
+      "profile": {
+        "aircraft_type": "FIXED_WING",
+        "cruise_speed_mps": 500,
+        "min_turn_radius_m": 800,
+        "max_climb_angle_deg": 15
+      },
+      "start": {
+        "lon": 103.80007749527002,
+        "lat": 32.492118851168414,
+        "alt_m": 5000
+      },
+      "target": {
+        "lon": 124.7360092361736,
+        "lat": 53.31522760700038,
+        "alt_m": 3000.0
+      },
+      "mid_waypoints": [
+        {
+          "lon": 109.97496463623962,
+          "lat": 40.89240709612281,
+          "alt_m": 5000
+        },
+        {
+          "lon": 105.05176607466912,
+          "lat": 45.12560078345386,
+          "alt_m": 5000
+        },
+        {
+          "lon": 107.45453837531355,
+          "lat": 47.33920209644489,
+          "alt_m": 5000
+        },
+        {
+          "lon": 117.35985238233839,
+          "lat": 44.39524022248522,
+          "alt_m": 5000
+        },
+        {
+          "lon": 123.01092994596729,
+          "lat": 42.94575095184553,
+          "alt_m": 5000
+        },
+        {
+          "lon": 117.84672376061431,
+          "lat": 38.80107785870063,
+          "alt_m": 5000
+        },
+        {
+          "lon": 112.72724669014056,
+          "lat": 37.192877051433356,
+          "alt_m": 5000
+        },
+        {
+          "lon": 108.30767125147409,
+          "lat": 38.39729311871755,
+          "alt_m": 5000
+        },
+        {
+          "lon": 105.43569482275211,
+          "lat": 40.72490772213813,
+          "alt_m": 5000
+        },
+        {
+          "lon": 105.07165169750732,
+          "lat": 44.17689617497171,
+          "alt_m": 5000
+        },
+        {
+          "lon": 106.27781114030425,
+          "lat": 46.905803587744295,
+          "alt_m": 5000
+        },
+        {
+          "lon": 109.75971033327446,
+          "lat": 46.304227978356174,
+          "alt_m": 5000
+        },
+        {
+          "lon": 118.23811461480165,
+          "lat": 44.09728961713801,
+          "alt_m": 5000
+        }
+      ]
+    }
+  ],
+  "red_forces": {
+    "radars": [
+      {
+        "id": "radar_1786409721004",
+        "lon": 113.00786729664442,
+        "lat": 46.21627287139257,
+        "radius_km": 200,
+        "alt_m": 10
+      }
+    ]
+  },
+  "terrain": {
+    "source": "path",
+    "path": "__P__"
+  },
+  "parameters": {
+    "p_cross": 0.9
+  },
+  "zones": [
+    {
+      "id": "zone_1786409515324",
+      "shape": "polygon",
+      "geometry": {
+        "vertices": [
+          [
+            118.17769472280284,
+            40.45820431372051
+          ],
+          [
+            107.63203137395895,
+            44.11758744295661
+          ],
+          [
+            112.15118325335442,
+            40.40008219131184
+          ]
+        ]
+      },
+      "alt_min_m": 0,
+      "alt_max_m": 12000,
+      "zone_type": "no_fly"
+    },
+    {
+      "id": "rz_1786409547965",
+      "shape": "circle",
+      "geometry": {
+        "center": [
+          106.78464665022119,
+          36.00663895579695
+        ],
+        "radius_km": 100
+      },
+      "alt_min_m": 3000,
+      "alt_max_m": 6000,
+      "zone_type": "restricted"
+    },
+    {
+      "id": "rz_1786409606028",
+      "shape": "circle",
+      "geometry": {
+        "center": [
+          112.99788589051144,
+          45.6335833104839
+        ],
+        "radius_km": 100
+      },
+      "alt_min_m": 2000,
+      "alt_max_m": 6000,
+      "zone_type": "restricted"
+    }
+  ]
+}"#;
         let s = s.replace("__P__", &cand.to_string_lossy().replace('\\', "\\\\"));
         let input = parse(&s);
         let out = solve(&input, &SolveParams::default(), 0).unwrap();
@@ -8995,83 +8995,82 @@ mod tests {
             return;
         }
         let s = r#"{
-            "aircraft": [
-                {
-                    "id": "v1",
-                    "profile": {
-                        "aircraft_type": "FIXED_WING",
-                        "cruise_speed_mps": 250,
-                        "min_turn_radius_m": 442,
-                        "max_climb_angle_deg": 15
-                    },
-                    "start": {
-                        "lon": 117.49643196710215,
-                        "lat": 39.45217964261854,
-                        "alt_m": 3000
-                    },
-                    "target": {
-                        "lon": 115.41519624070744,
-                        "lat": 41.063105449335495,
-                        "alt_m": 3000.0
-                    },
-                    "mid_waypoints": [
-                        {
-                            "lon": 116.92011401843381,
-                            "lat": 40.280864859008126,
-                            "alt_m": 3000
-                        }
-                    ]
-                }
-            ],
-            "red_forces": {
-                "radars": []
-            },
-            "no_fly_zones": [
-                {
-                    "id": "zone_1786418099258",
-                    "shape": "polygon",
-                    "geometry": {
-                        "vertices": [
-                            [
-                                116.74744508792169,
-                                40.54250033772123
-                            ],
-                            [
-                                116.04051071102833,
-                                39.87068759296977
-                            ],
-                            [
-                                116.58825219982235,
-                                40.13334649202884
-                            ]
-                        ]
-                    },
-                    "alt_min_m": 0,
-                    "alt_max_m": 12000
-                }
-            ],
-            "restricted_zones": [
-                {
-                    "id": "rz_1786418172746",
-                    "shape": "circle",
-                    "geometry": {
-                        "center": [
-                            116.86855354211916,
-                            40.0244769648816
-                        ],
-                        "radius_km": 20
-                    },
-                    "alt_min_m": 1000,
-                    "alt_max_m": 6000
-                }
-            ],
-            "obstacles": [],
-            "terrain": {
-                "source": "path",
-                "path": "__P__"
-            },
-            "parameters": {}
-        }"#;
+  "aircraft": [
+    {
+      "id": "v1",
+      "profile": {
+        "aircraft_type": "FIXED_WING",
+        "cruise_speed_mps": 250,
+        "min_turn_radius_m": 442,
+        "max_climb_angle_deg": 15
+      },
+      "start": {
+        "lon": 117.49643196710215,
+        "lat": 39.45217964261854,
+        "alt_m": 3000
+      },
+      "target": {
+        "lon": 115.41519624070744,
+        "lat": 41.063105449335495,
+        "alt_m": 3000.0
+      },
+      "mid_waypoints": [
+        {
+          "lon": 116.92011401843381,
+          "lat": 40.280864859008126,
+          "alt_m": 3000
+        }
+      ]
+    }
+  ],
+  "red_forces": {
+    "radars": []
+  },
+  "terrain": {
+    "source": "path",
+    "path": "__P__"
+  },
+  "parameters": {},
+  "zones": [
+    {
+      "id": "zone_1786418099258",
+      "shape": "polygon",
+      "geometry": {
+        "vertices": [
+          [
+            116.74744508792169,
+            40.54250033772123
+          ],
+          [
+            116.04051071102833,
+            39.87068759296977
+          ],
+          [
+            116.58825219982235,
+            40.13334649202884
+          ]
+        ]
+      },
+      "alt_min_m": 0,
+      "alt_max_m": 12000,
+      "zone_type": "no_fly"
+    },
+    {
+      "id": "rz_1786418172746",
+      "shape": "circle",
+      "geometry": {
+        "center": [
+          116.86855354211916,
+          40.0244769648816
+        ],
+        "radius_km": 20
+      },
+      "alt_min_m": 1000,
+      "alt_max_m": 6000,
+      "zone_type": "restricted"
+    }
+  ]
+}"#;
         let s = s.replace("__P__", &cand.to_string_lossy().replace('\\', "\\\\"));
         let input = parse(&s);
         let out = solve(&input, &SolveParams::default(), 0).unwrap();
@@ -9117,88 +9116,87 @@ mod tests {
             return;
         }
         let s = r#"{
-            "aircraft": [
-                {
-                    "id": "v1",
-                    "profile": {
-                        "aircraft_type": "FIXED_WING",
-                        "cruise_speed_mps": 250,
-                        "min_turn_radius_m": 442,
-                        "max_climb_angle_deg": 15
-                    },
-                    "start": {
-                        "lon": 117.49643196710215,
-                        "lat": 39.45217964261854,
-                        "alt_m": 3000
-                    },
-                    "target": {
-                        "lon": 115.41519624070744,
-                        "lat": 41.063105449335495,
-                        "alt_m": 3000.0
-                    },
-                    "mid_waypoints": [
-                        {
-                            "lon": 116.04302827980699,
-                            "lat": 40.30245861424856,
-                            "alt_m": 3000
-                        },
-                        {
-                            "lon": 116.87502139486968,
-                            "lat": 40.43880896740148,
-                            "alt_m": 3000
-                        }
-                    ]
-                }
-            ],
-            "red_forces": {
-                "radars": []
-            },
-            "no_fly_zones": [
-                {
-                    "id": "zone_1786418099258",
-                    "shape": "polygon",
-                    "geometry": {
-                        "vertices": [
-                            [
-                                116.74744508792169,
-                                40.54250033772123
-                            ],
-                            [
-                                116.04051071102833,
-                                39.87068759296977
-                            ],
-                            [
-                                116.58825219982235,
-                                40.13334649202884
-                            ]
-                        ]
-                    },
-                    "alt_min_m": 0,
-                    "alt_max_m": 12000
-                }
-            ],
-            "restricted_zones": [
-                {
-                    "id": "rz_1786418172746",
-                    "shape": "circle",
-                    "geometry": {
-                        "center": [
-                            116.87035584365995,
-                            40.01756770083293
-                        ],
-                        "radius_km": 20
-                    },
-                    "alt_min_m": 1000,
-                    "alt_max_m": 6000
-                }
-            ],
-            "obstacles": [],
-            "terrain": {
-                "source": "path",
-                "path": "__P__"
-            },
-            "parameters": {}
-        }"#;
+  "aircraft": [
+    {
+      "id": "v1",
+      "profile": {
+        "aircraft_type": "FIXED_WING",
+        "cruise_speed_mps": 250,
+        "min_turn_radius_m": 442,
+        "max_climb_angle_deg": 15
+      },
+      "start": {
+        "lon": 117.49643196710215,
+        "lat": 39.45217964261854,
+        "alt_m": 3000
+      },
+      "target": {
+        "lon": 115.41519624070744,
+        "lat": 41.063105449335495,
+        "alt_m": 3000.0
+      },
+      "mid_waypoints": [
+        {
+          "lon": 116.04302827980699,
+          "lat": 40.30245861424856,
+          "alt_m": 3000
+        },
+        {
+          "lon": 116.87502139486968,
+          "lat": 40.43880896740148,
+          "alt_m": 3000
+        }
+      ]
+    }
+  ],
+  "red_forces": {
+    "radars": []
+  },
+  "terrain": {
+    "source": "path",
+    "path": "__P__"
+  },
+  "parameters": {},
+  "zones": [
+    {
+      "id": "zone_1786418099258",
+      "shape": "polygon",
+      "geometry": {
+        "vertices": [
+          [
+            116.74744508792169,
+            40.54250033772123
+          ],
+          [
+            116.04051071102833,
+            39.87068759296977
+          ],
+          [
+            116.58825219982235,
+            40.13334649202884
+          ]
+        ]
+      },
+      "alt_min_m": 0,
+      "alt_max_m": 12000,
+      "zone_type": "no_fly"
+    },
+    {
+      "id": "rz_1786418172746",
+      "shape": "circle",
+      "geometry": {
+        "center": [
+          116.87035584365995,
+          40.01756770083293
+        ],
+        "radius_km": 20
+      },
+      "alt_min_m": 1000,
+      "alt_max_m": 6000,
+      "zone_type": "restricted"
+    }
+  ]
+}"#;
         let s = s.replace("__P__", &cand.to_string_lossy().replace('\\', "\\\\"));
         let input = parse(&s);
         let out = solve(&input, &SolveParams::default(), 0).unwrap();
@@ -9247,98 +9245,97 @@ mod tests {
             return;
         }
         let s = r#"{
-            "aircraft": [
-                {
-                    "id": "v1",
-                    "profile": {
-                        "aircraft_type": "FIXED_WING",
-                        "cruise_speed_mps": 250,
-                        "min_turn_radius_m": 442,
-                        "max_climb_angle_deg": 15
-                    },
-                    "start": {
-                        "lon": 117.49643196710215,
-                        "lat": 39.45217964261854,
-                        "alt_m": 3000
-                    },
-                    "target": {
-                        "lon": 115.41519624070744,
-                        "lat": 41.063105449335495,
-                        "alt_m": 3000.0
-                    },
-                    "mid_waypoints": [
-                        {
-                            "lon": 116.30222159303027,
-                            "lat": 40.52501663038863,
-                            "alt_m": 3000
-                        },
-                        {
-                            "lon": 116.5195046089279,
-                            "lat": 40.00372676035467,
-                            "alt_m": 3000
-                        }
-                    ]
-                }
-            ],
-            "red_forces": {
-                "radars": [
-                    {
-                        "id": "radar_1786430183478",
-                        "lon": 116.10054207161798,
-                        "lat": 39.893963015168175,
-                        "radius_km": 50,
-                        "alt_m": 10
-                    }
-                ]
-            },
-            "no_fly_zones": [
-                {
-                    "id": "zone_1786418099258",
-                    "shape": "polygon",
-                    "geometry": {
-                        "vertices": [
-                            [
-                                116.13619653711649,
-                                40.07186918292957
-                            ],
-                            [
-                                116.91994987492495,
-                                40.58747146826297
-                            ],
-                            [
-                                116.5682729278144,
-                                40.19722929127514
-                            ]
-                        ]
-                    },
-                    "alt_min_m": 0,
-                    "alt_max_m": 12000
-                }
-            ],
-            "restricted_zones": [
-                {
-                    "id": "rz_1786418172746",
-                    "shape": "circle",
-                    "geometry": {
-                        "center": [
-                            116.87035584365995,
-                            40.01756770083293
-                        ],
-                        "radius_km": 20
-                    },
-                    "alt_min_m": 1000,
-                    "alt_max_m": 6000
-                }
-            ],
-            "obstacles": [],
-            "terrain": {
-                "source": "path",
-                "path": "__P__"
-            },
-            "parameters": {
-                "p_cross": 0.9
-            }
-        }"#;
+  "aircraft": [
+    {
+      "id": "v1",
+      "profile": {
+        "aircraft_type": "FIXED_WING",
+        "cruise_speed_mps": 250,
+        "min_turn_radius_m": 442,
+        "max_climb_angle_deg": 15
+      },
+      "start": {
+        "lon": 117.49643196710215,
+        "lat": 39.45217964261854,
+        "alt_m": 3000
+      },
+      "target": {
+        "lon": 115.41519624070744,
+        "lat": 41.063105449335495,
+        "alt_m": 3000.0
+      },
+      "mid_waypoints": [
+        {
+          "lon": 116.30222159303027,
+          "lat": 40.52501663038863,
+          "alt_m": 3000
+        },
+        {
+          "lon": 116.5195046089279,
+          "lat": 40.00372676035467,
+          "alt_m": 3000
+        }
+      ]
+    }
+  ],
+  "red_forces": {
+    "radars": [
+      {
+        "id": "radar_1786430183478",
+        "lon": 116.10054207161798,
+        "lat": 39.893963015168175,
+        "radius_km": 50,
+        "alt_m": 10
+      }
+    ]
+  },
+  "terrain": {
+    "source": "path",
+    "path": "__P__"
+  },
+  "parameters": {
+    "p_cross": 0.9
+  },
+  "zones": [
+    {
+      "id": "zone_1786418099258",
+      "shape": "polygon",
+      "geometry": {
+        "vertices": [
+          [
+            116.13619653711649,
+            40.07186918292957
+          ],
+          [
+            116.91994987492495,
+            40.58747146826297
+          ],
+          [
+            116.5682729278144,
+            40.19722929127514
+          ]
+        ]
+      },
+      "alt_min_m": 0,
+      "alt_max_m": 12000,
+      "zone_type": "no_fly"
+    },
+    {
+      "id": "rz_1786418172746",
+      "shape": "circle",
+      "geometry": {
+        "center": [
+          116.87035584365995,
+          40.01756770083293
+        ],
+        "radius_km": 20
+      },
+      "alt_min_m": 1000,
+      "alt_max_m": 6000,
+      "zone_type": "restricted"
+    }
+  ]
+}"#;
         let s = s.replace("__P__", &cand.to_string_lossy().replace('\\', "\\\\"));
         let input = parse(&s);
         let out = solve(&input, &SolveParams::default(), 0).unwrap();
@@ -9433,81 +9430,80 @@ mod tests {
         // 替代穿禁飞方块被拒 → 不得再回退 raw 交付（旧行为 status=planned +
         // 密集网格楼梯），必须明确 no_solution + 保留失败原因。
         let s = r#"{
-            "aircraft": [
-                {
-                    "id": "v1",
-                    "profile": {
-                        "aircraft_type": "FIXED_WING",
-                        "cruise_speed_mps": 250,
-                        "min_turn_radius_m": 100000,
-                        "max_climb_angle_deg": 15
-                    },
-                    "start": {
-                        "lon": 115.0,
-                        "lat": 39.0,
-                        "alt_m": 3000
-                    },
-                    "target": {
-                        "lon": 117.0,
-                        "lat": 39.0,
-                        "alt_m": 3000.0
-                    },
-                    "mid_waypoints": [
-                        {
-                            "lon": 116.0,
-                            "lat": 39.0,
-                            "alt_m": 3000
-                        },
-                        {
-                            "lon": 116.0,
-                            "lat": 39.5,
-                            "alt_m": 3000
-                        },
-                        {
-                            "lon": 117.0,
-                            "lat": 39.5,
-                            "alt_m": 3000
-                        }
-                    ]
-                }
-            ],
-            "red_forces": {
-                "radars": []
-            },
-            "no_fly_zones": [
-                {
-                    "id": "wall",
-                    "shape": "polygon",
-                    "geometry": {
-                        "vertices": [
-                            [
-                                116.2,
-                                39.25
-                            ],
-                            [
-                                116.8,
-                                39.25
-                            ],
-                            [
-                                116.8,
-                                39.75
-                            ],
-                            [
-                                116.2,
-                                39.75
-                            ]
-                        ]
-                    },
-                    "alt_min_m": 0,
-                    "alt_max_m": 12000
-                }
-            ],
-            "restricted_zones": [],
-            "obstacles": [],
-            "terrain": {
-                "source": "none"
-            }
-        }"#;
+  "aircraft": [
+    {
+      "id": "v1",
+      "profile": {
+        "aircraft_type": "FIXED_WING",
+        "cruise_speed_mps": 250,
+        "min_turn_radius_m": 100000,
+        "max_climb_angle_deg": 15
+      },
+      "start": {
+        "lon": 115.0,
+        "lat": 39.0,
+        "alt_m": 3000
+      },
+      "target": {
+        "lon": 117.0,
+        "lat": 39.0,
+        "alt_m": 3000.0
+      },
+      "mid_waypoints": [
+        {
+          "lon": 116.0,
+          "lat": 39.0,
+          "alt_m": 3000
+        },
+        {
+          "lon": 116.0,
+          "lat": 39.5,
+          "alt_m": 3000
+        },
+        {
+          "lon": 117.0,
+          "lat": 39.5,
+          "alt_m": 3000
+        }
+      ]
+    }
+  ],
+  "red_forces": {
+    "radars": []
+  },
+  "terrain": {
+    "source": "none"
+  },
+  "zones": [
+    {
+      "id": "wall",
+      "shape": "polygon",
+      "geometry": {
+        "vertices": [
+          [
+            116.2,
+            39.25
+          ],
+          [
+            116.8,
+            39.25
+          ],
+          [
+            116.8,
+            39.75
+          ],
+          [
+            116.2,
+            39.75
+          ]
+        ]
+      },
+      "alt_min_m": 0,
+      "alt_max_m": 12000,
+      "zone_type": "no_fly"
+    }
+  ]
+}"#;
         let input = parse(s);
         let out = solve(&input, &SolveParams::default(), 0).unwrap();
         let v = &out.aircraft[0];
@@ -9533,81 +9529,80 @@ mod tests {
         // JSON 由 emit_classified 输出）。该场景 patch 不适用（3 必经点 +
         // turn_radius 100km）→ 默认 fitting_defect。
         let s = r#"{
-            "aircraft": [
-                {
-                    "id": "v1",
-                    "profile": {
-                        "aircraft_type": "FIXED_WING",
-                        "cruise_speed_mps": 250,
-                        "min_turn_radius_m": 100000,
-                        "max_climb_angle_deg": 15
-                    },
-                    "start": {
-                        "lon": 115.0,
-                        "lat": 39.0,
-                        "alt_m": 3000
-                    },
-                    "target": {
-                        "lon": 117.0,
-                        "lat": 39.0,
-                        "alt_m": 3000.0
-                    },
-                    "mid_waypoints": [
-                        {
-                            "lon": 116.0,
-                            "lat": 39.0,
-                            "alt_m": 3000
-                        },
-                        {
-                            "lon": 116.0,
-                            "lat": 39.5,
-                            "alt_m": 3000
-                        },
-                        {
-                            "lon": 117.0,
-                            "lat": 39.5,
-                            "alt_m": 3000
-                        }
-                    ]
-                }
-            ],
-            "red_forces": {
-                "radars": []
-            },
-            "no_fly_zones": [
-                {
-                    "id": "wall",
-                    "shape": "polygon",
-                    "geometry": {
-                        "vertices": [
-                            [
-                                116.2,
-                                39.25
-                            ],
-                            [
-                                116.8,
-                                39.25
-                            ],
-                            [
-                                116.8,
-                                39.75
-                            ],
-                            [
-                                116.2,
-                                39.75
-                            ]
-                        ]
-                    },
-                    "alt_min_m": 0,
-                    "alt_max_m": 12000
-                }
-            ],
-            "restricted_zones": [],
-            "obstacles": [],
-            "terrain": {
-                "source": "none"
-            }
-        }"#;
+  "aircraft": [
+    {
+      "id": "v1",
+      "profile": {
+        "aircraft_type": "FIXED_WING",
+        "cruise_speed_mps": 250,
+        "min_turn_radius_m": 100000,
+        "max_climb_angle_deg": 15
+      },
+      "start": {
+        "lon": 115.0,
+        "lat": 39.0,
+        "alt_m": 3000
+      },
+      "target": {
+        "lon": 117.0,
+        "lat": 39.0,
+        "alt_m": 3000.0
+      },
+      "mid_waypoints": [
+        {
+          "lon": 116.0,
+          "lat": 39.0,
+          "alt_m": 3000
+        },
+        {
+          "lon": 116.0,
+          "lat": 39.5,
+          "alt_m": 3000
+        },
+        {
+          "lon": 117.0,
+          "lat": 39.5,
+          "alt_m": 3000
+        }
+      ]
+    }
+  ],
+  "red_forces": {
+    "radars": []
+  },
+  "terrain": {
+    "source": "none"
+  },
+  "zones": [
+    {
+      "id": "wall",
+      "shape": "polygon",
+      "geometry": {
+        "vertices": [
+          [
+            116.2,
+            39.25
+          ],
+          [
+            116.8,
+            39.25
+          ],
+          [
+            116.8,
+            39.75
+          ],
+          [
+            116.2,
+            39.75
+          ]
+        ]
+      },
+      "alt_min_m": 0,
+      "alt_max_m": 12000,
+      "zone_type": "no_fly"
+    }
+  ]
+}"#;
         let input = parse(s);
         let out = solve(&input, &SolveParams::default(), 0).unwrap();
         let v = &out.aircraft[0];
@@ -9626,64 +9621,63 @@ mod tests {
     fn classified_on_coarse_no_path() {
         // P3 验收 1：coarse FMM 真无通道 → geometrically_impossible 分类汇总。
         let s = r#"{
-            "aircraft": [
-                {
-                    "id": "v1",
-                    "profile": {
-                        "aircraft_type": "FIXED_WING",
-                        "cruise_speed_mps": 250,
-                        "min_turn_radius_m": 442,
-                        "max_climb_angle_deg": 15
-                    },
-                    "start": {
-                        "lon": 115.0,
-                        "lat": 39.0,
-                        "alt_m": 3000
-                    },
-                    "target": {
-                        "lon": 116.5,
-                        "lat": 39.9,
-                        "alt_m": 3000
-                    }
-                }
-            ],
-            "red_forces": {
-                "radars": []
-            },
-            "no_fly_zones": [
-                {
-                    "id": "wall",
-                    "shape": "polygon",
-                    "geometry": {
-                        "vertices": [
-                            [
-                                115.2,
-                                39.0
-                            ],
-                            [
-                                117.0,
-                                39.0
-                            ],
-                            [
-                                117.0,
-                                40.5
-                            ],
-                            [
-                                115.2,
-                                40.5
-                            ]
-                        ]
-                    },
-                    "alt_min_m": 0,
-                    "alt_max_m": 10000
-                }
-            ],
-            "restricted_zones": [],
-            "obstacles": [],
-            "terrain": {
-                "source": "none"
-            }
-        }"#;
+  "aircraft": [
+    {
+      "id": "v1",
+      "profile": {
+        "aircraft_type": "FIXED_WING",
+        "cruise_speed_mps": 250,
+        "min_turn_radius_m": 442,
+        "max_climb_angle_deg": 15
+      },
+      "start": {
+        "lon": 115.0,
+        "lat": 39.0,
+        "alt_m": 3000
+      },
+      "target": {
+        "lon": 116.5,
+        "lat": 39.9,
+        "alt_m": 3000
+      }
+    }
+  ],
+  "red_forces": {
+    "radars": []
+  },
+  "terrain": {
+    "source": "none"
+  },
+  "zones": [
+    {
+      "id": "wall",
+      "shape": "polygon",
+      "geometry": {
+        "vertices": [
+          [
+            115.2,
+            39.0
+          ],
+          [
+            117.0,
+            39.0
+          ],
+          [
+            117.0,
+            40.5
+          ],
+          [
+            115.2,
+            40.5
+          ]
+        ]
+      },
+      "alt_min_m": 0,
+      "alt_max_m": 10000,
+      "zone_type": "no_fly"
+    }
+  ]
+}"#;
         let input = parse(s);
         let out = solve(&input, &SolveParams::default(), 0).unwrap();
         assert_eq!(out.aircraft[0].status, "no_solution");
@@ -9738,71 +9732,70 @@ mod tests {
             return;
         }
         let s = r#"{
-            "aircraft": [
-                {
-                    "id": "v1",
-                    "profile": {
-                        "aircraft_type": "FIXED_WING",
-                        "cruise_speed_mps": 250,
-                        "min_turn_radius_m": 442,
-                        "max_climb_angle_deg": 15
-                    },
-                    "start": {
-                        "lon": 117.560718576047,
-                        "lat": 38.96247381822325,
-                        "alt_m": 3000
-                    },
-                    "target": {
-                        "lon": 115.51277784181079,
-                        "lat": 40.72094100704186,
-                        "alt_m": 3000.0
-                    },
-                    "mid_waypoints": []
-                }
-            ],
-            "red_forces": {
-                "radars": [
-                    {
-                        "id": "radar_1786439379325",
-                        "lon": 115.9099176949948,
-                        "lat": 40.11567473682985,
-                        "radius_km": 50,
-                        "alt_m": 10
-                    }
-                ]
-            },
-            "no_fly_zones": [
-                {
-                    "id": "zone_1786439400716",
-                    "shape": "polygon",
-                    "geometry": {
-                        "vertices": [
-                            [
-                                116.45960372107142,
-                                39.54130857882594
-                            ],
-                            [
-                                117.72747798452006,
-                                39.878961668275586
-                            ],
-                            [
-                                117.2682607976188,
-                                39.54988915269062
-                            ]
-                        ]
-                    },
-                    "alt_min_m": 0,
-                    "alt_max_m": 12000
-                }
-            ],
-            "restricted_zones": [],
-            "obstacles": [],
-            "terrain": {
-                "source": "path",
-                "path": "__P__"
-            },
-            "parameters": {}
-        }"#;
+  "aircraft": [
+    {
+      "id": "v1",
+      "profile": {
+        "aircraft_type": "FIXED_WING",
+        "cruise_speed_mps": 250,
+        "min_turn_radius_m": 442,
+        "max_climb_angle_deg": 15
+      },
+      "start": {
+        "lon": 117.560718576047,
+        "lat": 38.96247381822325,
+        "alt_m": 3000
+      },
+      "target": {
+        "lon": 115.51277784181079,
+        "lat": 40.72094100704186,
+        "alt_m": 3000.0
+      },
+      "mid_waypoints": []
+    }
+  ],
+  "red_forces": {
+    "radars": [
+      {
+        "id": "radar_1786439379325",
+        "lon": 115.9099176949948,
+        "lat": 40.11567473682985,
+        "radius_km": 50,
+        "alt_m": 10
+      }
+    ]
+  },
+  "terrain": {
+    "source": "path",
+    "path": "__P__"
+  },
+  "parameters": {},
+  "zones": [
+    {
+      "id": "zone_1786439400716",
+      "shape": "polygon",
+      "geometry": {
+        "vertices": [
+          [
+            116.45960372107142,
+            39.54130857882594
+          ],
+          [
+            117.72747798452006,
+            39.878961668275586
+          ],
+          [
+            117.2682607976188,
+            39.54988915269062
+          ]
+        ]
+      },
+      "alt_min_m": 0,
+      "alt_max_m": 12000,
+      "zone_type": "no_fly"
+    }
+  ]
+}"#;
         let s = s.replace("__P__", &cand.to_string_lossy().replace('\\', "\\\\"));
         let input = parse(&s);
         let out = solve(&input, &SolveParams::default(), 0).unwrap();
@@ -9824,7 +9817,7 @@ mod tests {
         );
         // 绕行路径必须离禁飞区多边形 ≥ 2km（inflation）：v1 路径任何段不得进入
         // 三角形近邻（用 zone_segment_clearance_km 复验，与 verify 同口径）。
-        let zone = &input.no_fly_zones[0];
+        let zone = input.zones.iter().find(|z| z.zone_type == ZoneType::NoFly).unwrap();
         for w in v.path.windows(2) {
             let clr =
                 crate::config::zone_segment_clearance_km(w[0].x, w[0].y, w[1].x, w[1].y, zone);
@@ -9858,67 +9851,66 @@ mod tests {
             return;
         }
         let s = r#"{
-            "aircraft": [
-                {
-                    "id": "v1",
-                    "profile": {
-                        "aircraft_type": "FIXED_WING",
-                        "cruise_speed_mps": 250,
-                        "min_turn_radius_m": 442,
-                        "max_climb_angle_deg": 15
-                    },
-                    "start": {
-                        "lon": 115.8,
-                        "lat": 39.8,
-                        "alt_m": 3000
-                    },
-                    "target": {
-                        "lon": 117.2,
-                        "lat": 40.2,
-                        "alt_m": 3000
-                    },
-                    "mid_waypoints": []
-                }
-            ],
-            "red_forces": {
-                "radars": []
-            },
-            "no_fly_zones": [
-                {
-                    "id": "zone_block2",
-                    "shape": "polygon",
-                    "geometry": {
-                        "vertices": [
-                            [
-                                115.9,
-                                39.65
-                            ],
-                            [
-                                117.1,
-                                39.65
-                            ],
-                            [
-                                117.1,
-                                41.6
-                            ],
-                            [
-                                115.9,
-                                41.6
-                            ]
-                        ]
-                    },
-                    "alt_min_m": 0,
-                    "alt_max_m": 12000
-                }
-            ],
-            "restricted_zones": [],
-            "obstacles": [],
-            "terrain": {
-                "source": "path",
-                "path": "__P__"
-            },
-            "parameters": {}
-        }"#;
+  "aircraft": [
+    {
+      "id": "v1",
+      "profile": {
+        "aircraft_type": "FIXED_WING",
+        "cruise_speed_mps": 250,
+        "min_turn_radius_m": 442,
+        "max_climb_angle_deg": 15
+      },
+      "start": {
+        "lon": 115.8,
+        "lat": 39.8,
+        "alt_m": 3000
+      },
+      "target": {
+        "lon": 117.2,
+        "lat": 40.2,
+        "alt_m": 3000
+      },
+      "mid_waypoints": []
+    }
+  ],
+  "red_forces": {
+    "radars": []
+  },
+  "terrain": {
+    "source": "path",
+    "path": "__P__"
+  },
+  "parameters": {},
+  "zones": [
+    {
+      "id": "zone_block2",
+      "shape": "polygon",
+      "geometry": {
+        "vertices": [
+          [
+            115.9,
+            39.65
+          ],
+          [
+            117.1,
+            39.65
+          ],
+          [
+            117.1,
+            41.6
+          ],
+          [
+            115.9,
+            41.6
+          ]
+        ]
+      },
+      "alt_min_m": 0,
+      "alt_max_m": 12000,
+      "zone_type": "no_fly"
+    }
+  ]
+}"#;
         let s = s.replace("__P__", &cand.to_string_lossy().replace('\\', "\\\\"));
         let input = parse(&s);
         let out = solve(&input, &SolveParams::default(), 0).unwrap();
@@ -9949,7 +9941,7 @@ mod tests {
             y_max
         );
         // 硬约束复验：路径段不得穿入禁飞区（与 verify 同口径 clearance ≥ 2km）。
-        let zone = &input.no_fly_zones[0];
+        let zone = input.zones.iter().find(|z| z.zone_type == ZoneType::NoFly).unwrap();
         for w in v.path.windows(2) {
             let clr =
                 crate::config::zone_segment_clearance_km(w[0].x, w[0].y, w[1].x, w[1].y, zone);
@@ -10122,60 +10114,62 @@ mod tests {
         // 环带 [10,120] 被两同心 no_fly 圆（100km / 130km）围死 → 环带内无可达
         // cell → 点目标回退被 Rmin 挡住（dist=0 < 10）→ no_solution + 标注。
         let s = r#"{
-            "aircraft": [
-                {
-                    "id": "v1",
-                    "start": {
-                        "lon": 115.0,
-                        "lat": 39.0,
-                        "alt_m": 3000
-                    },
-                    "target": {
-                        "lon": 116.5,
-                        "lat": 39.9,
-                        "alt_m": 3000
-                    },
-                    "weapon": {
-                        "weapon_type": "agm",
-                        "range_km": [
-                            10.0,
-                            120.0
-                        ]
-                    }
-                }
-            ],
-            "no_fly_zones": [
-                {
-                    "id": "nf_in",
-                    "shape": "circle",
-                    "geometry": {
-                        "center": [
-                            116.5,
-                            39.9
-                        ],
-                        "radius_km": 100
-                    },
-                    "alt_min_m": 0,
-                    "alt_max_m": 12000
-                },
-                {
-                    "id": "nf_out",
-                    "shape": "circle",
-                    "geometry": {
-                        "center": [
-                            116.5,
-                            39.9
-                        ],
-                        "radius_km": 130
-                    },
-                    "alt_min_m": 0,
-                    "alt_max_m": 12000
-                }
-            ],
-            "terrain": {
-                "source": "none"
-            }
-        }"#;
+  "aircraft": [
+    {
+      "id": "v1",
+      "start": {
+        "lon": 115.0,
+        "lat": 39.0,
+        "alt_m": 3000
+      },
+      "target": {
+        "lon": 116.5,
+        "lat": 39.9,
+        "alt_m": 3000
+      },
+      "weapon": {
+        "weapon_type": "agm",
+        "range_km": [
+          10.0,
+          120.0
+        ]
+      }
+    }
+  ],
+  "terrain": {
+    "source": "none"
+  },
+  "zones": [
+    {
+      "id": "nf_in",
+      "shape": "circle",
+      "geometry": {
+        "center": [
+          116.5,
+          39.9
+        ],
+        "radius_km": 100
+      },
+      "alt_min_m": 0,
+      "alt_max_m": 12000,
+      "zone_type": "no_fly"
+    },
+    {
+      "id": "nf_out",
+      "shape": "circle",
+      "geometry": {
+        "center": [
+          116.5,
+          39.9
+        ],
+        "radius_km": 130
+      },
+      "alt_min_m": 0,
+      "alt_max_m": 12000,
+      "zone_type": "no_fly"
+    }
+  ]
+}"#;
         let input = parse(s);
         let out = solve(&input, &SolveParams::default(), 0).unwrap();
         let v = &out.aircraft[0];
