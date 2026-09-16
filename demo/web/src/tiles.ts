@@ -188,7 +188,7 @@ async function loadTile(
     baseMapError: null,
   };
   cache.set(t.key, entry);
-  const wantTerrain = terrainConfig.source === 'path' && terrainConfig.path;
+  const wantTerrain = terrainConfig.arpack !== undefined;
   const src = baseMapConfig.source;
   const wantBase = (src === 'mask' || src === 'tiff') && baseMapConfig.path;
   if (!wantTerrain && !wantBase) return entry;
@@ -196,7 +196,7 @@ async function loadTile(
   try {
     const res = await fetchTile(
       {
-        terrainPath: wantTerrain ? (terrainConfig.path ?? null) : null,
+        terrainPath: wantTerrain ? (terrainConfig.arpack ?? null) : null,
         basemap: wantBase
           ? {
               source: src as 'mask' | 'tiff',
@@ -401,8 +401,7 @@ export function useViewportTiles(opts: ViewportTilesOptions): ViewportTilesState
     refresh();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
-    terrainConfig.source,
-    terrainConfig.path,
+    terrainConfig.arpack,
     baseMapConfig.source,
     baseMapConfig.path,
     baseMapConfig.tiffProjection,

@@ -11,7 +11,7 @@ import type {
   BaseMapSource,
   TiffProjection,
   CliTerrainMode,
-  DataFile,
+  DataFilesResponse,
 } from '../types';
 import { WEAPON_DEFAULT_RANGE_KM } from '../types';
 import { fetchElevation, sanitizePath } from '../api';
@@ -39,7 +39,7 @@ interface ControlPanelProps {
   cliTerrainMode: CliTerrainMode;
   onCliTerrainModeChange: (mode: CliTerrainMode) => void;
   /** 数据文件扫描结果（2026-08-20：demo-server 扫描 data/ 供下拉选择） */
-  dataFiles?: { terrain: DataFile[]; mask: DataFile[] };
+  dataFiles?: DataFilesResponse;
 }
 
 export function ControlPanel({
@@ -109,8 +109,8 @@ export function ControlPanel({
     const t =
       cliTerrainMode === 'follow_view'
         ? config.terrain
-        : ({ source: 'none' } as const);
-    const terrainPath = t.source === 'path' ? t.path ?? '' : '';
+        : ({} as const);
+    const terrainPath = t.arpack ?? '';
     return (
       `${a.id}|${a.start.lon.toFixed(5)},${a.start.lat.toFixed(5)}|` +
       `${a.target.lon.toFixed(5)},${a.target.lat.toFixed(5)}|${terrainPath}`
@@ -132,8 +132,8 @@ export function ControlPanel({
           const t =
             cliTerrainModeRef.current === 'follow_view'
               ? configRef.current.terrain
-              : ({ source: 'none' } as const);
-          const terrainPath = t.source === 'path' && t.path ? t.path : null;
+              : ({} as const);
+          const terrainPath = t.arpack ?? null;
           if (terrainPath == null) {
             setGroundAlt((prev) => ({ ...prev, [kind]: null }));
             return;
@@ -221,6 +221,7 @@ export function ControlPanel({
     const id = `zone_${Date.now()}`;
     const zone: Zone = {
       id,
+      zone_type: 'no_fly',
       shape: 'circle',
       geometry: {
         center: [
@@ -231,25 +232,26 @@ export function ControlPanel({
       },
       // 禁飞区无高度范围（全高度禁入，2026-08-12）
     };
-    update({ no_fly_zones: [...config.no_fly_zones, zone] });
+    update({ zones: [...config.zones, zone] });
   }, [config]);
 
   const updateZone = (id: string, patch: Partial<Zone>) =>
     update({
-      no_fly_zones: config.no_fly_zones.map((z) =>
+      zones: config.zones.map((z) =>
         z.id === id ? { ...z, ...patch } : z,
       ),
     });
   const removeZone = (id: string) =>
     update({
-      no_fly_zones: config.no_fly_zones.filter((z) => z.id !== id),
+      zones: config.zones.filter((z) => z.id !== id),
     });
 
-  // 限飞区（restricted_zones 独立数组）
+  // 限飞区
   const addRestrictedZone = useCallback(() => {
     const id = `rz_${Date.now()}`;
     const zone: Zone = {
       id,
+      zone_type: 'restricted',
       shape: 'circle',
       geometry: {
         center: [
@@ -262,18 +264,18 @@ export function ControlPanel({
       alt_min_m: 0,
       alt_max_m: 12000,
     };
-    update({ restricted_zones: [...config.restricted_zones, zone] });
+    update({ zones: [...config.zones, zone] });
   }, [config]);
 
   const updateRestrictedZone = (id: string, patch: Partial<Zone>) =>
     update({
-      restricted_zones: config.restricted_zones.map((z) =>
+      zones: config.zones.map((z) =>
         z.id === id ? { ...z, ...patch } : z,
       ),
     });
   const removeRestrictedZone = (id: string) =>
     update({
-      restricted_zones: config.restricted_zones.filter((z) => z.id !== id),
+      zones: config.zones.filter((z) => z.id !== id),
     });
 
   return (
@@ -310,34 +312,34 @@ export function ControlPanel({
               </select>
             </div>
             <div>
-              <label>巡航速度 (m/s)</label>
+              <label>最大速度 (m/s)</label>
               <input
                 type="number"
-                value={aircraft.profile?.cruise_speed_mps ?? 250}
+                value={aircraft.profile?.maximum_speed_mps ?? 600}
                 onChange={(e) =>
-                  updateProfile({ cruise_speed_mps: +e.target.value })
+                  updateProfile({ maximum_speed_mps: +e.target.value })
                 }
               />
             </div>
           </div>
           <div className="field-row">
             <div>
-              <label>最小转弯半径 (m)</label>
+              <label>最大转弯角速率 (°/s)</label>
               <input
                 type="number"
-                value={aircraft.profile?.min_turn_radius_m ?? 442}
+                value={aircraft.profile?.maximum_turn_rate_dps ?? 20}
                 onChange={(e) =>
-                  updateProfile({ min_turn_radius_m: +e.target.value })
+                  updateProfile({ maximum_turn_rate_dps: +e.target.value })
                 }
               />
             </div>
             <div>
-              <label>最大爬升角 (°)</label>
+              <label>最大爬升率 (m/s)</label>
               <input
                 type="number"
-                value={aircraft.profile?.max_climb_angle_deg ?? 15}
+                value={aircraft.profile?.maximum_climb_rate_mps ?? 250}
                 onChange={(e) =>
-                  updateProfile({ max_climb_angle_deg: +e.target.value })
+                  updateProfile({ maximum_climb_rate_mps: +e.target.value })
                 }
               />
             </div>
@@ -667,42 +669,26 @@ export function ControlPanel({
       </div>
       <div className="field-row">
         <div>
-          <label>数据源</label>
+          <label>地形数据</label>
           <select
-            value={config.terrain.source}
+            value={config.terrain.arpack ?? ''}
             onChange={(e) =>
               update({
                 terrain: {
                   ...config.terrain,
-                  source: e.target.value as 'none' | 'path',
+                  arpack: e.target.value || undefined,
                 },
               })
             }
           >
-            <option value="none">无（海拔 0 平面）</option>
-            <option value="path">数据文件</option>
+            <option value="">无（海拔 0 平面）</option>
+            {(dataFiles?.index?.arpacks ?? []).map((f) => (
+              <option key={f.id} value={f.id}>
+                {f.desc}
+              </option>
+            ))}
           </select>
         </div>
-        {config.terrain.source === 'path' && (
-          <div>
-            <label>文件</label>
-            <select
-              value={config.terrain.path ?? ''}
-              onChange={(e) =>
-                update({
-                  terrain: { ...config.terrain, path: e.target.value },
-                })
-              }
-            >
-              <option value="">选择地形文件…</option>
-              {(dataFiles?.terrain ?? []).map((f) => (
-                <option key={f.path} value={f.path}>
-                  {f.name}（{(f.size / 1048576).toFixed(0)}MB）
-                </option>
-              ))}
-            </select>
-          </div>
-        )}
       </div>
 
       {/* BaseMap（2026-08-13 主管定稿：掩膜 / GeoTIFF / WMS 三选一；置入左侧功能区） */}
@@ -738,9 +724,9 @@ export function ControlPanel({
                 onChange={(e) => updateBaseMap({ path: sanitizePath(e.target.value) })}
               >
                 <option value="">选择掩膜文件…</option>
-                {(dataFiles?.mask ?? []).map((f) => (
-                  <option key={f.path} value={f.path}>
-                    {f.name}（{(f.size / 1048576).toFixed(0)}MB）
+                {(dataFiles?.index?.masks ?? []).map((f) => (
+                  <option key={f.id} value={f.id}>
+                    {f.desc}
                   </option>
                 ))}
               </select>
@@ -903,8 +889,8 @@ export function ControlPanel({
       </button>
 
       {/* Zones */}
-      <h3>禁飞区·no_fly ({config.no_fly_zones.length})</h3>
-      {config.no_fly_zones.map((z) => (
+      <h3>禁飞区·no_fly ({config.zones.filter(z => z.zone_type === 'no_fly').length})</h3>
+      {config.zones.filter(z => z.zone_type === 'no_fly').map((z) => (
         <div key={z.id} className="obstacle-item">
           <div className="obstacle-header">
             <span>{z.id}</span>
@@ -1085,8 +1071,8 @@ export function ControlPanel({
       </button>
 
       {/* Restricted zones */}
-      <h3>限飞区 ({config.restricted_zones.length})</h3>
-      {config.restricted_zones.map((z) => {
+      <h3>限飞区 ({config.zones.filter(z => z.zone_type === 'restricted').length})</h3>
+      {config.zones.filter(z => z.zone_type === 'restricted').map((z) => {
         const g = z.geometry as { center?: [number, number]; radius_km?: number; vertices?: [number, number][] };
         return (
           <div key={z.id} className="obstacle-item">

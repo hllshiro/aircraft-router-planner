@@ -10,7 +10,7 @@ import type {
   PolygonGeometry,
   BaseMapConfig,
   CliTerrainMode,
-  DataFile,
+  DataFilesResponse,
 } from './types';
 import { buildDefaultInput, defaultBaseMapConfig } from './types';
 import { planRoute, sceneBounds, fetchDataFiles } from './api';
@@ -40,10 +40,7 @@ export default function App() {
   const [cliTerrainMode, setCliTerrainMode] = useState<CliTerrainMode>('follow_view');
 
   // 数据文件扫描（2026-08-20：demo-server /api/data-files 扫描 data/，供下拉选择）
-  const [dataFiles, setDataFiles] = useState<{ terrain: DataFile[]; mask: DataFile[] }>({
-    terrain: [],
-    mask: [],
-  });
+  const [dataFiles, setDataFiles] = useState<DataFilesResponse | null>(null);
 
   // 启动时扫描数据目录：自动填充默认地形与底图（第一个非空选项）
   useEffect(() => {
@@ -51,20 +48,20 @@ export default function App() {
     fetchDataFiles()
       .then((res) => {
         if (cancelled) return;
-        const terrainFiles = res.terrain ?? [];
-        const maskFiles = res.mask ?? [];
-        setDataFiles({ terrain: terrainFiles, mask: maskFiles });
-        if (terrainFiles.length > 0) {
+        setDataFiles(res);
+        const arpacks = res.index?.arpacks ?? [];
+        const masks = res.index?.masks ?? [];
+        if (arpacks.length > 0) {
           setConfig((prev) => ({
             ...prev,
-            terrain: { source: 'path', path: terrainFiles[0].path },
+            terrain: { arpack: arpacks[0].id },
           }));
         }
-        if (maskFiles.length > 0) {
+        if (masks.length > 0) {
           setBaseMapConfig((prev) => ({
             ...prev,
             source: 'mask',
-            path: maskFiles[0].path,
+            path: `${res.data_dir}/${masks[0].file}`,
           }));
         }
       })
@@ -103,7 +100,7 @@ export default function App() {
       const input: Input =
         cliTerrainMode === 'follow_view'
           ? config
-          : { ...config, terrain: { source: 'none' } };
+          : { ...config, terrain: {} };
       const res = await planRoute(input);
       setResult(res);
     } catch (err) {
@@ -160,9 +157,7 @@ export default function App() {
       };
       return {
         ...prev,
-        no_fly_zones: prev.no_fly_zones.map(shift),
-        restricted_zones: prev.restricted_zones.map(shift),
-        obstacles: prev.obstacles.map(shift),
+        zones: prev.zones.map(shift),
       };
     });
   }, []);
@@ -216,28 +211,9 @@ export default function App() {
           }),
         }));
       } else if (clickMode === 'polygon' && editingZoneId) {
-        // 场景拾取追加多边形顶点（禁飞区或限飞区）
+        // 场景拾取追加多边形顶点
         setConfig((prev) => {
-          // 先查禁飞区数组（zone_ 前缀），未命中则查限飞区数组（rz_ 前缀）
-          const inNoFly = prev.no_fly_zones.some(
-            (z) => z.id === editingZoneId,
-          );
-          if (inNoFly) {
-            const zones = prev.no_fly_zones.map((z) => {
-              if (z.id !== editingZoneId || z.shape !== 'polygon') return z;
-              return {
-                ...z,
-                geometry: {
-                  vertices: [
-                    ...(z.geometry as { vertices: [number, number][] }).vertices,
-                    [wp.lon, wp.lat] as [number, number],
-                  ],
-                },
-              };
-            });
-            return { ...prev, no_fly_zones: zones };
-          }
-          const rzones = prev.restricted_zones.map((z) => {
+          const zones = prev.zones.map((z) => {
             if (z.id !== editingZoneId || z.shape !== 'polygon') return z;
             return {
               ...z,
@@ -249,7 +225,7 @@ export default function App() {
               },
             };
           });
-          return { ...prev, restricted_zones: rzones };
+          return { ...prev, zones };
         });
       }
     },
@@ -291,7 +267,7 @@ export default function App() {
           baseMapError={baseMapError}
           cliTerrainMode={cliTerrainMode}
           onCliTerrainModeChange={setCliTerrainMode}
-          dataFiles={dataFiles}
+          dataFiles={dataFiles ?? undefined}
         />
       </div>
       <div className="canvas">
@@ -303,20 +279,7 @@ export default function App() {
           target={config.aircraft[0].target}
           aircraft={config.aircraft}
           radars={config.red_forces.radars}
-          zones={[
-            ...config.no_fly_zones.map((z) => ({
-              ...z,
-              zone_type: 'no_fly' as const,
-            })),
-            ...config.restricted_zones.map((z) => ({
-              ...z,
-              zone_type: 'restricted' as const,
-            })),
-            ...config.obstacles.map((z) => ({
-              ...z,
-              zone_type: 'obstacle' as const,
-            })),
-          ]}
+          zones={config.zones}
           results={result?.aircraft ?? null}
           terrainConfig={config.terrain}
           baseMapConfig={baseMapConfig}

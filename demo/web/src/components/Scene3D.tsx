@@ -34,7 +34,7 @@ interface Scene3DProps {
   /** zone 渲染视图：输入 zone 不带 zone_type，由 App 按所属数组打标（仅前端着色用） */
   zones: VisualZone[];
   results: AircraftOutput[] | null;
-  /** 地形源配置（source=none/path；瓦片按相机视口加载，2026-08-13） */
+  /** 地形源配置（arpack 索引 id；瓦片按相机视口加载） */
   terrainConfig: TerrainConfig;
   /** 底图配置（mask/tiff 瓦片级纹理；wms 视口级单图） */
   baseMapConfig: BaseMapConfig;

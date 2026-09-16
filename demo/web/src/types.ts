@@ -19,12 +19,10 @@ export type AircraftType = 'FIXED_WING' | 'ROTORCRAFT';
 
 export interface AircraftProfile {
   aircraft_type: AircraftType;
-  cruise_speed_mps?: number;
-  speed_range_mps?: [number, number];
-  min_turn_radius_m?: number;
-  max_climb_angle_deg?: number;
-  max_bank_deg?: number;
-  ceiling_m?: number;
+  maximum_speed_mps?: number;
+  maximum_turn_rate_dps?: number;
+  maximum_climb_rate_mps?: number;
+  maximum_altitude_m?: number;
 }
 
 export interface AircraftInput {
@@ -64,18 +62,17 @@ export type ZoneGeometry = CircleGeometry | PolygonGeometry;
 
 export interface Zone {
   id: string;
-  /** zone_type 不入 JSON（后端按所属数组注入：no_fly_zones/restricted_zones/obstacles）；
-   *  前端渲染时由 App 按数组打标（Scene3D 的 VisualZone） */
+  zone_type: ZoneType;
   shape: 'circle' | 'polygon';
   geometry: ZoneGeometry;
-  /** 仅限飞区（restricted）需要高度区间；禁飞/障碍全高度禁入，省略（2026-08-12） */
+  /** 仅限飞区（restricted）需要高度区间；禁飞/障碍全高度禁入，省略 */
   alt_min_m?: number;
   alt_max_m?: number;
 }
 
 export interface TerrainConfig {
-  source: 'none' | 'path';
-  path?: string;
+  arpack?: string;
+  mask?: string;
 }
 
 /** CLI 计算数据源（2026-08-20）：none = 平地计算（不传地形）；
@@ -124,9 +121,7 @@ export interface Input {
   /** 飞行器数组（必填非空；空数组 → missing_aircraft） */
   aircraft: AircraftInput[];
   red_forces: { radars: Radar[] };
-  no_fly_zones: Zone[];
-  restricted_zones: Zone[];
-  obstacles: Zone[];
+  zones: Zone[];
   terrain: TerrainConfig;
   parameters: ParamsOverride;
 }
@@ -223,10 +218,8 @@ export function buildDefaultInput(): Input {
       },
     ],
     red_forces: { radars: [] },
-    no_fly_zones: [],
-    restricted_zones: [],
-    obstacles: [],
-    terrain: { source: 'none', path: undefined },
+    zones: [],
+    terrain: {},
     parameters: {},
   };
 }
@@ -282,6 +275,9 @@ export interface DataFile {
 
 export interface DataFilesResponse {
   data_dir: string;
-  terrain: DataFile[];
-  mask: DataFile[];
+  index?: {
+    arpacks?: Array<{ id: string; desc: string; file: string }>;
+    masks?: Array<{ id: string; desc: string; file: string }>;
+  };
+  error?: string;
 }
