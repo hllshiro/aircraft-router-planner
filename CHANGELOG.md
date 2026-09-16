@@ -9,6 +9,8 @@
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-15
+
 ### Changed
 - **Breaking**: 三类 Zone（`no_fly_zones`/`restricted_zones`/`obstacles`）合并为统一 `zones` 数组，每个 zone 必须提供 `zone_type` 字段（no_fly / restricted / obstacle）。输入 JSON 中旧三数组改为 `"zones": [...]`。
 - **Breaking**: 飞机性能参数重构——删除 `cruise_speed_mps`/`speed_range_mps`/`min_turn_radius_m`/`max_climb_angle_deg`/`max_bank_deg`/`ceiling_m`，新增 `maximum_speed_mps`/`maximum_turn_rate_dps`/`maximum_climb_rate_mps`/`maximum_altitude_m`（全部可选，有现代战机默认值）。
