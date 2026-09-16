@@ -11,7 +11,7 @@
 use std::time::Instant;
 
 use crate::config::{
-    Input, Output, PathPoint, Stats, TerrainIndex, AircraftOutput, Zone, ZoneShape, ZoneType,
+    Input, Output, PathPoint, Stats, TerrainIndex, AircraftOutput, Zone, ZoneShape,
     point_in_polygon_xy, pt_seg_dist_km, zone_contains, zone_contains_at,
 };
 use crate::coord::Geo;
@@ -303,7 +303,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
     let restricted_wall_zs: Vec<&Zone> = input
         .zones
         .iter()
-        .filter(|z| z.zone_type == ZoneType::Restricted)
+        .filter(|z| !z.is_wall())
         .filter(|z| {
             specs.iter().zip(&spec_climb).any(|(s, (mcd, ceil))| {
                 restricted_blocks_alt(z, s.alt_m)
@@ -1473,7 +1473,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                             let restricted: Vec<&Zone> = input
                                 .zones
                                 .iter()
-                                .filter(|z| z.zone_type == ZoneType::Restricted)
+                                .filter(|z| !z.is_wall())
                                 .collect();
                             let inflation_m = (opts.turn_radius_m * 0.5).clamp(2_000.0, 10_000.0);
                             let radar_opt = if input.red_forces.radars.is_empty() {
@@ -3045,7 +3045,7 @@ fn segment_polygon_bands_t(
 /// 飞行高度落在 restricted 高度区间内 → 该机 FMM 画墙绕行（否则直穿）。
 /// pub(crate)：patch.rs 限飞区弦判据边检查复用（docs/12 §3.3）。
 pub(crate) fn restricted_blocks_alt(z: &Zone, alt_m: f64) -> bool {
-    matches!(z.zone_type, crate::config::ZoneType::Restricted)
+    !z.is_wall()
         && z.alt_min_m.is_some_and(|lo| alt_m >= lo)
         && z.alt_max_m.is_some_and(|hi| alt_m <= hi)
 }
@@ -3470,7 +3470,7 @@ fn line_hits_restricted_band_km(
     zones: &[Zone],
 ) -> bool {
     zones.iter().any(|z| {
-        if z.zone_type != crate::config::ZoneType::Restricted {
+        if z.is_wall() {
             return false;
         }
         // 端点本身在带内（退化/零长度段覆盖；圆/多边形同口径 zone_contains）
