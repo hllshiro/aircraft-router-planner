@@ -5,7 +5,7 @@
 //! - `InputValidator`：畸形/退化输入在解析层即拦截 → `input_invalid` + 原因码。
 //!
 //! 严格契约：`deny_unknown_fields`（未知字段 = 畸形，属 MalformedJson）；
-//! `zone_type` 从 JSON 直接反序列化（每个 zone 必须提供）。
+//! 区域行为通过高度区间判定：无 alt_min/alt_max → 全高度禁入（硬墙）；有高度区间 → 高度层禁入。
 
 use crate::coord::Geo;
 use crate::error::{AppError, InputInvalidReason};
@@ -143,8 +143,6 @@ fn default_antenna_m() -> f64 {
 #[serde(deny_unknown_fields)]
 pub struct Zone {
     pub id: String,
-    /// 区域类型（必填字段，从 JSON 反序列化）。
-    pub zone_type: ZoneType,
     #[serde(flatten)]
     pub shape: ZoneShape,
     /// 高度区间下界（MSL）。
@@ -157,20 +155,11 @@ pub struct Zone {
     pub alt_max_m: Option<f64>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum ZoneType {
-    #[default]
-    NoFly,
-    Restricted,
-    Obstacle,
-}
-
 impl Zone {
-    /// 是否代价场硬墙（Phase 4 M2）：NoFly/Obstacle 全高度水平禁入；
-    /// Restricted 为高度层禁入（区间外可穿越），不画墙。
+    /// 是否代价场硬墙（Phase 4 M2）：无高度区间的区域为全高度禁入；
+    /// 有高度区间的区域为高度层禁入（区间外可穿越），不画墙。
     pub fn is_wall(&self) -> bool {
-        matches!(self.zone_type, ZoneType::NoFly | ZoneType::Obstacle)
+        self.alt_min_m.is_none() && self.alt_max_m.is_none()
     }
 }
 
