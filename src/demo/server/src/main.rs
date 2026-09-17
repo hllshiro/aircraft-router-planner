@@ -445,34 +445,24 @@ fn data_dir() -> PathBuf {
         .unwrap_or(data_dir)
 }
 
-/// 根据索引 id 解析实际文件路径：读取 data/index.yaml，查找 arpacks/masks 中
-/// 匹配 id 的条目，返回 data_dir/{file} 完整路径。
-/// 若 id 在 index.yaml 中未找到，返回 None（调用方回退到原路径解析逻辑）。
+/// 根据 id 解析实际文件路径：扫描 data 目录，查找匹配 id（文件名去扩展名）的文件。
+/// 返回 data_dir/{id}.{ext} 完整路径。
 fn resolve_index_id(id: &str) -> Option<PathBuf> {
     let dir = data_dir();
-    let index_path = dir.join("index.yaml");
-    if !index_path.exists() {
+    if !dir.is_dir() {
         return None;
     }
-    let content = std::fs::read_to_string(&index_path).ok()?;
-    let index: serde_json::Value = serde_yaml_neo::from_str(&content).ok()?;
-    // 在 arpacks 和 masks 中查找匹配 id
-    for key in &["arpacks", "masks"] {
-        if let Some(items) = index[*key].as_array() {
-            for item in items {
-                if item["id"].as_str() == Some(id) {
-                    if let Some(file) = item["file"].as_str() {
-                        return Some(dir.join(file));
-                    }
-                }
-            }
+    for ext in &["arpack", "mask"] {
+        let path = dir.join(format!("{id}.{ext}"));
+        if path.exists() {
+            return Some(path);
         }
     }
     None
 }
 
-/// 解析地形路径：先尝试 index.yaml id 解析，再回退到文件路径解析。
-fn resolve_terrain_or_index(path: &str) -> Result<PathBuf, String> {
+/// 解析地形路径：先尝试 index id 解析，再回退到文件路径解析。
+pub(crate) fn resolve_terrain_or_index(path: &str) -> Result<PathBuf, String> {
     // 先尝试作为 index id 解析
     if let Some(p) = resolve_index_id(path) {
         if p.exists() {
@@ -483,42 +473,49 @@ fn resolve_terrain_or_index(path: &str) -> Result<PathBuf, String> {
     resolve_terrain_path(path)
 }
 
-/// GET /api/data-files — 读取 data/index.yaml 索引，返回地形/掩膜候选项。
+/// GET /api/data-files — 扫描 data 目录，返回地形/掩膜候选项。
 /// 数据目录：环境变量 DATA_DIR 覆盖，默认 exe 同级 data/。
 async fn data_files_route() -> Json<Value> {
-    let data_dir: PathBuf = std::env::var("DATA_DIR")
-        .unwrap_or_else(|_| "data".into())
-        .into();
-    let data_dir = std::env::current_exe()
-        .ok()
-        .and_then(|e| e.parent().map(|d| d.to_path_buf()))
-        .map(|d| d.join(&data_dir))
-        .unwrap_or(data_dir);
-
-    let index_path = data_dir.join("index.yaml");
-    if index_path.exists() {
-        match std::fs::read_to_string(&index_path) {
-            Ok(content) => match serde_yaml_neo::from_str::<serde_json::Value>(&content) {
-                Ok(val) => Json(serde_json::json!({
-                    "data_dir": data_dir.to_string_lossy(),
-                    "index": val,
+    let dir = data_dir();
+    let mut arpacks = Vec::new();
+    let mut masks = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+            if stem.is_empty() {
+                continue;
+            }
+            let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+            match ext {
+                "arpack" => arpacks.push(serde_json::json!({
+                    "id": stem,
+                    "desc": stem,
+                    "file": file_name,
                 })),
-                Err(e) => Json(serde_json::json!({
-                    "data_dir": data_dir.to_string_lossy(),
-                    "error": format!("index.yaml parse error: {e}"),
+                "mask" => masks.push(serde_json::json!({
+                    "id": stem,
+                    "desc": stem,
+                    "file": file_name,
                 })),
-            },
-            Err(e) => Json(serde_json::json!({
-                "data_dir": data_dir.to_string_lossy(),
-                "error": format!("index.yaml read error: {e}"),
-            })),
+                _ => {}
+            }
         }
-    } else {
-        Json(serde_json::json!({
-            "data_dir": data_dir.to_string_lossy(),
-            "error": "index.yaml not found",
-        }))
     }
+    // 按 id 排序保证确定性
+    arpacks.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
+    masks.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
+    Json(serde_json::json!({
+        "data_dir": dir.to_string_lossy(),
+        "index": {
+            "arpacks": arpacks,
+            "masks": masks,
+        }
+    }))
 }
 
 #[tokio::main]

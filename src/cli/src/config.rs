@@ -187,31 +187,61 @@ pub struct TerrainConfig {
     pub mask: Option<String>,
 }
 
-// ==================== 地形索引（data/index.yaml） ====================
+// ==================== 地形索引（扫描 data 目录） ====================
 
 /// 索引条目（arpack / mask 通用）。
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct TerrainIndexEntry {
     pub id: String,
     pub desc: String,
     pub file: String,
 }
 
-/// 地形数据索引（从 data/index.yaml 加载）。
-#[derive(Debug, Clone, Deserialize)]
+/// 地形数据索引（扫描 data 目录，按扩展名分类）。
+#[derive(Debug, Clone)]
 pub struct TerrainIndex {
-    #[serde(default)]
     pub arpacks: Vec<TerrainIndexEntry>,
-    #[serde(default)]
     pub masks: Vec<TerrainIndexEntry>,
 }
 
 impl TerrainIndex {
-    /// 从 data/index.yaml 加载索引。
+    /// 扫描 data 目录，按扩展名分类生成索引。
     pub fn load(data_dir: &std::path::Path) -> Option<Self> {
-        let index_path = data_dir.join("index.yaml");
-        let content = std::fs::read_to_string(&index_path).ok()?;
-        serde_yaml_neo::from_str(&content).ok()
+        if !data_dir.is_dir() {
+            return None;
+        }
+        let mut arpacks = Vec::new();
+        let mut masks = Vec::new();
+        for entry in std::fs::read_dir(data_dir).ok()? {
+            let entry = entry.ok()?;
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+            if stem.is_empty() {
+                continue;
+            }
+            let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+            match ext {
+                "arpack" => arpacks.push(TerrainIndexEntry {
+                    id: stem.to_string(),
+                    desc: stem.to_string(),
+                    file: file_name.to_string(),
+                }),
+                "mask" => masks.push(TerrainIndexEntry {
+                    id: stem.to_string(),
+                    desc: stem.to_string(),
+                    file: file_name.to_string(),
+                }),
+                _ => {}
+            }
+        }
+        // 按 id 排序保证确定性
+        arpacks.sort_by(|a, b| a.id.cmp(&b.id));
+        masks.sort_by(|a, b| a.id.cmp(&b.id));
+        Some(Self { arpacks, masks })
     }
 
     /// 根据 id 查找 arpack 文件名（不含目录）。

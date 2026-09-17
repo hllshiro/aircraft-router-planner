@@ -121,7 +121,7 @@ struct AircraftSpec {
     weapon: Option<crate::config::Weapon>
 }
 
-/// 查找 data 目录（index.yaml 所在目录）。候选顺序：
+/// 查找 data 目录。候选顺序：
 ///   1) cwd/data
 ///   2) exe 同级/data
 ///   3) exe 上级/data
@@ -141,9 +141,7 @@ pub fn find_data_dir() -> Option<std::path::PathBuf> {
     }
     // 相对路径回退
     candidates.push(std::path::PathBuf::from("data"));
-    candidates
-        .into_iter()
-        .find(|p| p.join("index.yaml").exists())
+    candidates.into_iter().find(|p| p.is_dir())
 }
 
 /// 端到端解算。elapsed_ms 为端到端耗时（main 计时传入）。
