@@ -153,8 +153,8 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
     let over_budget = |elapsed_ms: u64| -> bool {
         budget_ms != 0 && elapsed_ms + solve_t0.elapsed().as_millis() as u64 >= budget_ms
     };
-    // 1. 地形源（索引 id 模式：data/index.yaml 解析路径）。
-    //    arpack/mask 字段为索引 id，查找 index.yaml 获取文件名，拼接 data_dir 得到完整路径。
+    // 1. 地形源（索引 id 模式：扫描 data 目录解析路径）。
+    //    arpack/mask 字段为索引 id，查找 data 目录中对应文件。
     let mut terrain_warnings: Vec<String> = Vec::new();
     let data_dir = find_data_dir();
     let index = data_dir.as_deref().and_then(TerrainIndex::load);
@@ -167,7 +167,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                 p
             }),
             (Some(_), None) => {
-                let msg = "terrain arpack 索引文件不存在（data/index.yaml），无法加载地形".into();
+                let msg = "data 目录不存在，无法加载地形".into();
                 eprintln!("[warn] {msg}");
                 terrain_warnings.push(msg);
                 None
@@ -182,7 +182,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                 p
             }),
             (Some(_), None) => {
-                let msg = "terrain mask 索引文件不存在（data/index.yaml），无法加载掩膜".into();
+                let msg = "data 目录不存在，无法加载掩膜".into();
                 eprintln!("[warn] {msg}");
                 terrain_warnings.push(msg);
                 None

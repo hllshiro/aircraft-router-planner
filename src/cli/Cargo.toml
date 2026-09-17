@@ -41,7 +41,6 @@ geo-types = "0.7"
 sha2 = "0.10"
 # 按需读取：mmap（pure Rust，零 C 依赖红线；大型 ARPK1 打开 O(1) + 块按需）
 memmap2 = "0.9"
-# 地形数据索引（data/index.yaml 解析，纯 Rust，零 C 依赖）
-serde_yaml_neo = "0.11"
+
 
 

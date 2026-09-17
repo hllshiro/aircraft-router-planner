@@ -13,6 +13,7 @@
 - demo 移除 GeoTIFF（tiff）底图选项，arpcli 不支持该格式
 - demo 掩膜选择改为 index id，与地形统一使用 index.yaml 索引机制
 - 移除 index.yaml 依赖：地形索引改为扫描 data 目录，id 为文件名（不含扩展名）
+- 移除 serde_yaml_neo 依赖（纯 Rust YAML 解析库）
 
 ### Fixed
 - 修复 demo-server 瓦片接口不支持 index id 解析导致掩膜/地形文件找不到的问题

@@ -179,10 +179,10 @@ pub enum ZoneShape {
 #[derive(Debug, Clone, Deserialize, Default, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TerrainConfig {
-    /// arpack 数据索引 id（可选；对应 data/index.yaml 中 arpacks[].id）
+    /// arpack 数据索引 id（可选；对应 data 目录中的 arpack 文件）
     #[serde(default)]
     pub arpack: Option<String>,
-    /// mask 数据索引 id（可选；对应 data/index.yaml 中 masks[].id）
+    /// mask 数据索引 id（可选；对应 data 目录中的 mask 文件）
     #[serde(default)]
     pub mask: Option<String>,
 }

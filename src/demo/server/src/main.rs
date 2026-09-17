@@ -32,8 +32,7 @@ mod basemap;
 
 /// POST /api/plan — accepts full Input JSON, runs CLI binary, returns result
 async fn plan_route(Json(payload): Json<Value>) -> Json<Value> {
-    // terrain 字段现在使用索引 id（arpack/mask），直接透传给 CLI。
-    // CLI 内部通过 data/index.yaml 解析路径，demo-server 不再做路径解析。
+    // terrain 字段使用索引 id，扫描 data 目录解析路径。
     let input_json = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".into());
 
     match run_cli(&input_json) {
@@ -139,7 +138,7 @@ fn terrain_cache() -> &'static Mutex<HashMap<String, Arc<dyn TerrainSource>>> {
 }
 
 /// 按路径取地形源（进程内缓存；ARPK1 首次打开可能较慢——China 76MB 约 1s，全球 2.3GB 约 13s）。
-/// 支持 index.yaml id 解析：传入 "east_asia" 会自动查找对应 arpack 文件。
+/// 支持 id 解析：传入 "east_asia_7p5as" 会自动查找对应 arpack 文件。
 fn get_source(path: &str) -> Result<Arc<dyn TerrainSource>, String> {
     let key = resolve_terrain_or_index(path).map(|p| p.to_string_lossy().into_owned())?;
     {
