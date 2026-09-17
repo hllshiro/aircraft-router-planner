@@ -10,8 +10,14 @@
     "demo:dev": "pnpm --filter aircraft-router-planner-web dev",
     "demo:build": "pnpm --filter aircraft-router-planner-web build",
     "demo:server": "cargo run --release -p demo-server",
+    "demo:start": "node scripts/start-demo.js",
+    "demo:start:build": "node scripts/start-demo.js --build",
     "preview": "node scripts/release.js && ./install/demo-server",
     "release": "node scripts/release.js",
-    "bump-version": "node scripts/bump-version.js"
+    "bump-version": "node scripts/bump-version.js",
+    "check": "node scripts/check.js",
+    "check:quick": "node scripts/check.js --quick",
+    "test": "cargo test --lib",
+    "test:all": "cargo test --workspace"
   }
 }

@@ -47,40 +47,60 @@ install/demo/
 ### 重新打包步骤（开发机）
 
 ```bash
-cargo build --release -p demo-server
-cd src/demo/web && pnpm build              # 产出 src/demo/web/dist
-copy src/demo/web/dist  → install/demo/web-dist
-copy target/release/demo-server.exe → install/demo/
+pnpm release
 ```
 
 ## 启动
 
 ### 开发模式（需工具链）
 
-### Windows 一键启动（推荐）
-
-项目根目录双击 **`start_demo.bat`**（或命令行 `start_demo.bat`）：
-
-- 自动检查/构建 CLI 与 demo-server（产物已存在则跳过）
-- 启动后端 :3001 与前端 :5173，并自动打开浏览器 http://localhost:5173
-- 参数 `start_demo.bat rebuild` 强制重新构建两个二进制
-- 停止：关闭 `arp-demo-server` / `arp-demo-web` 两个窗口，或 `taskkill /IM demo-server.exe /F`
-
-### 手动分步（任意平台）
+#### 一键启动（推荐）
 
 ```bash
-cargo build --release -p arpcli
-cargo build --release -p demo-server
-cargo run --release -p demo-server &        # :3001
-cd src/demo/web && pnpm install && pnpm dev   # :5173
+pnpm demo:start
 ```
 
-Linux/macOS 可用 `bash src/demo/start.sh` 一键（脚本按 Git Bash/pnpm 编写）。
+同时启动后端 (:3001) 和前端 (:5173)，按 Ctrl+C 停止所有进程。
+
+#### 启动前先构建
+
+```bash
+pnpm demo:start:build
+```
+
+#### 单独启动
+
+```bash
+# 启动后端
+pnpm demo:server
+
+# 启动前端（新终端）
+pnpm demo:dev
+```
+
+#### 其他命令
+
+```bash
+pnpm cli:build           # 构建 CLI
+pnpm demo:build          # 构建前端
+```
 
 ### 独立运行模式（无工具链）
 
 见 `install/demo/DEMO_README.md`：Windows 双击 `start-demo.bat`，或
 `./start-demo.sh`（Linux/macOS），浏览器打开 http://localhost:3001。
+
+## 可用 Scripts
+
+| 命令 | 说明 |
+|------|------|
+| `pnpm demo:start` | 一键启动 demo（后端+前端） |
+| `pnpm demo:start:build` | 启动前先构建 |
+| `pnpm demo:server` | 只启动后端 |
+| `pnpm demo:dev` | 只启动前端 |
+| `pnpm demo:build` | 构建前端 |
+| `pnpm cli:build` | 构建 CLI |
+| `pnpm release` | 完整发布流程 |
 
 ## 功能
 

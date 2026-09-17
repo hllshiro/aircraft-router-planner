@@ -14,6 +14,9 @@
 - 新增 pnpm monorepo 工作区配置，根目录统一命令入口（`pnpm cli:dev`、`pnpm demo:build` 等）
 - 构建脚本从 bash 迁移至 Node.js（`scripts/release.js`、`scripts/bump-version.js`），支持 Windows 开发环境
 - 删除 `start_demo.bat`、`scripts/preview.sh`、`src/demo/start.sh`，功能由 pnpm 命令替代
+- 新增 `scripts/start-demo.js` 和 `scripts/check.js`，注册到 package.json（`pnpm demo:start`、`pnpm check`）
+- 更新所有 README 文档，启动命令统一使用 pnpm scripts
+- 修复 release.yml 中版本升级命令提示
 
 ## [0.5.0] - 2026-09-16
 

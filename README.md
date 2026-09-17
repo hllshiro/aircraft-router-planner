@@ -16,7 +16,7 @@
 │   └── demo/       # 开发期可视化工具（server: Axum 后端 / web: React+Three.js 前端）
 ├── phase0/         # Phase 0 性能原型与基准 crate（历史，b1–b5 可复跑，见 phase0/README.md）
 ├── docs/           # 技术文档集（技术方案.md 权威设计 + 01–11 实现现状）
-├── scripts/        # check.sh / release.sh / perf_regress.sh 等门禁与发布脚本
+├── scripts/        # release.js / check.js / start-demo.js 等门禁与发布脚本
 └── data/ install/  # gitignore：地形/掩膜数据与发布包，需另行准备
 ```
 
@@ -24,7 +24,7 @@
 
 ```bash
 # 构建核心 CLI（静态编译红线：零第三方 C/DLL 依赖）
-cargo build --release -p arpcli
+pnpm cli:build
 
 # 运行（plan 子命令：从 stdin 读任务 JSON，输出路径 JSON）
 cat mission.json | target/release/arpcli plan
@@ -38,8 +38,9 @@ cargo build --release -p arp-convert
 target/release/arp-convert convert <in.tif> <out.arpack>
 
 # 测试与全量门禁
-cargo test --lib
-scripts/check.sh            # 构建 + 全套回归 + 静态红线 + 性能预算
+pnpm test                      # 单元测试
+pnpm check                     # 构建 + 全套回归 + 静态红线
+pnpm check:quick               # 快速检查（跳过回归套件）
 ```
 
 ## 文档
@@ -54,7 +55,7 @@ scripts/check.sh            # 构建 + 全套回归 + 静态红线 + 性能预�
 
 - 版本号唯一事实来源：`Cargo.toml` 的 `[workspace.package] version`；发布 tag 必须为 `v<version>`。
 - 变更记录：[CHANGELOG.md](CHANGELOG.md)（Keep a Changelog 格式）。
-- 版本升级：`scripts/bump_version.sh <new_version>`。
+- 版本升级：`pnpm bump-version <new_version>`。
 - 发布：推送 `v*` tag 触发 [.github/workflows/release.yml](.github/workflows/release.yml)，
   交叉编译 `windows/linux × amd64/arm64` 四个 CLI 产物并创建 GitHub Release（含 SHA256SUMS）。
 
