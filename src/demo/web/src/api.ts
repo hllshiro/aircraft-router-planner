@@ -1,4 +1,4 @@
-import type { Input, PlanResult, TerrainInfo, BaseMapInfo, TiffProjection, DataFilesResponse } from './types';
+import type { Input, PlanResult, TerrainInfo, BaseMapInfo, DataFilesResponse } from './types';
 
 /** 解析后端响应并兜底：空 body / 非 JSON / 非 2xx → 明确错误，
  *  避免 resp.json() 裸调用抛 "Unexpected end of JSON input"（2026-08-13 修复）。 */
@@ -108,15 +108,14 @@ export function sceneBounds(config: Input): [number, number, number, number] {
 }
 
 
-// === 底图层（2026-08-13：掩膜 / GeoTIFF / WMS 三选一） ===
+// === 底图层（2026-08-13：掩膜 / WMS 二选一） ===
 
-/** mask/tiff：后端统一输出「经纬度 bbox 对齐的 RGBA 网格」，前端按 bbox 贴图（投影无感） */
+/** mask：后端输出「经纬度 bbox 对齐的 RGBA 网格」，前端按 bbox 贴图 */
 export async function fetchBaseMap(
   path: string,
-  source: 'mask' | 'tiff',
+  source: 'mask',
   bbox?: [number, number, number, number] | null,
   grid?: [number, number] | null,
-  projection?: TiffProjection,
 ): Promise<BaseMapInfo> {
   const resp = await fetch('/api/basemap', {
     method: 'POST',
@@ -126,7 +125,6 @@ export async function fetchBaseMap(
       path,
       bbox: bbox ?? null,
       grid: grid ?? null,
-      projection: source === 'tiff' ? (projection ?? 'auto') : undefined,
     }),
   });
   const data = await readJsonResponse(resp, '底图');
@@ -159,7 +157,7 @@ function base64DecodeRgba(b64: string): number[] {
  */
 export async function fetchTile(params: {
   terrainPath: string | null;
-  basemap: { source: 'mask' | 'tiff'; path: string; projection?: TiffProjection } | null;
+  basemap: { source: 'mask'; path: string } | null;
   bbox: [number, number, number, number];
   grid: [number, number];
 }): Promise<{ terrain: TerrainInfo | null; basemap: BaseMapInfo | null; basemapError: string | null }> {
@@ -172,7 +170,6 @@ export async function fetchTile(params: {
         ? {
             source: params.basemap.source,
             path: sanitizePath(params.basemap.path),
-            projection: params.basemap.projection,
           }
         : null,
       bbox: params.bbox,

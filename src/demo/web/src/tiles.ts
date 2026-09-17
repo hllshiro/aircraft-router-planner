@@ -19,7 +19,7 @@ export interface TileEntry {
   bbox: [number, number, number, number];
   terrain: TerrainInfo | null;
   terrainError: string | null;
-  /** mask/tiff 瓦片级底图（WMS 不按瓦片，见 ViewportTilesState.wms） */
+  /** mask 瓦片级底图（WMS 不按瓦片，见 ViewportTilesState.wms） */
   baseMap: BaseMapInfo | null;
   baseMapError: string | null;
 }
@@ -190,7 +190,7 @@ async function loadTile(
   cache.set(t.key, entry);
   const wantTerrain = terrainConfig.arpack !== undefined;
   const src = baseMapConfig.source;
-  const wantBase = (src === 'mask' || src === 'tiff') && baseMapConfig.path;
+  const wantBase = src === 'mask' && baseMapConfig.path;
   if (!wantTerrain && !wantBase) return entry;
   // 合并端点 /api/tile：每瓦片 1 请求返回地形+底图（rgba base64，2026-08-13）
   try {
@@ -199,9 +199,8 @@ async function loadTile(
         terrainPath: wantTerrain ? (terrainConfig.arpack ?? null) : null,
         basemap: wantBase
           ? {
-              source: src as 'mask' | 'tiff',
+              source: src as 'mask',
               path: baseMapConfig.path as string,
-              projection: baseMapConfig.tiffProjection,
             }
           : null,
         bbox: t.bbox,
@@ -340,7 +339,7 @@ export function useViewportTiles(opts: ViewportTilesOptions): ViewportTilesState
       }
     }
 
-    // mask/tiff / none：增量加载缺失瓦片
+    // mask / none：增量加载缺失瓦片
     const cache = cacheRef.current;
     const missing = wanted.filter(
       (t) => !cache.has(t.key) && !pendingRef.current.has(t.key),
@@ -404,7 +403,7 @@ export function useViewportTiles(opts: ViewportTilesOptions): ViewportTilesState
     terrainConfig.arpack,
     baseMapConfig.source,
     baseMapConfig.path,
-    baseMapConfig.tiffProjection,
+
     baseMapConfig.wmsUrl,
     baseMapConfig.wmsLayers,
     baseMapConfig.wmsCrs,

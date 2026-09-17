@@ -61,7 +61,7 @@ export default function App() {
           setBaseMapConfig((prev) => ({
             ...prev,
             source: 'mask',
-            path: `${res.data_dir}/${masks[0].file}`,
+            path: masks[0].id,
           }));
         }
       })

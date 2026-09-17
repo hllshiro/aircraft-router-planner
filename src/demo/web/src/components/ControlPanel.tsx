@@ -9,7 +9,6 @@ import type {
   WeaponType,
   BaseMapConfig,
   BaseMapSource,
-  TiffProjection,
   CliTerrainMode,
   DataFilesResponse,
 } from '../types';
@@ -689,7 +688,7 @@ export function ControlPanel({
         </div>
       </div>
 
-      {/* BaseMap（2026-08-13 主管定稿：掩膜 / GeoTIFF / WMS 三选一；置入左侧功能区） */}
+      {/* BaseMap（2026-08-13 主管定稿：掩膜 / WMS 二选一；置入左侧功能区） */}
       <h3>底图</h3>
       <div className="field-row">
         <div>
@@ -697,8 +696,6 @@ export function ControlPanel({
           <select
             value={baseMapConfig.source}
             onChange={(e) =>
-              // 切换数据源时清空路径（2026-08-13）：mask 旧路径传给 tiff
-              // 会因文件不是 TIFF 打开失败；tiff 旧路径传给 mask 同理
               updateBaseMap({
                 source: e.target.value as BaseMapSource,
                 path: undefined,
@@ -707,53 +704,24 @@ export function ControlPanel({
           >
             <option value="none">无</option>
             <option value="mask">海陆掩膜</option>
-            <option value="tiff">GeoTIFF 文件</option>
             <option value="wms">GeoServer WMS</option>
           </select>
         </div>
       </div>
-      {(baseMapConfig.source === 'mask' || baseMapConfig.source === 'tiff') && (
+      {baseMapConfig.source === 'mask' && (
         <div className="field-row">
           <div className="wide">
             <label>路径</label>
-            {baseMapConfig.source === 'mask' ? (
-              <select
-                value={baseMapConfig.path ?? ''}
-                onChange={(e) => updateBaseMap({ path: sanitizePath(e.target.value) })}
-              >
-                <option value="">选择掩膜文件…</option>
-                {(dataFiles?.index?.masks ?? []).map((f) => (
-                  <option key={f.id} value={f.id}>
-                    {f.desc}
-                  </option>
-                ))}
-              </select>
-            ) : (
-              <input
-                type="text"
-                value={baseMapConfig.path ?? ''}
-                onChange={(e) => updateBaseMap({ path: sanitizePath(e.target.value) })}
-                placeholder={'如 data/map.tif'}
-              />
-            )}
-          </div>
-        </div>
-      )}
-      {baseMapConfig.source === 'tiff' && (
-        <div className="field-row">
-          <div>
-            <label>投影</label>
             <select
-              value={baseMapConfig.tiffProjection ?? 'auto'}
-              onChange={(e) =>
-                updateBaseMap({
-                  tiffProjection: e.target.value as TiffProjection,
-                })
-              }
+              value={baseMapConfig.path ?? ''}
+              onChange={(e) => updateBaseMap({ path: sanitizePath(e.target.value) })}
             >
-              <option value="auto">自动（GeoKey）</option>
-              <option value="4326">EPSG:4326</option>
-              <option value="3857">EPSG:3857</option>
+              <option value="">选择掩膜文件…</option>
+              {(dataFiles?.index?.masks ?? []).map((f) => (
+                <option key={f.id} value={f.id}>
+                  {f.desc}
+                </option>
+              ))}
             </select>
           </div>
         </div>

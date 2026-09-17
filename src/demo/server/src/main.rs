@@ -139,8 +139,9 @@ fn terrain_cache() -> &'static Mutex<HashMap<String, Arc<dyn TerrainSource>>> {
 }
 
 /// 按路径取地形源（进程内缓存；ARPK1 首次打开可能较慢——China 76MB 约 1s，全球 2.3GB 约 13s）。
+/// 支持 index.yaml id 解析：传入 "east_asia" 会自动查找对应 arpack 文件。
 fn get_source(path: &str) -> Result<Arc<dyn TerrainSource>, String> {
-    let key = resolve_terrain_path(path).map(|p| p.to_string_lossy().into_owned())?;
+    let key = resolve_terrain_or_index(path).map(|p| p.to_string_lossy().into_owned())?;
     {
         let guard = terrain_cache().lock().unwrap();
         if let Some(src) = guard.get(&key) {
@@ -430,6 +431,56 @@ async fn tile_route(Json(payload): Json<TileReq>) -> Json<Value> {
     .await
     .unwrap_or_else(|e| serde_json::json!({ "error": format!("tile task error: {e}") }));
     Json(result)
+}
+
+/// 获取数据目录路径（与 data_files_route 一致）
+fn data_dir() -> PathBuf {
+    let data_dir: PathBuf = std::env::var("DATA_DIR")
+        .unwrap_or_else(|_| "data".into())
+        .into();
+    std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(|d| d.to_path_buf()))
+        .map(|d| d.join(&data_dir))
+        .unwrap_or(data_dir)
+}
+
+/// 根据索引 id 解析实际文件路径：读取 data/index.yaml，查找 arpacks/masks 中
+/// 匹配 id 的条目，返回 data_dir/{file} 完整路径。
+/// 若 id 在 index.yaml 中未找到，返回 None（调用方回退到原路径解析逻辑）。
+fn resolve_index_id(id: &str) -> Option<PathBuf> {
+    let dir = data_dir();
+    let index_path = dir.join("index.yaml");
+    if !index_path.exists() {
+        return None;
+    }
+    let content = std::fs::read_to_string(&index_path).ok()?;
+    let index: serde_json::Value = serde_yaml_neo::from_str(&content).ok()?;
+    // 在 arpacks 和 masks 中查找匹配 id
+    for key in &["arpacks", "masks"] {
+        if let Some(items) = index[*key].as_array() {
+            for item in items {
+                if item["id"].as_str() == Some(id) {
+                    if let Some(file) = item["file"].as_str() {
+                        return Some(dir.join(file));
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// 解析地形路径：先尝试 index.yaml id 解析，再回退到文件路径解析。
+fn resolve_terrain_or_index(path: &str) -> Result<PathBuf, String> {
+    // 先尝试作为 index id 解析
+    if let Some(p) = resolve_index_id(path) {
+        if p.exists() {
+            return Ok(p);
+        }
+    }
+    // 回退到原文件路径解析
+    resolve_terrain_path(path)
 }
 
 /// GET /api/data-files — 读取 data/index.yaml 索引，返回地形/掩膜候选项。
