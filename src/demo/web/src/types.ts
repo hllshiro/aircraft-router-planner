@@ -73,9 +73,7 @@ export interface TerrainConfig {
   mask?: string;
 }
 
-/** CLI 计算数据源（2026-08-20）：none = 平地计算（不传地形）；
- *  follow_view = 跟随视图（用「地形显示」选中的地形文件参与代价场/净空计算）。 */
-export type CliTerrainMode = 'none' | 'follow_view';
+
 
 export interface ParamsOverride {
   radar_inflation?: number;
@@ -223,17 +221,10 @@ export function buildDefaultInput(): Input {
 }
 
 
-// === 底图层（2026-08-13：掩膜 / WMS 二选一，主管定稿） ===
-export type BaseMapSource = 'mask' | 'wms' | 'none';
-
+// === 掩膜层（2026-08-20：简化为只选本地 mask 文件） ===
 export interface BaseMapConfig {
-  source: BaseMapSource;
-  /** mask 文件路径（mask 默认 data/mask_7p5as.mask，与默认地形同目录） */
+  /** mask 文件路径（空 = 无掩膜） */
   path?: string;
-  /** wms：GeoServer WMS 端点（如 http://127.0.0.1:8080/geoserver/wms） */
-  wmsUrl?: string;
-  wmsLayers?: string;
-  wmsCrs?: 'EPSG:4326' | 'EPSG:3857';
 }
 
 export interface BaseMapInfo {
@@ -251,13 +242,7 @@ export interface BaseMapInfo {
 }
 
 export function defaultBaseMapConfig(): BaseMapConfig {
-  return {
-    source: 'mask',
-    path: 'data/mask_7p5as.mask',
-    wmsUrl: 'http://127.0.0.1:8080/geoserver/wms',
-    wmsLayers: 'workspace:layer',
-    wmsCrs: 'EPSG:4326',
-  };
+  return {};
 }
 
 // === 数据文件扫描 ===

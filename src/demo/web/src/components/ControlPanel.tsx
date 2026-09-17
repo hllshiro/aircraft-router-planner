@@ -8,8 +8,6 @@ import type {
   WeaponInput,
   WeaponType,
   BaseMapConfig,
-  BaseMapSource,
-  CliTerrainMode,
   DataFilesResponse,
 } from '../types';
 import { WEAPON_DEFAULT_RANGE_KM } from '../types';
@@ -29,14 +27,11 @@ interface ControlPanelProps {
   /** 拾取目标机下标（点击设置起/终点/必经点，2026-08-10） */
   pickAircraftIdx: number | null;
   onPickAircraft: (idx: number | null) => void;
-  /** 底图层（2026-08-13：掩膜/GeoTIFF/WMS 三选一，配置置入左侧功能区） */
+  /** 掩膜文件选择 */
   baseMapConfig: BaseMapConfig;
   onBaseMapConfigChange: (cfg: BaseMapConfig) => void;
   baseMapLoading: boolean;
   baseMapError: string | null;
-  /** CLI 计算数据源（2026-08-20：none = 平地计算；follow_view = 跟随视图用显示地形） */
-  cliTerrainMode: CliTerrainMode;
-  onCliTerrainModeChange: (mode: CliTerrainMode) => void;
   /** 数据文件扫描结果（2026-08-20：demo-server 扫描 data/ 供下拉选择） */
   dataFiles?: DataFilesResponse;
 }
@@ -57,8 +52,6 @@ export function ControlPanel({
   onBaseMapConfigChange,
   baseMapLoading,
   baseMapError,
-  cliTerrainMode,
-  onCliTerrainModeChange,
   dataFiles,
 }: ControlPanelProps) {
   const update = (patch: Partial<Input>) =>
@@ -90,8 +83,6 @@ export function ControlPanel({
   configRef.current = config;
   const onConfigChangeRef = useRef(onConfigChange);
   onConfigChangeRef.current = onConfigChange;
-  const cliTerrainModeRef = useRef(cliTerrainMode);
-  cliTerrainModeRef.current = cliTerrainMode;
   const [groundAlt, setGroundAlt] = useState<{
     s: number | null;
     t: number | null;
@@ -100,21 +91,15 @@ export function ControlPanel({
   const updateBaseMap = (patch: Partial<BaseMapConfig>) =>
     onBaseMapConfigChange({ ...baseMapConfig, ...patch });
 
-  // 起终点经纬度签名：仅经纬度/计算地形路径变化才重新查询海拔（高度变化不触发）
+  // 起终点经纬度签名：仅经纬度变化才重新查询海拔（高度变化不触发）
   const startTargetKey = useMemo(() => {
     if (!config.aircraft.length) return 'none';
     const a = config.aircraft[0];
-    // CLI 计算数据源解析：跟随视图 → 用显示地形；无 → 平地（无地面海拔约束）
-    const t =
-      cliTerrainMode === 'follow_view'
-        ? config.terrain
-        : ({} as const);
-    const terrainPath = t.arpack ?? '';
     return (
       `${a.id}|${a.start.lon.toFixed(5)},${a.start.lat.toFixed(5)}|` +
-      `${a.target.lon.toFixed(5)},${a.target.lat.toFixed(5)}|${terrainPath}`
+      `${a.target.lon.toFixed(5)},${a.target.lat.toFixed(5)}`
     );
-  }, [config, cliTerrainMode]);
+  }, [config]);
 
   // 经纬度变化（防抖 250ms）→ 查询该点地面海拔 → 设置 min；
   // 当前高度低于地面 → 自动抬升到地面海拔（主管 2026-08-14）
@@ -127,12 +112,7 @@ export function ControlPanel({
     ) => {
       timers.push(
         window.setTimeout(() => {
-          // CLI 计算数据源解析（同 startTargetKey）：平地 → 无地面海拔约束
-          const t =
-            cliTerrainModeRef.current === 'follow_view'
-              ? configRef.current.terrain
-              : ({} as const);
-          const terrainPath = t.arpack ?? null;
+          const terrainPath = configRef.current.terrain.arpack ?? null;
           if (terrainPath == null) {
             setGroundAlt((prev) => ({ ...prev, [kind]: null }));
             return;
@@ -657,16 +637,11 @@ export function ControlPanel({
         </div>
       )}
 
-      {/* 地形显示 —— 场景 3D 显示的地形文件（2026-08-20：显示为主，计算解耦见下方） */}
-      <h3>地形显示</h3>
-      <div className="field-row" style={{ marginBottom: 4 }}>
-        <div style={{ fontSize: 10, color: '#888', lineHeight: '1.3' }}>
-          场景 3D 显示的地形；是否参与代价场/净空计算见「CLI计算数据源」
-        </div>
-      </div>
+      {/* 高程数据 —— 场景 3D 显示的地形文件 */}
+      <h3>高程</h3>
       <div className="field-row">
         <div>
-          <label>地形数据</label>
+          <label>高程数据</label>
           <select
             value={config.terrain.arpack ?? ''}
             onChange={(e) =>
@@ -688,116 +663,34 @@ export function ControlPanel({
         </div>
       </div>
 
-      {/* BaseMap（2026-08-13 主管定稿：掩膜 / WMS 二选一；置入左侧功能区） */}
-      <h3>底图</h3>
+      {/* 掩膜文件 */}
+      <h3>掩膜</h3>
       <div className="field-row">
-        <div>
-          <label>数据源</label>
+        <div className="wide">
+          <label>掩膜文件</label>
           <select
-            value={baseMapConfig.source}
-            onChange={(e) =>
-              updateBaseMap({
-                source: e.target.value as BaseMapSource,
-                path: undefined,
-              })
-            }
+            value={baseMapConfig.path ?? ''}
+            onChange={(e) => updateBaseMap({ path: sanitizePath(e.target.value) || undefined })}
           >
-            <option value="none">无</option>
-            <option value="mask">海陆掩膜</option>
-            <option value="wms">GeoServer WMS</option>
+            <option value="">无</option>
+            {(dataFiles?.index?.masks ?? []).map((f) => (
+              <option key={f.id} value={f.id}>
+                {f.desc}
+              </option>
+            ))}
           </select>
         </div>
       </div>
-      {baseMapConfig.source === 'mask' && (
-        <div className="field-row">
-          <div className="wide">
-            <label>路径</label>
-            <select
-              value={baseMapConfig.path ?? ''}
-              onChange={(e) => updateBaseMap({ path: sanitizePath(e.target.value) })}
-            >
-              <option value="">选择掩膜文件…</option>
-              {(dataFiles?.index?.masks ?? []).map((f) => (
-                <option key={f.id} value={f.id}>
-                  {f.desc}
-                </option>
-              ))}
-            </select>
-          </div>
-        </div>
-      )}
-      {baseMapConfig.source === 'wms' && (
-        <>
-          <div className="field-row">
-            <div className="wide">
-              <label>WMS URL</label>
-              <input
-                type="text"
-                value={baseMapConfig.wmsUrl ?? ''}
-                onChange={(e) => updateBaseMap({ wmsUrl: e.target.value })}
-                placeholder="如 http://127.0.0.1:8080/geoserver/wms"
-              />
-            </div>
-          </div>
-          <div className="field-row">
-            <div className="wide">
-              <label>图层 (layers)</label>
-              <input
-                type="text"
-                value={baseMapConfig.wmsLayers ?? ''}
-                onChange={(e) => updateBaseMap({ wmsLayers: e.target.value })}
-                placeholder="如 workspace:layer"
-              />
-            </div>
-            <div>
-              <label>坐标系</label>
-              <select
-                value={baseMapConfig.wmsCrs ?? 'EPSG:4326'}
-                onChange={(e) =>
-                  updateBaseMap({
-                    wmsCrs: e.target.value as 'EPSG:4326' | 'EPSG:3857',
-                  })
-                }
-              >
-                <option value="EPSG:4326">EPSG:4326</option>
-                <option value="EPSG:3857">EPSG:3857</option>
-              </select>
-            </div>
-          </div>
-        </>
-      )}
       {(baseMapLoading || baseMapError) && (
         <div className="field-row basemap-panel-status-row">
           {baseMapLoading && (
-            <span className="basemap-panel-status loading">⏳ 底图加载中…</span>
+            <span className="basemap-panel-status loading">⏳ 掩膜加载中…</span>
           )}
           {baseMapError && (
             <span className="basemap-panel-status error">⚠ {baseMapError}</span>
           )}
         </div>
       )}
-
-      {/* CLI计算数据源 —— 是否用显示地形参与代价场/净空计算（2026-08-20） */}
-      <h3>CLI计算数据源</h3>
-      <div className="field-row" style={{ marginBottom: 4 }}>
-        <div style={{ fontSize: 10, color: '#888', lineHeight: '1.3' }}>
-          流入 arpcli plan 子进程；「跟随视图」= 用「地形显示」选中的文件参与计算
-        </div>
-      </div>
-      <div className="field-row">
-        <div>
-          <label>计算方式</label>
-          <select
-            value={cliTerrainMode}
-            onChange={(e) =>
-              onCliTerrainModeChange(e.target.value as CliTerrainMode)
-            }
-          >
-            <option value="none">无（平地计算）</option>
-            <option value="follow_view">跟随视图</option>
-          </select>
-        </div>
-      </div>
 
       {/* Radars */}
       <h3>雷达 ({config.red_forces.radars.length})</h3>

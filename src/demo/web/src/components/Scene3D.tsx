@@ -275,23 +275,19 @@ function planeTerrain(bbox: [number, number, number, number]): TerrainInfo {
   };
 }
 
-/** 单瓦片地形网格 + 底图纹理（mask/tiff 瓦片纹理；wms 用视口级纹理） */
+/** 单瓦片地形网格 + 底图纹理 */
 function TileMesh({
   entry,
   geoRef,
   zScale,
-  wmsTexture,
-  wmsBbox,
   onPick,
 }: {
   entry: TileEntry;
   geoRef: GeoRef;
   zScale: number;
-  wmsTexture: THREE.Texture | null;
-  wmsBbox: [number, number, number, number] | null;
   onPick?: (wp: Waypoint) => void;
 }) {
-  // mask/tiff：瓦片 RGBA 网格 → CanvasTexture（卸载时 dispose）
+  // mask：瓦片 RGBA 网格 → CanvasTexture（卸载时 dispose）
   const tileTex = useMemo(() => {
     if (!entry.baseMap) return null;
     const { nx, ny, rgba } = entry.baseMap;
@@ -313,15 +309,15 @@ function TileMesh({
     tileTex?.dispose();
   }, [tileTex]);
 
-  if (!entry.terrain && !entry.baseMap && !wmsTexture) return null;
+  if (!entry.terrain && !entry.baseMap) return null;
 
-  const needSurface = Boolean(entry.baseMap) || Boolean(wmsTexture);
+  const needSurface = Boolean(entry.baseMap);
   const terrainData: TerrainInfo | null =
     entry.terrain ?? (needSurface ? planeTerrain(entry.bbox) : null);
   if (!terrainData) return null;
 
-  const texture = entry.baseMap ? tileTex : wmsTexture;
-  const textureBbox = entry.baseMap ? entry.bbox : wmsBbox;
+  const texture = tileTex;
+  const textureBbox = entry.baseMap ? entry.bbox : null;
   return (
     <TerrainMesh
       data={terrainData}
@@ -366,7 +362,7 @@ export function Scene3D({
   const stableGeoRef = geoRefRef.current;
 
   // 视口瓦片系统（相机 change 节流驱动；配置变化清缓存重载）
-  const { tiles, wms, loading: tilesLoading, error: tilesError, sampleHeight } = useViewportTiles({
+  const { tiles, loading: tilesLoading, error: tilesError, sampleHeight } = useViewportTiles({
     terrainConfig,
     baseMapConfig,
     cameraRef,
@@ -374,23 +370,6 @@ export function Scene3D({
     geoRef: stableGeoRef,
     sceneReady,
   });
-
-  // WMS 视口图纹理（blob URL → TextureLoader；替换时 dispose）
-  const [wmsTexture, setWmsTexture] = useState<THREE.Texture | null>(null);
-  useEffect(() => {
-    if (!wms) {
-      setWmsTexture(null);
-      return;
-    }
-    const loader = new THREE.TextureLoader();
-    const tex = loader.load(wms.url);
-    tex.colorSpace = THREE.SRGBColorSpace;
-    setWmsTexture(tex);
-    return () => {
-      THREE.Cache.remove(wms.url);
-      tex.dispose();
-    };
-  }, [wms]);
 
   // 瓦片加载状态上报（ControlPanel 底图状态 / canvas overlay）
   useEffect(() => {
@@ -535,15 +514,13 @@ export function Scene3D({
         enabled={!dragActive}
       />
 
-      {/* 视口瓦片：地形网格 + 底图纹理（mask/tiff 瓦片级；wms 视口级单图） */}
+      {/* 视口瓦片：地形网格 + 底图纹理 */}
       {tiles.map((t) => (
         <TileMesh
           key={t.key}
           entry={t}
           geoRef={stableGeoRef}
           zScale={zScale}
-          wmsTexture={wmsTexture}
-          wmsBbox={wms?.bbox ?? null}
           onPick={activeClickMode !== null ? handlePick : undefined}
         />
       ))}

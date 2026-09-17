@@ -11,7 +11,7 @@ import type {
   BaseMapConfig,
   TerrainConfig,
 } from './types';
-import { fetchTile, fetchWmsBlob, wmsSize } from './api';
+import { fetchTile } from './api';
 
 // ===== 类型 =====
 export interface TileEntry {
@@ -33,8 +33,6 @@ export interface WmsTile {
 export interface ViewportTilesState {
   /** 渲染瓦片（视口内；旧层级兜底在前、活跃层级覆盖在后） */
   tiles: TileEntry[];
-  /** WMS 视口图（仅 source=wms 时非空） */
-  wms: WmsTile | null;
   loading: boolean;
   error: string | null;
   /** 从已加载瓦片双线性插值查询地面海拔（MSL 米）；无数据 → null */
@@ -189,8 +187,7 @@ async function loadTile(
   };
   cache.set(t.key, entry);
   const wantTerrain = terrainConfig.arpack !== undefined;
-  const src = baseMapConfig.source;
-  const wantBase = src === 'mask' && baseMapConfig.path;
+  const wantBase = baseMapConfig.path !== undefined;
   if (!wantTerrain && !wantBase) return entry;
   // 合并端点 /api/tile：每瓦片 1 请求返回地形+底图（rgba base64，2026-08-13）
   try {
@@ -199,7 +196,7 @@ async function loadTile(
         terrainPath: wantTerrain ? (terrainConfig.arpack ?? null) : null,
         basemap: wantBase
           ? {
-              source: src as 'mask',
+              source: 'mask',
               path: baseMapConfig.path as string,
             }
           : null,
@@ -226,12 +223,10 @@ export function useViewportTiles(opts: ViewportTilesOptions): ViewportTilesState
   const pendingRef = useRef<Set<string>>(new Set());
   const activeRef = useRef(0);
   const timerRef = useRef<number | null>(null);
-  const prevWmsUrlRef = useRef<string | null>(null);
   // 活跃层级 + 上次切换时间（缩放冷却，防层级抖动全量重载）
   const activeSpanRef = useRef<number | null>(null);
   const lastSwitchRef = useRef(0);
   const [tiles, setTiles] = useState<TileEntry[]>([]);
-  const [wms, setWms] = useState<WmsTile | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -258,7 +253,7 @@ export function useViewportTiles(opts: ViewportTilesOptions): ViewportTilesState
     ];
     const render = [...cache.values()].filter(
       (e) =>
-        (e.terrain || e.baseMap || baseMapConfig.source === 'wms') &&
+        (e.terrain || e.baseMap) &&
         bboxIntersect(e.bbox, vpExpanded),
     );
     render.sort((a, b) => {
@@ -268,7 +263,7 @@ export function useViewportTiles(opts: ViewportTilesOptions): ViewportTilesState
       return aActive ? 1 : -1;
     });
     setTiles(render);
-  }, [cameraRef, geoRef, baseMapConfig.source]);
+  }, [cameraRef, geoRef]);
 
   // LRU trim：只删视口外瓦片（视口内旧层级兜底瓦片受保护，避免空洞）
   const trimCache = useCallback(() => {
@@ -315,31 +310,7 @@ export function useViewportTiles(opts: ViewportTilesOptions): ViewportTilesState
     const span = activeSpanRef.current as number;
     const wanted = coverTiles(vp, span);
 
-    // WMS：视口级单图（相机移动 → 重新请求；旧 blob revoke）。
-    // 注意：不 return——WMS 仅替代底图纹理，地形瓦片照常按视口加载。
-    if (baseMapConfig.source === 'wms') {
-      if (baseMapConfig.wmsUrl && baseMapConfig.wmsLayers) {
-        const [w, h] = wmsSize(vp);
-        fetchWmsBlob({
-          base_url: baseMapConfig.wmsUrl,
-          bbox: vp,
-          width: w,
-          height: h,
-          layers: baseMapConfig.wmsLayers,
-          crs: baseMapConfig.wmsCrs ?? 'EPSG:4326',
-        })
-          .then((url) => {
-            if (prevWmsUrlRef.current) {
-              URL.revokeObjectURL(prevWmsUrlRef.current);
-            }
-            prevWmsUrlRef.current = url;
-            setWms({ url, bbox: vp });
-          })
-          .catch((e) => setError(String(e)));
-      }
-    }
-
-    // mask / none：增量加载缺失瓦片
+    // mask：增量加载缺失瓦片
     const cache = cacheRef.current;
     const missing = wanted.filter(
       (t) => !cache.has(t.key) && !pendingRef.current.has(t.key),
@@ -401,12 +372,7 @@ export function useViewportTiles(opts: ViewportTilesOptions): ViewportTilesState
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     terrainConfig.arpack,
-    baseMapConfig.source,
     baseMapConfig.path,
-
-    baseMapConfig.wmsUrl,
-    baseMapConfig.wmsLayers,
-    baseMapConfig.wmsCrs,
   ]);
 
   // 相机 change → 节流刷新视口；挂载就绪后立即加载首屏
@@ -433,12 +399,9 @@ export function useViewportTiles(opts: ViewportTilesOptions): ViewportTilesState
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sceneReady, refresh]);
 
-  // 卸载时 revoke WMS blob
+  // 卸载时清理
   useEffect(
     () => () => {
-      if (prevWmsUrlRef.current) {
-        URL.revokeObjectURL(prevWmsUrlRef.current);
-      }
       if (timerRef.current !== null) {
         clearTimeout(timerRef.current);
       }
@@ -486,5 +449,5 @@ export function useViewportTiles(opts: ViewportTilesOptions): ViewportTilesState
     [],
   );
 
-  return { tiles, wms, loading, error, sampleHeight };
+  return { tiles, loading, error, sampleHeight };
 }

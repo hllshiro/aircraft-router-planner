@@ -168,7 +168,7 @@ export async function fetchTile(params: {
       terrain_path: params.terrainPath ? sanitizePath(params.terrainPath) : null,
       basemap: params.basemap
         ? {
-            source: params.basemap.source,
+            source: 'mask',
             path: sanitizePath(params.basemap.path),
           }
         : null,

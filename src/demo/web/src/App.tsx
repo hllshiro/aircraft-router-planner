@@ -9,7 +9,6 @@ import type {
   CircleGeometry,
   PolygonGeometry,
   BaseMapConfig,
-  CliTerrainMode,
   DataFilesResponse,
 } from './types';
 import { buildDefaultInput, defaultBaseMapConfig } from './types';
@@ -36,9 +35,6 @@ export default function App() {
   // 视口瓦片是否在加载（canvas overlay 用）
   const [tilesLoading, setTilesLoading] = useState(false);
 
-  // CLI 计算数据源（2026-08-20）：none = 平地计算；follow_view = 跟随视图（用显示地形）
-  const [cliTerrainMode, setCliTerrainMode] = useState<CliTerrainMode>('follow_view');
-
   // 数据文件扫描（2026-08-20：demo-server /api/data-files 扫描 data/，供下拉选择）
   const [dataFiles, setDataFiles] = useState<DataFilesResponse | null>(null);
 
@@ -58,11 +54,7 @@ export default function App() {
           }));
         }
         if (masks.length > 0) {
-          setBaseMapConfig((prev) => ({
-            ...prev,
-            source: 'mask',
-            path: masks[0].id,
-          }));
+          setBaseMapConfig({ path: masks[0].id });
         }
       })
       .catch((err) => {
@@ -96,12 +88,7 @@ export default function App() {
     setLoading(true);
     setResult(null);
     try {
-      // CLI 计算数据源解析：跟随视图 → 用显示地形；无 → 平地（不传地形）
-      const input: Input =
-        cliTerrainMode === 'follow_view'
-          ? config
-          : { ...config, terrain: {} };
-      const res = await planRoute(input);
+      const res = await planRoute(config);
       setResult(res);
     } catch (err) {
       setResult({
@@ -265,8 +252,6 @@ export default function App() {
           onBaseMapConfigChange={setBaseMapConfig}
           baseMapLoading={baseMapLoading}
           baseMapError={baseMapError}
-          cliTerrainMode={cliTerrainMode}
-          onCliTerrainModeChange={setCliTerrainMode}
           dataFiles={dataFiles ?? undefined}
         />
       </div>
