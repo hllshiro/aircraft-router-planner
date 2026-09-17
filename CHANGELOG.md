@@ -5,13 +5,15 @@
 
 > **版本号唯一事实来源**：`Cargo.toml` 的 `[workspace.package] version`。
 > 发布时 tag 必须为 `v<version>`，由 `.github/workflows/release.yml` 校验并交叉编译四个平台产物。
-> 升级流程见 `scripts/bump_version.sh`。
+> 升级流程见 `scripts/bump-version.js`。
 
 ## [Unreleased]
 
 ### Changed
 - 源码目录重构：`cli/`、`convert/`、`demo/` 迁移至 `src/` 下，统一为 `src/cli/`、`src/convert/`、`src/demo/`
 - 新增 pnpm monorepo 工作区配置，根目录统一命令入口（`pnpm cli:dev`、`pnpm demo:build` 等）
+- 构建脚本从 bash 迁移至 Node.js（`scripts/release.js`、`scripts/bump-version.js`），支持 Windows 开发环境
+- 删除 `start_demo.bat`、`scripts/preview.sh`、`src/demo/start.sh`，功能由 pnpm 命令替代
 
 ## [0.5.0] - 2026-09-16
 

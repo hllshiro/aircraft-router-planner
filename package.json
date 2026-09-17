@@ -2,12 +2,16 @@
   "name": "aircraft-router-planner",
   "private": true,
   "version": "0.5.0",
+  "type": "module",
+  "packageManager": "pnpm@11.22.0",
   "scripts": {
     "cli:dev": "cargo run -p arpcli --",
     "cli:build": "cargo build --release -p arpcli",
     "demo:dev": "pnpm --filter aircraft-router-planner-web dev",
     "demo:build": "pnpm --filter aircraft-router-planner-web build",
-    "preview": "./scripts/preview.sh",
-    "release": "./scripts/release.sh"
+    "demo:server": "cargo run --release -p demo-server",
+    "preview": "node scripts/release.js && ./install/demo-server",
+    "release": "node scripts/release.js",
+    "bump-version": "node scripts/bump-version.js"
   }
 }
