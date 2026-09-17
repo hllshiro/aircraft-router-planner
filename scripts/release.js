@@ -177,10 +177,8 @@ if (!skipWeb) {
 
 // 4. 复制数据 + 文档
 console.log("==> [4/4] 复制数据与文档");
-mkdirp(join(outDir, "data"));
-
-for (const f of ["data/east_asia_7p5as.arpack", "data/mask_7p5as.mask"]) {
-  if (existsSync(f)) cp(f, join(outDir, "data", basename(f)));
+if (existsSync("data")) {
+  cp("data", join(outDir, "data"));
 }
 
 if (existsSync("install/HOW_TO_USE.md")) {
