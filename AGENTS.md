@@ -11,44 +11,35 @@ Deterministic 3D aircraft route planning CLI (Rust 2024 edition): FMM + semantic
 
 - **所有编译 / 构建 / 测试 / 验证一律在 WSL（Ubuntu-22.04）执行**——本机 Windows 无 Rust 工具链；WSL 内已有完整环境（cargo / node / pnpm）。统一入口：`wsl -d Ubuntu-22.04 -- bash -lc "cd /mnt/d/Project/Rust/AircraftRouterPlanner && <cmd>"`。
 - 前端 `src/demo/web` 用 **pnpm**（不是 npm），同样在 WSL 内运行：`wsl -d Ubuntu-22.04 -- bash -lc "cd /mnt/d/Project/Rust/AircraftRouterPlanner/src/demo/web && pnpm install && pnpm build"`。
-- `scripts/*.sh` 是 bash 脚本，也在 WSL 内运行。
+- `scripts/*.js` 是 Node.js 脚本（不是 bash），也在 WSL 内运行。
 
 ## Workspace layout
 
-- `src/cli/` — the product (lib+bin, package `arpcli`). All real work happens here.
+- `src/cli/` — the product (lib+bin, package `arpcli`). All real work happens here. Entry: `src/cli/src/lib.rs`.
 - `src/convert/` — internal `arp-convert` terrain tool; NOT shipped, build on demand.
-- `phase0/` — historical performance prototype/benches; keep compilable, don't develop features there.
 - `src/demo/server` (`demo-server`, Axum) + `src/demo/web` (React/Vite, pnpm, NOT a workspace member) — dev visualization only, not in release. `demo-server` calls the CLI via stdin/stdout pipe; `ARP_CLI` env var overrides CLI path.
-- `data/` and `install/` are gitignored (large terrain/mask files); tests degrade gracefully when data is absent (synthetic flat terrain).
+- `data/` and `install/` are gitignored (large terrain/mask files).
 
 ## Commands
 
 ```bash
-cargo build --release -p arpcli   # the product
-cargo test --lib                                       # unit tests (workspace root)
-cargo test --test crash_suite                          # B9 never-crash suite (veto gate)
-cargo test --test determinism                          # bit-identical two-run gate
-cargo test --test regress_phase0                       # historical-bug regression suite
-scripts/check.sh [--quick] [--with-compare]            # full gate: build+test+red-line+perf (bash / Git Bash)
-cargo test --test field_build_compare                  # ~7 min; ONLY when touching ARPK1 decompress/BulkPrefetch/costfield
-cargo bench -p phase0 && cargo bench -p arpcli --bench b_load_decompress
-scripts/perf_regress.sh                                # ≤3s/100km budget; ARP_BUDGET_MS (0 = unlimited; tests use 0)
+pnpm cli:build               # cargo build --release -p arpcli (the product)
+pnpm test                     # cargo test --lib (unit tests only)
+pnpm test:all                 # cargo test --workspace
+pnpm check                    # build + crash_suite + determinism + dependency red-line (full gate)
+pnpm check:quick              # quick check (skip regression suite)
+pnpm demo:server              # cargo run --release -p demo-server
+pnpm demo:dev                 # dev frontend (Vite :5173)
+pnpm demo:build               # build frontend
 ```
 
-Web (pnpm, in WSL):
-```bash
-wsl -d Ubuntu-22.04 -- bash -lc "cd /mnt/d/Project/Rust/AircraftRouterPlanner/src/demo/web && pnpm install && pnpm build"   # build
-wsl -d Ubuntu-22.04 -- bash -lc "cd /mnt/d/Project/Rust/AircraftRouterPlanner/src/demo/web && pnpm dev"                      # dev server (:5173)
-```
-
-- `cargo test --lib` / `--test` run from workspace root target `cli` tests; phase0 has its own.
-- Full tests do NOT run on push/PR — CI runs `cargo check --workspace --all-targets` + dependency red-line; test matrix is `workflow_dispatch` only; releases fire on `v*` tags only.
+- CI runs `cargo check --workspace --all-targets` + dependency red-line; releases fire on `v*` tags only.
 - Toolchain pinned in `rust-toolchain.toml` (1.89.0; MSRV driven by nalgebra 0.35/geo 0.33).
 
 ## Hard rules (CI one-vote veto — do not violate)
 
 - **Zero C dependencies**: `cargo tree -e normal` must not match `openblas|zlib|curl|proj|gdal|pcre|ssl`. Keep nalgebra default features (no blas), geo without `proj` feature, flate2 rust_backend, ruzstd pure Rust. Add `cargo tree` check whenever adding a dependency.
-- **Never panic (B9)**: malformed/degenerate input must return an error/status, never panic — crash_suite covers this. Status contract: `success` / `degraded_timeout` / `no_solution` / `input_invalid`.
+- **Never panic (B9)**: malformed/degenerate input must return an error/status, never panic. Status contract: `success` / `degraded_timeout` / `no_solution` / `input_invalid`.
 - **Determinism**: don't remove `-fma`/`+crt-static` rustflags from `.cargo/config.toml`, never set `target-cpu=native`; hot paths use BTreeMap/fixed-order reduction (no unordered fold/parallel reduce).
 
 ## Dependency pins (don't "clean up" these)
@@ -60,21 +51,18 @@ wsl -d Ubuntu-22.04 -- bash -lc "cd /mnt/d/Project/Rust/AircraftRouterPlanner/sr
 ## Conventions
 
 - CLI help style is `arpcli` / `arpcli help` — **no `--help`**. Pipeline: `arpcli plan --file <file> --out <path>` reads task JSON from file, writes result JSON to file.
-- New regression case: drop a JSON into `src/cli/tests/regression/cases/` — auto-discovered. Output paths must never cross any zone; the suite asserts this.
 - On every feature/fix: update the matching `docs/NN` doc's "与设计的差异/占位" section + `CHANGELOG.md` (Keep a Changelog). `docs/技术方案.md` + code win over status docs on conflict.
 - Version source of truth: `[workspace.package] version` in root `Cargo.toml`; release tags must be `v<version>`; 发版流程见 `docs/发版流程.md`.
 - Windows MSVC builds are static CRT (`+crt-static`) by manager decision — exe must not depend on VCRUNTIME140.dll (`src/cli/check_pe_deps.py` audits imports).
 
 ## opencode.json custom commands
 
-`opencode.json` 定义了四个自定义命令，commit 前必须更新 CHANGELOG.md：
+`opencode.json` 定义了两个自定义命令，commit 前必须更新 CHANGELOG.md：
 - `commit` — Conventional Commits（中文描述，英文 type/scope），自动更新 CHANGELOG
-- `push` — 推送到远程
-- `sync-changes` — 同步远程 + 推送本地
 - `release` — 分析变更、推荐版本号、更新 CHANGELOG、tag + push
 
 ## CI 流水线细节
 
-- `ci.yml`：push/PR 跑 **static-check**（`cargo check --workspace --all-targets` + 依赖红线），不执行测试；**test** job 仅 `workflow_dispatch` 手动触发（单元/崩溃/确定性/回归）。
+- `ci.yml`：push/PR 跑 **static-check**（`cargo check --workspace --all-targets` + 依赖红线），不执行测试（测试用例在 v0.5.0 中已移除）。
 - `release.yml`：`v*` tag 触发，交叉编译 windows/linux × amd64/arm64 四产物，校验 tag 与 Cargo.toml version 一致。
 - Linux release 用 `cross`（Docker 交叉工具链）构建 musl 静态二进制。
