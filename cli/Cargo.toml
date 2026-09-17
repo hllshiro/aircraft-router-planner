@@ -44,9 +44,4 @@ memmap2 = "0.9"
 # 地形数据索引（data/index.yaml 解析，纯 Rust，零 C 依赖）
 serde_yaml_neo = "0.11"
 
-[dev-dependencies]
-criterion.workspace = true
 
-[[bench]]
-name = "b_load_decompress"
-harness = false

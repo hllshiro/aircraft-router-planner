@@ -1,6 +1,3 @@
-# session-local notes
-*_TODO.md
-
 # phase0 compression artifacts (terrain.zstd etc., regenerate per data source)
 phase0_out/
 phase0/*_analyze_out.json
@@ -12,36 +9,30 @@ phase0/data/
 data/
 
 # phase0 transient run logs / scratch (regenerated per run)
-phase0/recompress_z19.log
 phase0/debug_err.txt
 
-# python caches (phase0/scripts)
+# python caches
 __pycache__/
 *.pyc
 
-# demo web (node_modules/dist 可再生；开发期工具不入库)
-demo/web/node_modules/
-demo/web/dist/
+# demo web
+node_modules/
 
-# build artifacts (workspace root target/ + crate-local targets)
+# build artifacts
 target/
 **/target/
-DEMO_TODO.md 
-DEMO_UPGRADE_TODO.md 
-demo/web/dev.log 
-demo_server.log 
+*.log 
 
-# 发布产物（2026-08-08：构建发布版本 → install/；含 500MB+ 地形/掩膜，不入库）
+# 发布产物
 install/
-PER_VEHICLE_PICK_TODO.md
+dist/
 
-FLIP_ORIENT_FIX_TODO.md
-
-# e2e 场景数据（开发期测试工具，不入库；zigzag37 等测试已内嵌场景）
+# e2e 场景数据
 e2e_*.json
 
-# 本地工具缓存（gh CLI 日志缓存等，勿入库）
+# 本地工具缓存
 .ghcache/
 
 # Agent
 superpowers/
+.opencode/

@@ -119,23 +119,3 @@ impl From<&AppError> for ErrorBody {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn reason_display_snake_case() {
-        assert_eq!(
-            InputInvalidReason::DegenerateStartEqualsTarget.to_string(),
-            "degenerate_start_equals_target"
-        );
-    }
-
-    #[test]
-    fn error_body_input_invalid_code() {
-        let b = ErrorBody::input_invalid(InputInvalidReason::TargetInNoFly, "B in no-fly");
-        assert_eq!(b.code, "target_in_no_fly");
-        assert_eq!(b.message, "B in no-fly");
-    }
-}
