@@ -62,7 +62,7 @@ wsl -d Ubuntu-22.04 -- bash -lc "cd /mnt/d/Project/Rust/AircraftRouterPlanner/sr
 - CLI help style is `arpcli` / `arpcli help` — **no `--help`**. Pipeline: `arpcli plan --file <file> --out <path>` reads task JSON from file, writes result JSON to file.
 - New regression case: drop a JSON into `src/cli/tests/regression/cases/` — auto-discovered. Output paths must never cross any zone; the suite asserts this.
 - On every feature/fix: update the matching `docs/NN` doc's "与设计的差异/占位" section + `CHANGELOG.md` (Keep a Changelog). `docs/技术方案.md` + code win over status docs on conflict.
-- Version source of truth: `[workspace.package] version` in root `Cargo.toml`; release tags must be `v<version>`; bump via `scripts/bump_version.sh`.
+- Version source of truth: `[workspace.package] version` in root `Cargo.toml`; release tags must be `v<version>`; 发版流程见 `docs/发版流程.md`.
 - Windows MSVC builds are static CRT (`+crt-static`) by manager decision — exe must not depend on VCRUNTIME140.dll (`src/cli/check_pe_deps.py` audits imports).
 
 ## opencode.json custom commands

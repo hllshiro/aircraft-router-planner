@@ -14,7 +14,6 @@
     "demo:start:build": "node scripts/start-demo.js --build",
     "preview": "node scripts/release.js && ./install/demo-server",
     "release": "node scripts/release.js",
-    "bump-version": "node scripts/bump-version.js",
     "check": "node scripts/check.js",
     "check:quick": "node scripts/check.js --quick",
     "test": "cargo test --lib",

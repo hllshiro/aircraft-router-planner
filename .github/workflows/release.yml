@@ -87,7 +87,7 @@ jobs:
           cargo_version="$(sed -n 's/^version = "\([^"]*\)".*/\1/p' Cargo.toml | head -n1)"
           tag_version="${GITHUB_REF_NAME#v}"
           if [ "$cargo_version" != "$tag_version" ]; then
-            echo "::error::tag ${GITHUB_REF_NAME} 与 Cargo.toml version ${cargo_version} 不一致，请先运行 pnpm bump-version <version>"
+            echo "::error::tag ${GITHUB_REF_NAME} 与 Cargo.toml version ${cargo_version} 不一致，请先更新 Cargo.toml 版本号"
             exit 1
           fi
           echo "version OK: v${cargo_version}"

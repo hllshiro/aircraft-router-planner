@@ -5,7 +5,7 @@
 
 > **版本号唯一事实来源**：`Cargo.toml` 的 `[workspace.package] version`。
 > 发布时 tag 必须为 `v<version>`，由 `.github/workflows/release.yml` 校验并交叉编译四个平台产物。
-> 升级流程见 `scripts/bump-version.js`。
+> 发版流程见 `docs/发版流程.md`。
 
 ## [Unreleased]
 

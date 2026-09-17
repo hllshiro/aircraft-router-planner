@@ -55,7 +55,7 @@ pnpm check:quick               # 快速检查（跳过回归套件）
 
 - 版本号唯一事实来源：`Cargo.toml` 的 `[workspace.package] version`；发布 tag 必须为 `v<version>`。
 - 变更记录：[CHANGELOG.md](CHANGELOG.md)（Keep a Changelog 格式）。
-- 版本升级：`pnpm bump-version <new_version>`。
+- 发版流程：[docs/发版流程.md](docs/发版流程.md)。
 - 发布：推送 `v*` tag 触发 [.github/workflows/release.yml](.github/workflows/release.yml)，
   交叉编译 `windows/linux × amd64/arm64` 四个 CLI 产物并创建 GitHub Release（含 SHA256SUMS）。
 
