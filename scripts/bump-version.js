@@ -23,7 +23,7 @@ if (!/^\d+\.\d+\.\d+$/.test(NEW)) {
 
 const content = readFileSync(CARGO_TOML, "utf-8");
 
-const match = content.match(/^version\s*=\s*"([^"]+)"/m);
+const match = content.match(/^\s*version\s*=\s*"([^"]+)"/m);
 if (!match) {
   console.error("错误: 未在 Cargo.toml 找到 [workspace.package] version");
   process.exit(1);
@@ -39,7 +39,7 @@ if (OLD === NEW) {
 console.log(`==> 版本升级 ${OLD} -> ${NEW}`);
 
 const updated = content.replace(
-  new RegExp(`^(version\\s*=\\s*")${OLD.replace(/\./g, "\\.")}(")`),
+  new RegExp(`(^\\s*version\\s*=\\s*")${OLD.replace(/\./g, "\\.")}(")`),
   `$1${NEW}$2`
 );
 
