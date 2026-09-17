@@ -10,15 +10,15 @@ Deterministic 3D aircraft route planning CLI (Rust 2024 edition): FMM + semantic
 ## Environment
 
 - **所有编译 / 构建 / 测试 / 验证一律在 WSL（Ubuntu-22.04）执行**——本机 Windows 无 Rust 工具链；WSL 内已有完整环境（cargo / node / pnpm）。统一入口：`wsl -d Ubuntu-22.04 -- bash -lc "cd /mnt/d/Project/Rust/AircraftRouterPlanner && <cmd>"`。
-- 前端 `demo/web` 用 **pnpm**（不是 npm），同样在 WSL 内运行：`wsl -d Ubuntu-22.04 -- bash -lc "cd /mnt/d/Project/Rust/AircraftRouterPlanner/demo/web && pnpm install && pnpm build"`。
+- 前端 `src/demo/web` 用 **pnpm**（不是 npm），同样在 WSL 内运行：`wsl -d Ubuntu-22.04 -- bash -lc "cd /mnt/d/Project/Rust/AircraftRouterPlanner/src/demo/web && pnpm install && pnpm build"`。
 - `scripts/*.sh` 是 bash 脚本，也在 WSL 内运行。
 
 ## Workspace layout
 
-- `cli/` — the product (lib+bin, package `arpcli`). All real work happens here.
-- `convert/` — internal `arp-convert` terrain tool; NOT shipped, build on demand.
+- `src/cli/` — the product (lib+bin, package `arpcli`). All real work happens here.
+- `src/convert/` — internal `arp-convert` terrain tool; NOT shipped, build on demand.
 - `phase0/` — historical performance prototype/benches; keep compilable, don't develop features there.
-- `demo/server` (`demo-server`, Axum) + `demo/web` (React/Vite, pnpm, NOT a workspace member) — dev visualization only, not in release. `demo-server` calls the CLI via stdin/stdout pipe; `ARP_CLI` env var overrides CLI path.
+- `src/demo/server` (`demo-server`, Axum) + `src/demo/web` (React/Vite, pnpm, NOT a workspace member) — dev visualization only, not in release. `demo-server` calls the CLI via stdin/stdout pipe; `ARP_CLI` env var overrides CLI path.
 - `data/` and `install/` are gitignored (large terrain/mask files); tests degrade gracefully when data is absent (synthetic flat terrain).
 
 ## Commands
@@ -37,8 +37,8 @@ scripts/perf_regress.sh                                # ≤3s/100km budget; ARP
 
 Web (pnpm, in WSL):
 ```bash
-wsl -d Ubuntu-22.04 -- bash -lc "cd /mnt/d/Project/Rust/AircraftRouterPlanner/demo/web && pnpm install && pnpm build"   # build
-wsl -d Ubuntu-22.04 -- bash -lc "cd /mnt/d/Project/Rust/AircraftRouterPlanner/demo/web && pnpm dev"                      # dev server (:5173)
+wsl -d Ubuntu-22.04 -- bash -lc "cd /mnt/d/Project/Rust/AircraftRouterPlanner/src/demo/web && pnpm install && pnpm build"   # build
+wsl -d Ubuntu-22.04 -- bash -lc "cd /mnt/d/Project/Rust/AircraftRouterPlanner/src/demo/web && pnpm dev"                      # dev server (:5173)
 ```
 
 - `cargo test --lib` / `--test` run from workspace root target `cli` tests; phase0 has its own.
@@ -60,10 +60,10 @@ wsl -d Ubuntu-22.04 -- bash -lc "cd /mnt/d/Project/Rust/AircraftRouterPlanner/de
 ## Conventions
 
 - CLI help style is `arpcli` / `arpcli help` — **no `--help`**. Pipeline: `arpcli plan --file <file> --out <path>` reads task JSON from file, writes result JSON to file.
-- New regression case: drop a JSON into `cli/tests/regression/cases/` — auto-discovered. Output paths must never cross any zone; the suite asserts this.
+- New regression case: drop a JSON into `src/cli/tests/regression/cases/` — auto-discovered. Output paths must never cross any zone; the suite asserts this.
 - On every feature/fix: update the matching `docs/NN` doc's "与设计的差异/占位" section + `CHANGELOG.md` (Keep a Changelog). `docs/技术方案.md` + code win over status docs on conflict.
 - Version source of truth: `[workspace.package] version` in root `Cargo.toml`; release tags must be `v<version>`; bump via `scripts/bump_version.sh`.
-- Windows MSVC builds are static CRT (`+crt-static`) by manager decision — exe must not depend on VCRUNTIME140.dll (`cli/check_pe_deps.py` audits imports).
+- Windows MSVC builds are static CRT (`+crt-static`) by manager decision — exe must not depend on VCRUNTIME140.dll (`src/cli/check_pe_deps.py` audits imports).
 
 ## opencode.json custom commands
 

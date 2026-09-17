@@ -6,14 +6,15 @@
 ## 仓库结构
 
 ```
-├── cli/            # ★ 核心 CLI（lib + bin）——正式工程，核心功能只有路径规划
-│   ├── src/        # 契约 / 坐标 / 地形数据源 / 代价场 / FMM / 平滑 / 求解器
-│   ├── tests/      # crash_suite / determinism / field_build_compare / 回归集
-│   ├── benches/    # 内置格式加载基准
-│   └── examples/   # 开发期调试工具
-├── convert/        # 内部地形转换工具（arp-convert：外部格式 → ARPK1；不随核心 CLI 发布，随用随编）
+├── src/
+│   ├── cli/        # ★ 核心 CLI（lib + bin）——正式工程，核心功能只有路径规划
+│   │   ├── src/    # 契约 / 坐标 / 地形数据源 / 代价场 / FMM / 平滑 / 求解器
+│   │   ├── tests/  # crash_suite / determinism / field_build_compare / 回归集
+│   │   ├── benches/# 内置格式加载基准
+│   │   └── examples/# 开发期调试工具
+│   ├── convert/    # 内部地形转换工具（arp-convert：外部格式 → ARPK1；不随核心 CLI 发布，随用随编）
+│   └── demo/       # 开发期可视化工具（server: Axum 后端 / web: React+Three.js 前端）
 ├── phase0/         # Phase 0 性能原型与基准 crate（历史，b1–b5 可复跑，见 phase0/README.md）
-├── demo/           # 开发期可视化工具（server: Axum 后端 / web: React+Three.js 前端）
 ├── docs/           # 技术文档集（技术方案.md 权威设计 + 01–11 实现现状）
 ├── scripts/        # check.sh / release.sh / perf_regress.sh 等门禁与发布脚本
 └── data/ install/  # gitignore：地形/掩膜数据与发布包，需另行准备
@@ -47,7 +48,7 @@ scripts/check.sh            # 构建 + 全套回归 + 静态红线 + 性能预�
 - 实现现状文档集入口：[docs/README.md](docs/README.md)
 - 输入/输出 JSON 契约：[docs/02-输入输出契约.md](docs/02-输入输出契约.md)
 - 构建/依赖/发布：[docs/11-工程化与构建.md](docs/11-工程化与构建.md)
-- Demo 可视化：[docs/09-演示应用.md](docs/09-演示应用.md) / [demo/README.md](demo/README.md)
+- Demo 可视化：[docs/09-演示应用.md](docs/09-演示应用.md) / [src/demo/README.md](src/demo/README.md)
 
 ## 版本与发布
 

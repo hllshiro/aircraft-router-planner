@@ -7,11 +7,17 @@
 > 发布时 tag 必须为 `v<version>`，由 `.github/workflows/release.yml` 校验并交叉编译四个平台产物。
 > 升级流程见 `scripts/bump_version.sh`。
 
+## [Unreleased]
+
+### Changed
+- 源码目录重构：`cli/`、`convert/`、`demo/` 迁移至 `src/` 下，统一为 `src/cli/`、`src/convert/`、`src/demo/`
+- 新增 pnpm monorepo 工作区配置，根目录统一命令入口（`pnpm cli:dev`、`pnpm demo:build` 等）
+
 ## [0.5.0] - 2026-09-16
 
 ### Changed
 - **Breaking**: 移除 `ZoneType` 枚举和 `zone_type` 字段，zone 行为由 `alt_min_m`/`alt_max_m` 决定：两者都不存在 → 全高度墙（禁飞/障碍）；任一存在 → 高度层禁入（限飞区）。
-- 移除所有测试用例（cli/src 内联测试、cli/tests/、phase0/），测试覆盖范围分析文档：`docs/测试覆盖范围分析.md`
+- 移除所有测试用例（src/cli/src 内联测试、src/cli/tests/、phase0/），测试覆盖范围分析文档：`docs/测试覆盖范围分析.md`
 - 移除 phase0 历史原型目录
 - 移除 scripts/check.sh、perf_regress.sh、gen_overview_test.py
 
@@ -74,7 +80,7 @@
 ### Changed
 - help 风格改为 `arpcli` / `arpcli help` / `arpcli help <command>`，移除 `--help` 标志。
 - 规划动作显式化为 `arpcli plan` 子命令（裸 `arpcli` 现显示顶层 help；**破坏性变更**，原 `arpcli < mission.json` 管道改为 `arpcli plan < mission.json`）。
-- 地形转换/重压缩从核心 CLI 剥离为独立内部工具 `arp-convert`（`convert/` crate，**不随核心 CLI 发布**，随用随编）。
+- 地形转换/重压缩从核心 CLI 剥离为独立内部工具 `arp-convert`（`src/convert/` crate，**不随核心 CLI 发布**，随用随编）。
 
 ## [0.1.0] - 2026-08-17
 
@@ -88,7 +94,7 @@
 - 威胁模型：球形雷达、探测概率衰减（Swerling I / 线性 / 指数）、LOS 遮挡、多雷达概率并集。
 - 路径平滑：Theta\* / 样条 / Dubins（CSC + CCC）/ 贪心抽稀 + 全链复验。
 - 多机共享代价场、禁飞/限飞区剖面决策、必经点、武器语义、多机路径交叉检测。
-- 开发期可视化工具 `demo/`（Axum 后端 + React/Three.js 前端，不随发布版分发）。
+- 开发期可视化工具 `src/demo/`（Axum 后端 + React/Three.js 前端，不随发布版分发）。
 - 工程化：CI 分层门禁（静态检查 + 手动全量测试）、release 流水线（`v*` tag 交叉编译 4 平台）、`CHANGELOG.md`、`scripts/bump_version.sh`。
 
 ### Changed

@@ -2,7 +2,7 @@
 # 版本号维护：单一事实来源 = Cargo.toml [workspace.package] version。
 # 用法：scripts/bump_version.sh <new_version>   例如 scripts/bump_version.sh 0.2.0
 # 说明：只改 Cargo.toml 的 workspace version（cli 通过 version.workspace 继承）；
-#       phase0 / demo/server 为内部 crate，版本独立、不跟随发布版本。
+#       phase0 / src/demo/server 为内部 crate，版本独立、不跟随发布版本。
 set -euo pipefail
 cd "$(dirname "$0")/.."
 

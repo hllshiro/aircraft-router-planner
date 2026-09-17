@@ -14,7 +14,7 @@
 ## 结构
 
 ```
-demo/
+src/demo/
 ├── server/    # Rust + Axum 后端：POST /api/plan → stdin/stdout 管道调核心 CLI
 │              # （arpcli），透传 Output JSON；
 │              # POST /api/terrain 直接采样 ARPK1 供 3D 地形渲染；
@@ -48,8 +48,8 @@ install/demo/
 
 ```bash
 cargo build --release -p demo-server
-cd demo/web && pnpm build              # 产出 demo/web/dist
-copy demo/web/dist  → install/demo/web-dist
+cd src/demo/web && pnpm build              # 产出 src/demo/web/dist
+copy src/demo/web/dist  → install/demo/web-dist
 copy target/release/demo-server.exe → install/demo/
 ```
 
@@ -72,10 +72,10 @@ copy target/release/demo-server.exe → install/demo/
 cargo build --release -p arpcli
 cargo build --release -p demo-server
 cargo run --release -p demo-server &        # :3001
-cd demo/web && pnpm install && pnpm dev   # :5173
+cd src/demo/web && pnpm install && pnpm dev   # :5173
 ```
 
-Linux/macOS 可用 `bash demo/start.sh` 一键（脚本按 Git Bash/pnpm 编写）。
+Linux/macOS 可用 `bash src/demo/start.sh` 一键（脚本按 Git Bash/pnpm 编写）。
 
 ### 独立运行模式（无工具链）
 

@@ -88,12 +88,12 @@ if [ "$SKIP_WEB" -eq 0 ]; then
   echo "==> [3/4] 构建 web 前端"
   if ! command -v pnpm >/dev/null 2>&1; then
     echo "    警告：npm 不可用，跳过 web 构建（使用 --no-web 可消除此警告）"
-  elif [ ! -d "demo/web" ]; then
-    echo "    警告：demo/web 不存在，跳过 web 构建"
+  elif [ ! -d "src/demo/web" ]; then
+    echo "    警告：src/demo/web 不存在，跳过 web 构建"
   else
-    (cd demo/web && pnpm i && pnpm run build)
+    (cd src/demo/web && pnpm i && pnpm run build)
     rm -rf "$OUT_DIR/web-dist"
-    cp -r demo/web/dist "$OUT_DIR/web-dist"
+    cp -r src/demo/web/dist "$OUT_DIR/web-dist"
   fi
 else
   echo "==> [3/4] 跳过 web 前端 (--no-web)"

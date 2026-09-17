@@ -1,0 +1,13 @@
+{
+  "name": "aircraft-router-planner",
+  "private": true,
+  "version": "0.5.0",
+  "scripts": {
+    "cli:dev": "cargo run -p arpcli --",
+    "cli:build": "cargo build --release -p arpcli",
+    "demo:dev": "pnpm --filter aircraft-router-planner-web dev",
+    "demo:build": "pnpm --filter aircraft-router-planner-web build",
+    "preview": "./scripts/preview.sh",
+    "release": "./scripts/release.sh"
+  }
+}
