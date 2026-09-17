@@ -9,6 +9,8 @@
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-09-17
+
 ### Changed
 - demo 移除 GeoTIFF（tiff）底图选项，arpcli 不支持该格式
 - demo 掩膜选择改为 index id，与地形统一使用 index.yaml 索引机制
