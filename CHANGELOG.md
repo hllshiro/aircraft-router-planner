@@ -9,6 +9,8 @@
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-17
+
 ### Changed
 - 源码目录重构：`cli/`、`convert/`、`demo/` 迁移至 `src/` 下，统一为 `src/cli/`、`src/convert/`、`src/demo/`
 - 新增 pnpm monorepo 工作区配置，根目录统一命令入口（`pnpm cli:dev`、`pnpm demo:build` 等）
