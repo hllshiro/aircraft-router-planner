@@ -7,7 +7,13 @@
 > 发布时 tag 必须为 `v<version>`，由 `.github/workflows/release.yml` 校验并交叉编译四个平台产物。
 > 升级流程见 `scripts/bump_version.sh`。
 
-## [Unreleased]
+## [0.5.0] - 2026-09-16
+
+### Changed
+- **Breaking**: 移除 `ZoneType` 枚举和 `zone_type` 字段，zone 行为由 `alt_min_m`/`alt_max_m` 决定：两者都不存在 → 全高度墙（禁飞/障碍）；任一存在 → 高度层禁入（限飞区）。
+- 移除所有测试用例（cli/src 内联测试、cli/tests/、phase0/），测试覆盖范围分析文档：`docs/测试覆盖范围分析.md`
+- 移除 phase0 历史原型目录
+- 移除 scripts/check.sh、perf_regress.sh、gen_overview_test.py
 
 ## [0.4.0] - 2026-09-15
 

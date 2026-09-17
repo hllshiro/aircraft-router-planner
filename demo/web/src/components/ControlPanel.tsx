@@ -221,7 +221,6 @@ export function ControlPanel({
     const id = `zone_${Date.now()}`;
     const zone: Zone = {
       id,
-      zone_type: 'no_fly',
       shape: 'circle',
       geometry: {
         center: [
@@ -251,7 +250,6 @@ export function ControlPanel({
     const id = `rz_${Date.now()}`;
     const zone: Zone = {
       id,
-      zone_type: 'restricted',
       shape: 'circle',
       geometry: {
         center: [
@@ -889,8 +887,8 @@ export function ControlPanel({
       </button>
 
       {/* Zones */}
-      <h3>禁飞区·no_fly ({config.zones.filter(z => z.zone_type === 'no_fly').length})</h3>
-      {config.zones.filter(z => z.zone_type === 'no_fly').map((z) => (
+      <h3>禁飞区 ({config.zones.filter(z => z.alt_min_m == null && z.alt_max_m == null).length})</h3>
+      {config.zones.filter(z => z.alt_min_m == null && z.alt_max_m == null).map((z) => (
         <div key={z.id} className="obstacle-item">
           <div className="obstacle-header">
             <span>{z.id}</span>
@@ -1071,8 +1069,8 @@ export function ControlPanel({
       </button>
 
       {/* Restricted zones */}
-      <h3>限飞区 ({config.zones.filter(z => z.zone_type === 'restricted').length})</h3>
-      {config.zones.filter(z => z.zone_type === 'restricted').map((z) => {
+      <h3>限飞区 ({config.zones.filter(z => z.alt_min_m != null || z.alt_max_m != null).length})</h3>
+      {config.zones.filter(z => z.alt_min_m != null || z.alt_max_m != null).map((z) => {
         const g = z.geometry as { center?: [number, number]; radius_km?: number; vertices?: [number, number][] };
         return (
           <div key={z.id} className="obstacle-item">

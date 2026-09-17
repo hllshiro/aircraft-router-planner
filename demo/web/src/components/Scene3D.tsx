@@ -9,7 +9,6 @@ import type {
   AircraftInput,
   Radar,
   Zone,
-  ZoneType,
   AircraftOutput,
   Vec2,
   TerrainConfig,
@@ -31,7 +30,7 @@ interface Scene3DProps {
   target: Waypoint;
   aircraft: AircraftInput[];
   radars: Radar[];
-  /** zone 渲染视图：输入 zone 不带 zone_type，由 App 按所属数组打标（仅前端着色用） */
+  /** zone 渲染视图：输入 zone 不带 zone_type，由 App 按 alt_min_m/alt_max_m 判断（仅前端着色用） */
   zones: VisualZone[];
   results: AircraftOutput[] | null;
   /** 地形源配置（arpack 索引 id；瓦片按相机视口加载） */
@@ -59,8 +58,8 @@ interface Scene3DProps {
   onMouseMove?: (wp: Waypoint | null) => void;
 }
 
-/** zone 渲染视图：输入 Zone 无 zone_type（JSON 契约 2026-08-19），前端按所属数组打标着色 */
-export type VisualZone = Zone & { zone_type: ZoneType };
+/** zone 渲染视图：输入 Zone 无 zone_type（JSON 契约 2026-08-19），前端按 alt_min_m/alt_max_m 判断着色 */
+export type VisualZone = Zone;
 
 /** 圆形 zone → 局部平面多边形（24 边近似） */
 function circleToLocalPolygon(center: [number, number], radiusKm: number, ref: GeoRef): Vec2[] {
@@ -444,12 +443,12 @@ export function Scene3D({
   }));
 
   const zoneMeshes = zones.map((z) => {
-    // 禁飞/障碍全高度禁入：无高度范围 → 从地面拉到可视顶部；
-    // 限飞区用 [alt_min, alt_max]（缺省 0..12000 兜底）
-    const wall = z.zone_type === 'no_fly' || z.zone_type === 'obstacle';
+    // 无高度范围（alt_min_m 和 alt_max_m 都为 null）→ 全高度禁入，从地面拉到可视顶部；
+    // 有限高范围 → 用 [alt_min, alt_max]（缺省 0..12000 兜底）
+    const wall = z.alt_min_m == null && z.alt_max_m == null;
     return {
       id: z.id,
-      color: ZONE_COLORS[z.zone_type] ?? '#ff8800',
+      color: wall ? ZONE_COLORS['no_fly'] : ZONE_COLORS['restricted'],
       boundary: zoneBoundaryLocal(z, stableGeoRef),
       altMin: wall ? 0 : (z.alt_min_m ?? 0) * zScale,
       altMax: wall ? WALL_VISUAL_TOP_M * zScale : (z.alt_max_m ?? 12000) * zScale,
@@ -464,7 +463,7 @@ export function Scene3D({
         return (z.geometry as { vertices: [number, number][] }).vertices.map(
           ([lon, lat]) => {
             const p = geoPointToLocal(lon, lat, z.alt_min_m ?? 0, stableGeoRef, zScale);
-            return { id: `${z.id}_${lon}_${lat}`, pos: p, color: z.zone_type };
+            return { id: `${z.id}_${lon}_${lat}`, pos: p, color: z.alt_min_m == null ? 'no_fly' : 'restricted' };
           },
         );
       }),

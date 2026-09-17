@@ -49,8 +49,6 @@ export interface Radar {
   suppression_factor?: number;
 }
 
-export type ZoneType = 'no_fly' | 'restricted' | 'obstacle';
-
 export interface CircleGeometry {
   center: [number, number]; // [lon, lat]
   radius_km: number;
@@ -62,11 +60,11 @@ export type ZoneGeometry = CircleGeometry | PolygonGeometry;
 
 export interface Zone {
   id: string;
-  zone_type: ZoneType;
   shape: 'circle' | 'polygon';
   geometry: ZoneGeometry;
-  /** 仅限飞区（restricted）需要高度区间；禁飞/障碍全高度禁入，省略 */
+  /** 高度区间下限（米）；null/不存在 = 全高度墙（禁飞/障碍） */
   alt_min_m?: number;
+  /** 高度区间上限（米）；null/不存在 = 全高度墙（禁飞/障碍） */
   alt_max_m?: number;
 }
 
