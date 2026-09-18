@@ -9,6 +9,8 @@
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-09-18
+
 ### Changed
 - 移除 CI 中手动触发的 test job（测试矩阵）
 - 简化 check.js：移除 --quick/--with-compare 参数及对应测试步骤
@@ -128,7 +130,7 @@
 - JSON 输入输出契约（`schema_version 0.20`，`status` 四态：`success` / `degraded_timeout` / `no_solution` / `input_invalid`）。
 - 坐标系统：WGS84/CGCS2000/GRS80 椭球、TM/UTM/GK3/WebMercator、近场 ENU。
 - 地形数据源：ARPK1 内置格式 + SRTM/GeoTIFF/DTED 外置直读 + GSHHG 海陆掩膜（LOS 语义）。
-- 威胁模型：球形雷达、探测概率衰减（Swerling I / 线性 / 指数）、LOS 遮挡、多雷达概率并集。
+- 威胁模型：球形雷达、二值检测、LOS 遮挡、多雷达（任一探测即探测）。
 - 路径平滑：Theta\* / 样条 / Dubins（CSC + CCC）/ 贪心抽稀 + 全链复验。
 - 多机共享代价场、禁飞/限飞区剖面决策、必经点、武器语义、多机路径交叉检测。
 - 开发期可视化工具 `src/demo/`（Axum 后端 + React/Three.js 前端，不随发布版分发）。
