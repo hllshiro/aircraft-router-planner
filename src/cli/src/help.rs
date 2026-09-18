@@ -131,7 +131,7 @@ fn build_request_body(index: Option<&crate::config::TerrainIndex>) -> String {
             name: "terrain",
             type_label: "object",
             required: false,
-            description: "地形配置（索引 id）".into(),
+            description: "地形配置".into(),
             children: terrain_children,
         },
         ParamNode {
@@ -217,7 +217,7 @@ fn build_terrain_children(index: Option<&crate::config::TerrainIndex>) -> Vec<Pa
             } else {
                 idx.arpacks
                     .iter()
-                    .map(|e| format!("{}({})", e.id, e.desc))
+                    .map(|e| e.id.clone())
                     .collect::<Vec<_>>()
                     .join(" / ")
             };
@@ -226,7 +226,7 @@ fn build_terrain_children(index: Option<&crate::config::TerrainIndex>) -> Vec<Pa
             } else {
                 idx.masks
                     .iter()
-                    .map(|e| format!("{}({})", e.id, e.desc))
+                    .map(|e| e.id.clone())
                     .collect::<Vec<_>>()
                     .join(" / ")
             };
@@ -235,14 +235,14 @@ fn build_terrain_children(index: Option<&crate::config::TerrainIndex>) -> Vec<Pa
                     name: "arpack",
                     type_label: "string",
                     required: false,
-                    description: format!("arpack 索引 id：{arpack_desc}"),
+                    description: format!("可用数据：{arpack_desc}"),
                     children: vec![],
                 },
                 ParamNode {
                     name: "mask",
                     type_label: "string",
                     required: false,
-                    description: format!("mask 索引 id：{mask_desc}"),
+                    description: format!("可用数据：{mask_desc}"),
                     children: vec![],
                 },
             ]
