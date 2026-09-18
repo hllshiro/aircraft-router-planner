@@ -352,7 +352,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
     } else {
         0
     };
-    let base_grid = params_merged.default_grid_resolution.max(8).max(auto_grid).min(1024);
+    let base_grid = params_merged.default_precision.grid_resolution().max(8).max(auto_grid).min(1024);
     let grid = if region.span_deg > base_region.span_deg + 1e-9 {
         let cell_deg = base_region.span_deg / base_grid as f64;
         ((region.span_deg / cell_deg).round() as usize)
@@ -417,7 +417,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
         inflation_m,
         &threat,
         params_merged.radar_cost_coef,
-        params_merged.los_mask_coef,
+        terrain.as_source().is_some(),
         !input.red_forces.radars.is_empty(),
     );
     let mut grid_refined = false; // ④ 已细分重试（每机最多一次）
@@ -803,7 +803,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                         inflation_m,
                         &threat,
                         params_merged.radar_cost_coef,
-                        params_merged.los_mask_coef,
+                        terrain.as_source().is_some(),
                         !input.red_forces.radars.is_empty(),
                     );
                     degradations.push(format!(
@@ -2728,37 +2728,16 @@ fn radar_threat_params(d: &crate::config::DefaultParams) -> ThreatParams {
 /// merge 已回落；此处把"输入无效"事实记入 stats.degradations 供验收可见。
 fn radar_param_degradations(input: &Input, out: &mut Vec<String>) {
     let p = &input.parameters;
-    if let Some(v) = p.radar_inflation
-        && !(v.is_finite() && v > 1.0)
-    {
-        out.push(format!(
-            "parameter radar_inflation={v} invalid -> default 1.2"
-        ));
-    }
     if let Some(v) = p.p_cross
         && !(v.is_finite() && v >= 0.0 && v <= 1.0)
     {
         out.push(format!("parameter p_cross={v} invalid -> default 0.1"));
-    }
-    if let Some(v) = p.suppression_delta
-        && !(v.is_finite() && v >= 0.0 && v < 1.0)
-    {
-        out.push(format!(
-            "parameter suppression_delta={v} invalid -> default 0.5"
-        ));
     }
     if let Some(v) = p.radar_cost_coef
         && !(v.is_finite() && v > 0.0)
     {
         out.push(format!(
             "parameter radar_cost_coef={v} invalid -> default 200"
-        ));
-    }
-    if let Some(v) = p.los_mask_coef
-        && !(v.is_finite() && v >= 0.0 && v <= 1.0)
-    {
-        out.push(format!(
-            "parameter los_mask_coef={v} invalid -> default 0.08"
         ));
     }
     if let Some(s) = &p.detection_curve
@@ -4094,7 +4073,7 @@ fn build_cost_field(
     inflation_m: f64,
     threat: &SphericalRadarThreat,
     radar_cost_coef: f64,
-    los_mask_coef: f64,
+    has_terrain: bool,
     has_radars: bool,
 ) -> crate::costfield::CostField {
     // 硬墙判定闭包（每格：墙内 → Forbidden 禁行）——par_local 与串行回退共用。
@@ -4217,7 +4196,7 @@ fn build_cost_field(
         for r in 0..grid {
             for c in 0..grid {
                 let (lon, lat) = cell_lonlat(r, c, region, grid);
-                let p = if los_mask_coef > 0.0 && terrain_src.is_some() {
+                let p = if has_terrain && terrain_src.is_some() {
                     threat.point_probability(lon, lat, LOS_REF_ALT_M, terrain_src)
                 } else {
                     threat.static_union_probability(lon, lat)

@@ -15,6 +15,7 @@
 - 简化 release.js：移除 --no-demo/--no-web 参数、SHA256SUMS 生成、auditBinary 等
 - 移除 opencode.json 中的 push 和 sync-changes 自定义命令
 - docs: 更新测试与验证、工程化与构建文档，反映 v0.5.0 移除测试用例
+- 移除 `radar_inflation` 和 `suppression_delta` 的外部参数覆盖，这两参数不再可从 JSON 任务文件覆盖，始终使用内部默认值（1.2 和 0.5）
 
 ### Added
 - docs: 补充地形数据源 GSHHG 处理流程说明（docs/08-地形数据源.md §4.3）

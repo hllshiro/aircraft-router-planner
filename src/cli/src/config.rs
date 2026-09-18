@@ -330,28 +330,47 @@ pub struct LaunchEnvelope {
     pub speed_mps: Option<[f64; 2]>,
 }
 
+/// 精度档位枚举（网格分辨率由档位派生，无解时自动细分重试）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Precision {
+    Fast,
+    Balanced,
+    Accurate,
+}
+
+impl Default for Precision {
+    fn default() -> Self {
+        Self::Balanced
+    }
+}
+
+impl Precision {
+    pub fn grid_resolution(self) -> usize {
+        match self {
+            Self::Fast => 128,
+            Self::Balanced => 256,
+            Self::Accurate => 512,
+        }
+    }
+}
+
 /// 默认参数表覆盖（全部可选，未提供用 DefaultParams）。
 #[derive(Debug, Clone, Deserialize, Default, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ParamsOverride {
-    #[serde(default)]
-    pub radar_inflation: Option<f64>,
     /// 探测曲线形态字符串（"swerling1"/"exponential"/"linear" 不区分大小写；无效 → 默认 swerling1，
     /// 主管决策 2026-08-05：无外部参数或参数无效使用默认值）。
     #[serde(default)]
     pub detection_curve: Option<String>,
     #[serde(default)]
     pub p_cross: Option<f64>,
-    #[serde(default)]
-    pub suppression_delta: Option<f64>,
     /// 雷达探测概率代价系数（FMM 代价 ×(1+coef×p)；越大航路越倾向绕行躲避）
     #[serde(default)]
     pub radar_cost_coef: Option<f64>,
+    /// 精度档位（fast / balanced / accurate；默认 balanced；无解时自动提升精度）
     #[serde(default)]
-    pub los_mask_coef: Option<f64>,
-    /// 粗网格分辨率（8..1024；默认 256）
-    #[serde(default)]
-    pub grid_resolution: Option<usize>,
+    pub precision: Option<Precision>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default, JsonSchema)]
@@ -390,8 +409,7 @@ pub struct DefaultParams {
     /// 穿探测区（含并排双雷达重叠/间隙边缘）明确绕行，探测区外无几何项。
     /// 主管 2026-08-06：并排双雷达不得直穿探测区（即使 P_cross 调高）。
     pub radar_cost_coef: f64,
-    /// LOS mask 系数（默认 0.05–0.1 区间内取 0.08；守保守口径不取 0，十二轮共识）
-    pub los_mask_coef: f64,
+
     /// 通用武器默认射程 [Rmin, Rmax] km（未输入时）
     pub default_weapon_range_km: [f64; 2],
     /// 最大坡度占位（°）
@@ -420,8 +438,8 @@ pub struct DefaultParams {
     pub default_fixed_wing_cruise_speed_mps: f64,
     /// 巡航速度占位（m/s，旋翼机——内部派生用）
     pub default_rotorcraft_cruise_speed_mps: f64,
-    /// 粗网格分辨率（默认 256）
-    pub default_grid_resolution: usize,
+    /// 精度档位（默认 balanced）
+    pub default_precision: Precision,
 }
 
 impl Default for DefaultParams {
@@ -433,7 +451,6 @@ impl Default for DefaultParams {
             base_p: 0.9, // Swerling I 标定：R_eff = 90% 探测距离（方案 A，2026-08-13）
             suppression_delta: 0.5,
             radar_cost_coef: 200.0,
-            los_mask_coef: 0.08,
             default_weapon_range_km: [5.0, 40.0],
             default_max_bank_deg: 30.0,
             default_fixed_wing_turn_radius_m: 5_000.0,
@@ -448,7 +465,7 @@ impl Default for DefaultParams {
             default_rotorcraft_maximum_altitude_m: 6_000.0,
             default_fixed_wing_cruise_speed_mps: 200.0,
             default_rotorcraft_cruise_speed_mps: 60.0,
-            default_grid_resolution: 256,
+            default_precision: Precision::default(),
         }
     }
 }
@@ -459,31 +476,16 @@ impl DefaultParams {
     /// 无外部参数或参数无效使用默认值；回落由 solver 记入 stats.degradations）。
     pub fn merge(&self, o: &ParamsOverride) -> DefaultParams {
         let mut d = self.clone();
-        // 合法域与旧契约一致（radar_inflation>1 为膨胀、p_cross/los_mask_coef∈[0,1]、
-        // suppression_delta∈[0,1)）；出域/非有限 → 回落默认。
-        if let Some(v) = o.radar_inflation.filter(|v| v.is_finite() && *v > 1.0) {
-            d.radar_inflation = v;
-        }
+        // 合法域与旧契约一致（p_cross∈[0,1]）；出域/非有限 → 回落默认。
+        // radar_inflation/suppression_delta 不可外部覆盖，始终使用内部默认值。
         if let Some(v) = o
             .p_cross
             .filter(|v| v.is_finite() && *v >= 0.0 && *v <= 1.0)
         {
             d.p_cross = v;
         }
-        if let Some(v) = o
-            .suppression_delta
-            .filter(|v| v.is_finite() && *v >= 0.0 && *v < 1.0)
-        {
-            d.suppression_delta = v;
-        }
         if let Some(v) = o.radar_cost_coef.filter(|v| v.is_finite() && *v > 0.0) {
             d.radar_cost_coef = v;
-        }
-        if let Some(v) = o
-            .los_mask_coef
-            .filter(|v| v.is_finite() && *v >= 0.0 && *v <= 1.0)
-        {
-            d.los_mask_coef = v;
         }
         if let Some(s) = o.detection_curve.as_deref() {
             match s.to_ascii_lowercase().as_str() {
@@ -493,8 +495,8 @@ impl DefaultParams {
                 _ => {} // 无效 → 默认
             }
         }
-        if let Some(v) = o.grid_resolution.filter(|v| *v >= 8 && *v <= 1024) {
-            d.default_grid_resolution = v;
+        if let Some(p) = o.precision {
+            d.default_precision = p;
         }
         d
     }

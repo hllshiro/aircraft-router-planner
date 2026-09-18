@@ -81,7 +81,8 @@ export interface ParamsOverride {
   detection_curve?: string;
   p_cross?: number;
   suppression_delta?: number;
-  los_mask_coef?: number;
+  /** 精度档位：fast(128) / balanced(256, 默认) / accurate(512) */
+  precision?: 'fast' | 'balanced' | 'accurate';
 }
 
 // === 武器（匹配 cli/src/config.rs Weapon；2026-08-19 移入飞行器：weapon 出现即启用、weapon_type 必填） ===

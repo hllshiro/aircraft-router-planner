@@ -4,7 +4,6 @@ Deterministic 3D aircraft route planning CLI (Rust 2024 edition): FMM + semantic
 
 ## First read
 
-- `docs/技术方案.md` — authoritative design doc (v0.20, contains all manager decisions)
 - `docs/README.md` — index of `docs/01–11` implementation-status docs; `docs/01-概览与架构.md` maps design → code with file/line inventory
 
 ## Environment
