@@ -1887,6 +1887,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
             &mid_anchors,
             terrain.as_source(),
             opts.clearance_m,
+            opts.max_climb_deg,
         );
         // 地形跟随细化（方案 B 2026-08-14）：中间段沿地形缓爬升/下降，起终点保持
         // 用户高度；插值不足以覆盖地形处插入段内细化点（净空 ≥ clearance）；起点段/
@@ -2163,6 +2164,7 @@ fn apply_vertical_profile(
     mid_anchors: &[(f64, f64, f64)],
     terrain: Option<&dyn TerrainSource>,
     clearance_m: f64,
+    max_climb_angle_deg: f64,
 ) {
     // 抬升场景（cruise > start）：即使起终点同高也必须处理（起终点钉用户高度、
     // 中间段按自动锚点/保底抬升）；非抬升且同高 → 无高度调整需求（保持现状）。
@@ -2181,6 +2183,31 @@ fn apply_vertical_profile(
         cum[i] = cum[i - 1] + dx.hypot(dy);
     }
     let clearance = clearance_m.max(1.0);
+    let total_dist = cum.last().copied().unwrap_or(0.0);
+    
+    // 三段式高度计算：起飞段 → 巡航段 → 降落段
+    let max_climb_angle = max_climb_angle_deg.to_radians();
+    let climb_alt_diff = (cruise_alt - start_alt).abs();
+    let descend_alt_diff = (cruise_alt - target_alt).abs();
+    let climb_dist = if max_climb_angle > 0.0 && climb_alt_diff > 0.5 {
+        climb_alt_diff / max_climb_angle.tan()
+    } else {
+        0.0
+    };
+    let descend_dist = if max_climb_angle > 0.0 && descend_alt_diff > 0.5 {
+        descend_alt_diff / max_climb_angle.tan()
+    } else {
+        0.0
+    };
+    
+    // 确定巡航段起止点索引（不超过总距离的40%/60%）
+    let cruise_start_dist = climb_dist.min(total_dist * 0.4);
+    let cruise_end_dist = (total_dist - descend_dist).max(total_dist * 0.6);
+    
+    // 找距离对应的索引
+    let cruise_start_idx = cum.partition_point(|&d| d < cruise_start_dist);
+    let cruise_end_idx = cum.partition_point(|&d| d <= cruise_end_dist);
+    
     // 方案 B（2026-08-14）：不再强制中间点 ≥ 抬升巡航高度（raise_floor）——
     // 中间段高度 = 锚点线性插值（起终点 + 用户必经点 + 自动撞山锚点）+ 地形保底，
     // 形成"起点爬升 → 过山 → 下降回目标"的自然轮廓，起终点不被抬升。
@@ -2219,14 +2246,32 @@ fn apply_vertical_profile(
         if (pts[i].alt_m - cruise_alt).abs() > 0.5 {
             continue;
         }
-        // 找 i 所在锚点区间 [anchors[k], anchors[k+1]]（anchors 严格递增；
-        // i == 最后锚点（终点）时 k+1 越界 → clamp 到自身 = 精确锚点高度）
+        
+        // 三段式高度计算
+        let mut h = if i <= cruise_start_idx && cruise_start_idx > 0 {
+            // 起飞段：线性爬升
+            let t = i as f64 / cruise_start_idx as f64;
+            start_alt + (cruise_alt - start_alt) * t
+        } else if i >= cruise_end_idx && cruise_end_idx < pts.len() - 1 {
+            // 降落段：线性下降
+            let range = pts.len() - 1 - cruise_end_idx;
+            let t = if range > 0 { (i - cruise_end_idx) as f64 / range as f64 } else { 1.0 };
+            cruise_alt + (target_alt - cruise_alt) * t
+        } else {
+            // 巡航段：保持巡航高度
+            cruise_alt
+        };
+        
+        // 锚点覆盖：如果有必经点锚点且在当前区间内，使用锚点插值
         let k = anchors.partition_point(|&(idx, _)| idx <= i) - 1;
         let (lo, h_lo) = anchors[k];
         let (hi, h_hi) = anchors[(k + 1).min(anchors.len() - 1)];
-        let seg_len = (cum[hi] - cum[lo]).max(1.0);
-        let t = ((cum[i] - cum[lo]) / seg_len).clamp(0.0, 1.0);
-        let mut h = h_lo + (h_hi - h_lo) * t;
+        if hi > lo {
+            let seg_len = (cum[hi] - cum[lo]).max(1.0);
+            let t = ((cum[i] - cum[lo]) / seg_len).clamp(0.0, 1.0);
+            h = h_lo + (h_hi - h_lo) * t;
+        }
+        
         // 地形保底：中间点 ≥ 地形 + 净空（2026-08-14 主管低空场景：保底余量 +100
         // 会让起点段形成"余量高台阶"（如起点 500m、地形 377m → 保底 578m，起点旁
         // 250m 内爬升 78m ≈ 17° 超过 15° 爬升率）→ 保底 = 地形 + 净空，恰为 verify
