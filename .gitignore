@@ -26,3 +26,4 @@ e2e_*.json
 # Agent
 superpowers/
 .opencode/
+tests/radar_avoidance/
