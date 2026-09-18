@@ -104,8 +104,6 @@ fn build_request_body(index: Option<&crate::config::TerrainIndex>) -> String {
                     ParamNode { name: "lat", type_label: "f64", required: true, description: "纬度".into(), children: vec![] },
                     ParamNode { name: "radius_km", type_label: "f64", required: true, description: "探测距离 km".into(), children: vec![] },
                     ParamNode { name: "alt_m", type_label: "f64", required: false, description: "天线高度 m（默认 10）".into(), children: vec![] },
-                    ParamNode { name: "suppression_post_range_km", type_label: "f64", required: false, description: "压制后有效距离 km".into(), children: vec![] },
-                    ParamNode { name: "suppression_factor", type_label: "f64", required: false, description: "压制因子 δ".into(), children: vec![] },
                 ]},
             ],
         },
@@ -143,9 +141,6 @@ fn build_request_body(index: Option<&crate::config::TerrainIndex>) -> String {
             description: "参数覆盖".into(),
             children: vec![
                 ParamNode { name: "precision", type_label: "string", required: false, description: "fast / balanced / accurate（默认 balanced；无解时自动提升精度）".into(), children: vec![] },
-                ParamNode { name: "detection_curve", type_label: "string", required: false, description: "swerling1 / exponential / linear".into(), children: vec![] },
-                ParamNode { name: "p_cross", type_label: "f64", required: false, description: "穿越阈值（0..1）".into(), children: vec![] },
-                ParamNode { name: "radar_cost_coef", type_label: "f64", required: false, description: "雷达代价系数（>0）".into(), children: vec![] },
             ],
         },
     ];

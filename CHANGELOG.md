@@ -16,6 +16,10 @@
 - 移除 opencode.json 中的 push 和 sync-changes 自定义命令
 - docs: 更新测试与验证、工程化与构建文档，反映 v0.5.0 移除测试用例
 - 移除 `radar_inflation` 和 `suppression_delta` 的外部参数覆盖，这两参数不再可从 JSON 任务文件覆盖，始终使用内部默认值（1.2 和 0.5）
+- 简化雷达探测模型为二值检测：范围内必定被探测（除非地形遮蔽），移除概率衰减曲线（Swerling1/Exponential/Linear）和穿越阈值（p_cross）
+- 移除雷达压制/干扰相关参数（suppression_post_range_km、suppression_factor、suppression_delta），用户直接在 radius_km 中输入压制后范围
+- radar_inflation 改为内部常量 1.1（上限 100km），radar_cost_coef 改为内部常量 200
+- ParamsOverride 仅保留 precision 档位参数
 
 ### Added
 - docs: 补充地形数据源 GSHHG 处理流程说明（docs/08-地形数据源.md §4.3）

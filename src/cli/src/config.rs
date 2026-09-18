@@ -126,12 +126,6 @@ pub struct Radar {
     /// 天线高度 m（默认 10）
     #[serde(default = "default_antenna_m")]
     pub alt_m: f64,
-    /// 压制后有效距离 km（十三轮共识可选字段，输入优先）
-    #[serde(default)]
-    pub suppression_post_range_km: Option<f64>,
-    /// 压制因子 δ（0..1，探测距离 × (1−δ)）
-    #[serde(default)]
-    pub suppression_factor: Option<f64>,
 }
 
 fn default_antenna_m() -> f64 {
@@ -359,57 +353,18 @@ impl Precision {
 #[derive(Debug, Clone, Deserialize, Default, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ParamsOverride {
-    /// 探测曲线形态字符串（"swerling1"/"exponential"/"linear" 不区分大小写；无效 → 默认 swerling1，
-    /// 主管决策 2026-08-05：无外部参数或参数无效使用默认值）。
-    #[serde(default)]
-    pub detection_curve: Option<String>,
-    #[serde(default)]
-    pub p_cross: Option<f64>,
-    /// 雷达探测概率代价系数（FMM 代价 ×(1+coef×p)；越大航路越倾向绕行躲避）
-    #[serde(default)]
-    pub radar_cost_coef: Option<f64>,
     /// 精度档位（fast / balanced / accurate；默认 balanced；无解时自动提升精度）
     #[serde(default)]
     pub precision: Option<Precision>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum DetectionCurve {
-    /// Swerling I 模型（默认，2026-08-13 base_p 标定定案）：
-    /// Pd(d) = exp(−VT/(1 + SNR₀·(R_eff/d)⁴))，Pfa=1e-6 → VT=13.8155，
-    /// R_eff = 90% 探测距离（SNR₀ = VT/(−ln base_p) − 1 = 130.1 ≈ 21.1 dB）。
-    #[default]
-    Swerling1,
-    /// 指数衰减（R⁻⁴ 简化近似，保留供显式选择）。
-    Exponential,
-    Linear,
-}
+// ==================== 默认参数表 ====================
 
-// ==================== 默认参数表（三轮共识；占位值 Phase 0 校准后生效） ====================
-
-/// 默认参数表（编译期常量，输入未提供时使用；全部为占位值，Phase 0 校准）。
+/// 默认参数表。
 #[derive(Debug, Clone)]
 pub struct DefaultParams {
-    /// 雷达膨胀系数（球体半径 = 实际 × 系数，>1）
+    /// 雷达膨胀系数（球体半径 = 实际 × 系数，>1，内部常量 1.1，cap 100km）
     pub radar_inflation: f64,
-    /// 探测概率衰减形态（Swerling I 为默认：典型监视雷达模型标定，2026-08-13）
-    pub detection_curve: DetectionCurve,
-    /// 穿越阈值 P_cross（占位保守低值，Phase 0 定值；未标定不得声称实现）
-    pub p_cross: f64,
-    /// 探测概率基准 base_p（2026-08-13 标定：Swerling I 下有效半径 R_eff 处探测概率 =
-    /// 0.9，即 R_eff = 90% 探测距离；中心概率由模型推导 ≈1.0）。
-    /// 仅内部默认参数表字段，不进 ParamsOverride 外部覆盖（与 p_cross 解耦定案）。
-    pub base_p: f64,
-    /// 压制修正因子 δ（探测距离 × (1−δ)，占位）
-    pub suppression_delta: f64,
-    /// 雷达探测概率代价系数（FMM 代价 ×(1+coef×(p+geom))；>0，默认 200：
-    /// p = 几何并集探测概率，geom = 有效半径内归一化深穿惩罚 (1−u)。
-    /// 中心 ×(1+200×(0.1+1))≈×221、0.8R 处 ×(1+200×0.15)≈×31——
-    /// 穿探测区（含并排双雷达重叠/间隙边缘）明确绕行，探测区外无几何项。
-    /// 主管 2026-08-06：并排双雷达不得直穿探测区（即使 P_cross 调高）。
-    pub radar_cost_coef: f64,
-
     /// 通用武器默认射程 [Rmin, Rmax] km（未输入时）
     pub default_weapon_range_km: [f64; 2],
     /// 最大坡度占位（°）
@@ -445,12 +400,7 @@ pub struct DefaultParams {
 impl Default for DefaultParams {
     fn default() -> Self {
         Self {
-            radar_inflation: 1.2,
-            detection_curve: DetectionCurve::Swerling1,
-            p_cross: 0.1,
-            base_p: 0.9, // Swerling I 标定：R_eff = 90% 探测距离（方案 A，2026-08-13）
-            suppression_delta: 0.5,
-            radar_cost_coef: 200.0,
+            radar_inflation: 1.1,
             default_weapon_range_km: [5.0, 40.0],
             default_max_bank_deg: 30.0,
             default_fixed_wing_turn_radius_m: 5_000.0,
@@ -472,29 +422,9 @@ impl Default for DefaultParams {
 
 impl DefaultParams {
     /// 合并参数覆盖（覆盖优先，未覆盖用默认）。
-    /// 数值参数无效（非有限/出域）与无效曲线字符串 → 回落默认（主管决策 2026-08-05：
-    /// 无外部参数或参数无效使用默认值；回落由 solver 记入 stats.degradations）。
+    /// 无效参数回落默认（主管决策 2026-08-05）。
     pub fn merge(&self, o: &ParamsOverride) -> DefaultParams {
         let mut d = self.clone();
-        // 合法域与旧契约一致（p_cross∈[0,1]）；出域/非有限 → 回落默认。
-        // radar_inflation/suppression_delta 不可外部覆盖，始终使用内部默认值。
-        if let Some(v) = o
-            .p_cross
-            .filter(|v| v.is_finite() && *v >= 0.0 && *v <= 1.0)
-        {
-            d.p_cross = v;
-        }
-        if let Some(v) = o.radar_cost_coef.filter(|v| v.is_finite() && *v > 0.0) {
-            d.radar_cost_coef = v;
-        }
-        if let Some(s) = o.detection_curve.as_deref() {
-            match s.to_ascii_lowercase().as_str() {
-                "swerling1" => d.detection_curve = DetectionCurve::Swerling1,
-                "exponential" => d.detection_curve = DetectionCurve::Exponential,
-                "linear" => d.detection_curve = DetectionCurve::Linear,
-                _ => {} // 无效 → 默认
-            }
-        }
         if let Some(p) = o.precision {
             d.default_precision = p;
         }

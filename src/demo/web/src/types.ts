@@ -45,8 +45,6 @@ export interface Radar {
   lat: number;
   radius_km: number;
   alt_m?: number;
-  suppression_post_range_km?: number;
-  suppression_factor?: number;
 }
 
 export interface CircleGeometry {
@@ -76,11 +74,6 @@ export interface TerrainConfig {
 
 
 export interface ParamsOverride {
-  radar_inflation?: number;
-  /** 探测曲线形态：swerling1（默认，2026-08-13 base_p 标定——Swerling I 典型监视雷达模型，R_eff 处探测概率 0.9）/ exponential / linear */
-  detection_curve?: string;
-  p_cross?: number;
-  suppression_delta?: number;
   /** 精度档位：fast(128) / balanced(256, 默认) / accurate(512) */
   precision?: 'fast' | 'balanced' | 'accurate';
 }

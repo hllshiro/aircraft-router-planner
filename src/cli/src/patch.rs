@@ -14,6 +14,7 @@
 //! - C6：feature-flag 默认关（`ARP_PATCH=1` 开启）。
 
 use crate::threat::ThreatModel;
+const RADAR_COST_COEF: f64 = 200.0;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
@@ -600,9 +601,9 @@ pub fn boundary_anchors(
 ///   + 限飞区弦判据（高度判定 + 净距，restricted 不凸化）+ 地形净空沿边采样
 ///   （P4：terrain_point_clearance，NoData/OOB 不阻断，§11.1 细层免网格敏感性）；
 /// - 边权（P2 口径，§3.3/§12.2）：几何长度 × NODATA/OOB 5x（P4，FMM 同源
-///   Sample::base_cost）× (1 + radar_cost_coef × (p + geom))，与 FMM 同源。
+///   Sample::base_cost）× (1 + 200 × (p + geom))，与 FMM 同源。
 ///
-/// `radar` = Some((threat, radar_cost_coef)) 时启用雷达同源边权；None → 纯几何（P1）。
+/// `radar` = Some(threat) 时启用雷达同源边权；None → 纯几何（P1）。
 /// `terrain` = Some((terrain, clearance_m)) 时启用地形净空检查 + NODATA 5x 边权。
 pub fn plan_patch_multi(
     start: [f64; 2],
@@ -612,7 +613,7 @@ pub fn plan_patch_multi(
     restricted: &[&crate::config::Zone],
     inflation_m: f64,
     alt_m: f64,
-    radar: Option<(&crate::threat::SphericalRadarThreat, f64)>,
+    radar: Option<&dyn ThreatModel>,
     terrain: Option<(&dyn crate::terrain::TerrainSource, f64)>,
 ) -> PatchOutcome {
     // 各障碍凸化 + 膨胀
@@ -841,7 +842,7 @@ fn arc_edge_weight(
     a: [f64; 2],
     b: [f64; 2],
     c: &CircleObs,
-    radar: Option<(&crate::threat::SphericalRadarThreat, f64)>,
+    radar: Option<&dyn ThreatModel>,
     alt_m: f64,
     terrain: Option<(&dyn crate::terrain::TerrainSource, f64)>,
 ) -> f64 {
@@ -869,12 +870,12 @@ fn arc_edge_weight(
         1.0
     };
     let base = arc_km * nodata_mult;
-    if let Some((threat, coef)) = radar {
+    if let Some(threat) = radar {
         let p = threat.static_union_probability(mid[0], mid[1]);
         if p > 0.0 {
             let u = threat.static_penetration(mid[0], mid[1], alt_m);
             let geom = if u < 1.0 { 1.0 - u } else { 0.0 };
-            base * (1.0 + coef * (p + geom))
+            base * (1.0 + RADAR_COST_COEF * (p + geom))
         } else {
             base
         }
@@ -994,7 +995,7 @@ fn dijkstra_path_p4(
 fn edge_weight(
     a: [f64; 2],
     b: [f64; 2],
-    radar: Option<(&crate::threat::SphericalRadarThreat, f64)>,
+    radar: Option<&dyn ThreatModel>,
     alt_m: f64,
     terrain: Option<(&dyn crate::terrain::TerrainSource, f64)>,
 ) -> f64 {
@@ -1024,14 +1025,14 @@ fn edge_weight(
         1.0
     };
     let base = base_km * nodata_mult;
-    if let Some((threat, coef)) = radar {
+    if let Some(threat) = radar {
         // 中点采样（与 FMM 格点采样同口径；P2 段长 ≤ 60km 采样密度足够）
         let mid = [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0];
         let p = threat.static_union_probability(mid[0], mid[1]);
         if p > 0.0 {
             let u = threat.static_penetration(mid[0], mid[1], alt_m);
             let geom = if u < 1.0 { 1.0 - u } else { 0.0 };
-            base * (1.0 + coef * (p + geom))
+            base * (1.0 + RADAR_COST_COEF * (p + geom))
         } else {
             base
         }

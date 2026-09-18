@@ -1148,22 +1148,11 @@ pub fn verify_path(
         ));
     }
 
-    // 5) 雷达威胁（Phase 4 M3）：累计探测概率超 P_cross → 软性告警（不阻断平滑）。
-    //    雷达是软约束：穿雷达区（避不开）时路径仍应平滑交付，概率超标由
-    //    stats.degradations 记录；硬失败会迫使整条平滑链回退 → 网格锯齿暴露。
+    // 5) 雷达威胁：二值检测——路径进入雷达探测区 → 软性告警（不阻断平滑）。
     if let Some(thr) = ctx.threat {
         let tr = thr.evaluate(path, ctx.terrain);
-        if tr.over_threshold {
-            rep.warnings.push(format!(
-                "radar: cumulative detection p {:.4} > threshold {:.4}",
-                tr.cumulative_p,
-                thr.p_cross()
-            ));
-        } else if tr.cumulative_p > 0.0 {
-            rep.warnings.push(format!(
-                "radar: cumulative detection p {:.4} (peak {:.4})",
-                tr.cumulative_p, tr.peak_p
-            ));
+        if tr.detected {
+            rep.warnings.push("radar: path enters radar detection zone".into());
         }
     }
 

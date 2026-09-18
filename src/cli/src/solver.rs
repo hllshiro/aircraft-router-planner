@@ -416,7 +416,6 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
         &all_zones,
         inflation_m,
         &threat,
-        params_merged.radar_cost_coef,
         terrain.as_source().is_some(),
         !input.red_forces.radars.is_empty(),
     );
@@ -802,7 +801,6 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                         &all_zones,
                         inflation_m,
                         &threat,
-                        params_merged.radar_cost_coef,
                         terrain.as_source().is_some(),
                         !input.red_forces.radars.is_empty(),
                     );
@@ -1477,7 +1475,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                             let radar_opt = if input.red_forces.radars.is_empty() {
                                 None
                             } else {
-                                Some((&threat, params_merged.radar_cost_coef))
+                                Some(&threat as &dyn crate::threat::ThreatModel)
                             };
                             // P4：地形净空 + NODATA 5x 进 patch（§3.3 P2 口径完整化）
                             let terrain_opt = ctx.terrain.map(|t| (t, opts.clearance_m.max(1.0)));
@@ -1723,16 +1721,11 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                         degradations.push(i.clone());
                     }
                 }
-                // 雷达避不开 → 直线直穿替代（主管 2026-08-05 锯齿问题修复）：
-                // FMM 直穿雷达区时 Theta* 拒绝拉直（check 穿雷达=false）→ 交付网格锯齿；
-                // 若整路径探测概率仍超阈值 且 距离显著大于直线（锯齿是网格伪影而非真实绕行）
-                // → 用分段直线直穿（必经点保留，最短暴露时长）。直线需过几何复验（防穿山/超机动）。
+                // 雷达避不开 → 直线直穿替代：
+                // FMM 直穿雷达区时 Theta* 拒绝拉直 → 交付网格锯齿；
+                // 若路径进入雷达区 且 距离显著大于直线 → 用分段直线直穿。
                 if let Some(tm) = ctx.threat {
                     let rep_now = tm.evaluate(&Path::new(pts.clone()), ctx.terrain);
-                    // 直穿判定：路径某点深入任一雷达有效半径 70% 以内（与 Theta* 深探测
-                    // DEEP_RATIO 一致）才视为"避不开的直穿"；完全绕出（最近点 ≥ 0.7×半径）
-                    // 保持绕行，不替代。（P_cross 是验收阈值，不参与直穿判定——主管
-                    // 2026-08-06：航路必须绕开雷达探测区域，不得因调高 P_cross 而直穿。）
                     let mut penetrates = false;
                     for p in &pts {
                         if threat.static_penetration(p.lon, p.lat, p.alt_m) < 0.7 {
@@ -1740,7 +1733,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                             break;
                         }
                     }
-                    if rep_now.over_threshold && penetrates {
+                    if rep_now.detected && penetrates {
                         let cur_dist = Path::new(pts.clone()).length_m();
                         if straight.points.len() >= 2
                             && cur_dist > straight.length_m() * 1.05 + 1_000.0
@@ -1757,10 +1750,9 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                                 // 直线替代成功 → 最终交付已平滑，撤销 smoothing_failed 误报
                                 warnings.retain(|w| !w.starts_with("smoothing_failed"));
                                 degradations.retain(|d| !d.starts_with("smoothing_failed"));
-                                let msg = format!(
-                                    "radar: unavoidable crossing -> straight-line transit (p {:.4})",
-                                    rep_now.cumulative_p
-                                );
+                                let msg =
+                                    "radar: unavoidable crossing -> straight-line transit (detected by radar)"
+                                        .to_string();
                                 if !degradations.contains(&msg) {
                                     degradations.push(msg.clone());
                                 }
@@ -2709,44 +2701,16 @@ fn circle_index(zones: &[&Zone]) -> CircleIndex {
     CircleIndex::build(entries)
 }
 
-/// 雷达威胁参数（默认参数表落默认值；输入覆盖合并）。
-/// base_p（探测概率基准）已标定（2026-08-13 方案 A：Swerling I 典型监视雷达模型，
-/// R_eff 处 = 0.9），**与 p_cross 解耦**（主管 2026-08-05 反馈：
-/// P_cross 是验收阈值——调高只放宽"容忍探测"的评估/拉直判定，不应把物理探测概率
-/// 一起抬高导致代价爆炸 + 强绕行 + 锯齿；base_p 从 DefaultParams 默认表读取，不进外部覆盖）。
+/// 雷达威胁参数。
 fn radar_threat_params(d: &crate::config::DefaultParams) -> ThreatParams {
     ThreatParams {
         radar_inflation: d.radar_inflation,
-        detection_curve: d.detection_curve,
-        p_cross: d.p_cross,
-        suppression_delta: d.suppression_delta,
-        base_p: d.base_p, // 标定值（Swerling I：R_eff 处 0.9）
     }
 }
 
-/// 无效参数回落默认的降级报告（主管决策 2026-08-05：无外部参数或参数无效使用默认值）。
-/// merge 已回落；此处把"输入无效"事实记入 stats.degradations 供验收可见。
-fn radar_param_degradations(input: &Input, out: &mut Vec<String>) {
-    let p = &input.parameters;
-    if let Some(v) = p.p_cross
-        && !(v.is_finite() && v >= 0.0 && v <= 1.0)
-    {
-        out.push(format!("parameter p_cross={v} invalid -> default 0.1"));
-    }
-    if let Some(v) = p.radar_cost_coef
-        && !(v.is_finite() && v > 0.0)
-    {
-        out.push(format!(
-            "parameter radar_cost_coef={v} invalid -> default 200"
-        ));
-    }
-    if let Some(s) = &p.detection_curve
-        && !matches!(s.to_ascii_lowercase().as_str(), "exponential" | "linear")
-    {
-        out.push(format!(
-            "parameter detection_curve={s} invalid -> default exponential"
-        ));
-    }
+/// 无效参数回落默认的降级报告。
+fn radar_param_degradations(_input: &Input, _out: &mut Vec<String>) {
+    // 所有雷达参数已移除或改为内部常量，无需检查。
 }
 
 /// 拼接多段路径（去重相邻重复点；段端点保留——必经点/目标硬约束）。
@@ -2811,7 +2775,6 @@ fn make_segment_check<'a>(
 ) -> impl Fn(f64, f64, f64, f64, f64, f64) -> bool + 'a {
     move |lon1, lat1, alt1, lon2, lat2, alt2| {
         const N: usize = 16;
-        const DEEP_RATIO: f64 = 0.7;
         // 地形净空：段沿程采样（段高度线性插值；与 verify 同口径的 Land 判定）。
         // 采样点数与单点判定共用 smooth::terrain_sample_count / terrain_point_clearance
         // 原语（阶段1-A，2026-08-11）——两处口径单一来源，杜绝 zz29 相位差类漏检。
@@ -2916,34 +2879,17 @@ fn make_segment_check<'a>(
             }
         }
         if let Some(tm) = threat {
-            // 雷达：仅当**两端点都在深区外**时，直连穿深区 = 破坏 FMM 绕行决策 → 拒绝。
-            // 任一端点已在深区（目标/必经点落在雷达探测区内，无法绕开，如 2026-08-06
-            // 主管 37 点场景 target 距雷达 61km < 0.7×100km）→ 允许拉直——该端点深穿
-            // 不可避免，拉直只简化 FMM 网格伪影，不引入新的"绕行决策破坏"；雷达是软
-            // 约束，最终由 verify 记录 P_cross（此前无条件拒绝深穿 → Theta* 无法拉直
-            // 最后接近段 → 交付密集网格点伪影）。
-            // 2026-08-13 base_p 标定（Swerling1）追加概率判据：纯几何 <0.7R 只挡深穿，
-            // 而 Swerling1 下 0.7R~1.0R 区间探测概率仍 0.84~0.96（远高 P_cross=0.1）——
-            // 拉直段弦切圈边缘（端点在外、弦切 0.785R）会被放行 → verify 累计 p≈1.0。
-            // 判据 = 几何深穿 <0.7R **或** 静态并集概率 > P_cross（P_cross 调高容忍
-            // 场景：Swerling1 圈内 p≥base_p=0.9 恒 >0.7，语义=进入圈内即高概率被探测，
-            // 绕行是硬性要求；P_cross 仅作验收阈值不再放宽拉直）。
-            // 端点判定同义扩展：端点已在"探测圈内"（p>P_cross，含必经点/目标落在圈内
-            // 无法绕开，如 zigzag25 必经点 mid 距雷达 49.6km<60km 有效半径 p≈0.93）
-            // → 进圈不可避免 → 允许拉直（拉直只简化，不引入新的绕行决策破坏；软约束）。
-            let deep_a = tm.static_penetration(lon1, lat1, alt1) < DEEP_RATIO
-                || tm.static_union_probability(lon1, lat1) > tm.p_cross();
-            let deep_b = tm.static_penetration(lon2, lat2, alt2) < DEEP_RATIO
-                || tm.static_union_probability(lon2, lat2) > tm.p_cross();
+            // 雷达：二值检测——任一端点在雷达探测区内即视为深穿，允许拉直（该端点
+            // 进圈不可避免，拉直只简化 FMM 网格伪影，不引入新的绕行决策破坏）。
+            let deep_a = tm.static_detected(lon1, lat1, alt1);
+            let deep_b = tm.static_detected(lon2, lat2, alt2);
             if !deep_a && !deep_b {
                 for i in 0..=N {
                     let t = i as f64 / N as f64;
                     let lon = lon1 + (lon2 - lon1) * t;
                     let lat = lat1 + (lat2 - lat1) * t;
                     let alt = alt1 + (alt2 - alt1) * t;
-                    if tm.static_penetration(lon, lat, alt) < DEEP_RATIO
-                        || tm.static_union_probability(lon, lat) > tm.p_cross()
-                    {
+                    if tm.static_detected(lon, lat, alt) {
                         return false;
                     }
                 }
@@ -4072,7 +4018,6 @@ fn build_cost_field(
     all_zones: &[Zone],
     inflation_m: f64,
     threat: &SphericalRadarThreat,
-    radar_cost_coef: f64,
     has_terrain: bool,
     has_radars: bool,
 ) -> crate::costfield::CostField {
@@ -4182,15 +4127,9 @@ fn build_cost_field(
     };
     apply_inflation_and_band(&mut field, inflation_cells, cell_m);
 
-    // 5b. 雷达静态代价（Phase 4 M3）：膨胀半径内 cost ×(1+coef·(几何并集概率 + 深穿惩罚))
-    //     ——FMM 倾向绕行；coef = radar_cost_coef（默认 200）。几何深穿惩罚（u<1 时
-    //     ×(1+coef·(1-u))，探测区外 u≥1 无几何项）：确保穿探测区明确绕行——主管
-    //     2026-08-06：并排双雷达不得直穿探测区（即使 P_cross 调高，几何绕行与验收
-    //     阈值解耦）。
-    //     P8 M5 LOS mask（docs/06 §6）：有地形源时 p 用带 LOS 的并集概率
-    //     （point_probability(lon, lat, LOS_REF_ALT_M, terrain)）；被地形遮挡的 cell
-    //     p_los→0 → 无代价惩罚 → FMM 倾向走遮蔽区；无地形 → 无 LOS（零回归）。
-    //     参考高度常量 LOS_REF_ALT_M：代价场多机共享静态近似（verify 仍精确）。
+    // 5b. 雷达静态代价：探测区 cost ×(1+coef·(p + 深穿惩罚))，p 为二值 0/1。
+    //     有地形时用 LOS 检测；无地形时无遮蔽（零回归）。
+    const RADAR_COST_COEF: f64 = 200.0;
     let terrain_src = terrain.as_source();
     if has_radars {
         for r in 0..grid {
@@ -4206,7 +4145,7 @@ fn build_cost_field(
                     if field.cost[idx].is_finite() {
                         let u = threat.static_penetration(lon, lat, 0.0);
                         let geom = if u < 1.0 { 1.0 - u } else { 0.0 };
-                        field.cost[idx] *= (1.0 + radar_cost_coef * (p + geom)) as f32;
+                        field.cost[idx] *= (1.0 + RADAR_COST_COEF * (p + geom)) as f32;
                     }
                 }
             }

@@ -1,51 +1,27 @@
-//! 雷达威胁模型（Phase 4 M3 基础版，主管拍板：几何距离 + LOS + 压制）。
+//! 雷达威胁模型：球形探测 + 二值检测 + LOS 地形遮蔽。
 //!
-//! 语义（技术方案 4.5 + 十轮共识）：
-//! - 每雷达球体探测：水平距离 ≤ 有效半径（radius_km × radar_inflation，被压制时再缩）；
-//!   有效半径外探测概率 = 0；
-//! - 探测概率随距离衰减（2026-08-13 base_p 标定，方案 A）：
-//!   `DetectionCurve::Swerling1`（默认）Pd(d) = exp(−VT/(1 + SNR₀·(R_eff/d)⁴))，
-//!   Pfa = 1e-6 → VT = ln(1e6) = 13.8155；R_eff 处 Pd = base_p = 0.9（90% 探测距离）
-//!   → SNR₀ = VT/(−ln base_p) − 1 = 130.1（≈21.1 dB，与 Skolnik 体系文献一致）；
-//!   `DetectionCurve::Linear` p(d) = base·(1−u)；
-//!   `Exponential` p(d) = base·exp(−4u)，u = d/R ∈ [0,1]（R 处 ≈ 1.8%）；
-//!   u=0（中心）时 Swerling1 推导 Pd → 1（SNR→∞ 必探测）。
+//! 语义：
+//! - 每雷达球体探测：水平距离 ≤ 有效半径（radius_km × 1.1，cap 100km）；
+//!   有效半径外不探测；
+//! - 二值检测：范围内 + LOS 未遮蔽 = 必定探测（p=1.0），否则 p=0；
 //! - LOS：雷达天线到点的视线被地形遮挡（含 NoData 保守视为遮挡）→ 该雷达不探测；
-//! - 压制：`suppression_post_range_km` 直接给定压制后距离；否则
-//!   `suppression_factor` δ → R' = R·(1−δ)（默认参数表 suppression_delta 兜底）；
-//! - 多雷达探测概率主口径 = 概率并集 1−∏(1−pᵢ)（主管裁决）；
-//! - 全程/每段累计探测概率：段内等距采样逐点并集。
-//!
-//! base_p（探测概率基准）已标定（2026-08-13 方案 A：Swerling I 典型监视雷达模型，
-//! R_eff 处 = 0.9）；P_cross（穿越阈值）仍为验收阈值 0.1（与 base_p 解耦，主管 2026-08-05）。
+//! - 多雷达：任一雷达探测到即返回 1.0。
 
-use crate::config::{DetectionCurve, Radar};
+use crate::config::Radar;
 use crate::path::{Path, haversine_m};
 use crate::terrain::{Sample, TerrainSource};
 
-/// 威胁模型参数（缺省落默认参数表占位；覆盖来自 ParamsOverride/DefaultParams）。
+/// 威胁模型参数。
 #[derive(Debug, Clone)]
 pub struct ThreatParams {
-    /// 雷达膨胀系数（球体半径 = 实际 × 系数，>1）
+    /// 雷达膨胀系数（球体半径 = 实际 × 系数，>1，内部常量 1.1）
     pub radar_inflation: f64,
-    /// 探测概率衰减形态
-    pub detection_curve: DetectionCurve,
-    /// 穿越阈值 P_cross（累计探测概率超过 → 复验不通过）
-    pub p_cross: f64,
-    /// 压制修正因子 δ（无显式压制字段时兜底）
-    pub suppression_delta: f64,
-    /// 探测概率基准（2026-08-13 标定：Swerling I 下有效半径 R_eff 处探测概率 = 0.9）
-    pub base_p: f64,
 }
 
 impl Default for ThreatParams {
     fn default() -> Self {
         Self {
-            radar_inflation: 1.2,
-            detection_curve: DetectionCurve::Swerling1,
-            p_cross: 0.1,
-            suppression_delta: 0.5,
-            base_p: 0.9, // Swerling I 标定：R_eff = 90% 探测距离（方案 A）
+            radar_inflation: 1.1,
         }
     }
 }
@@ -53,51 +29,33 @@ impl Default for ThreatParams {
 /// 威胁评估报告。
 #[derive(Debug, Clone, Default)]
 pub struct ThreatReport {
-    /// 全程累计探测概率（概率并集）
-    pub cumulative_p: f64,
-    /// 单采样点峰值概率
-    pub peak_p: f64,
-    /// 峰值位置（lon, lat, alt_m）
-    pub peak_point: Option<(f64, f64, f64)>,
-    /// 累计概率是否超过 P_cross 阈值
-    pub over_threshold: bool,
+    /// 路径是否进入任一雷达探测区
+    pub detected: bool,
 }
 
-/// 威胁模型接口（M3：球形基础版；后续可替换多普勒/波束形态）。
+/// 威胁模型接口。
 pub trait ThreatModel {
-    /// 评估整条路径的探测概率（段内等距采样）。
+    /// 评估整条路径的探测检测（段内等距采样）。
     fn evaluate(&self, path: &Path, terrain: Option<&dyn TerrainSource>) -> ThreatReport;
     /// 静态几何探测（无 LOS）：点是否落在任一威胁有效半径内。
-    /// Theta* 去锯齿段检查用：直连穿威胁区则拒绝拉直（保住绕行路径）。
     fn static_detected(&self, lon: f64, lat: f64, alt_m: f64) -> bool {
         let _ = (lon, lat, alt_m);
         false
     }
-    /// 静态几何并集探测概率（无 LOS）：点处 `1−∏(1−pᵢ)`。
-    /// Theta* 去锯齿段检查用：直连概率 > P_cross（验收阈值）则拒绝拉直；
-    /// ≤ P_cross（容忍范围内）允许拉直。2026-08-13 base_p 标定（Swerling1）
-    /// 后圈内 p≥base_p=0.9 恒 > 默认 P_cross=0.1 → 拉直判据 = 几何深穿 **或**
-    /// 概率超阈值（solver::make_segment_check）；P_cross 调高 ≥0.9 的容忍
-    /// 场景仍可平滑直穿（语义不变）。
+    /// 静态几何并集探测概率（无 LOS）：二值 0.0 或 1.0。
     fn static_union_probability(&self, lon: f64, lat: f64) -> f64 {
         let _ = (lon, lat);
         0.0
     }
     /// 静态几何穿透深度（无 LOS）：到最近威胁中心的归一化距离 d/R_eff ∈ [0,1]；
     /// 0 = 中心，1 = 有效半径边缘，>1 = 有效半径外（无探测）。
-    /// Theta* 去锯齿用：仅"深穿"（< deep_ratio，默认 0.7）拒绝拉直；
-    /// 低概率边缘（≥0.7）允许拉直，绕行路径才能平滑。
     fn static_penetration(&self, lon: f64, lat: f64, alt_m: f64) -> f64 {
         let _ = (lon, lat, alt_m);
         1.0
     }
-    /// 穿越阈值 P_cross（复验软告警线）。
-    fn p_cross(&self) -> f64 {
-        0.1
-    }
 }
 
-/// 默认球形威胁模型（基础版）。
+/// 默认球形威胁模型。
 pub struct SphericalRadarThreat<'a> {
     radars: &'a [Radar],
     params: ThreatParams,
@@ -108,19 +66,12 @@ impl<'a> SphericalRadarThreat<'a> {
         Self { radars, params }
     }
 
-    /// 单雷达有效探测半径（膨胀 + 压制）。
+    /// 单雷达有效探测半径（膨胀 + cap 100km）。
     fn effective_radius_m(&self, r: &Radar) -> f64 {
-        let base = r.radius_km * 1000.0 * self.params.radar_inflation;
-        if let Some(post) = r.suppression_post_range_km {
-            return post * 1000.0;
-        }
-        if let Some(delta) = r.suppression_factor {
-            return base * (1.0 - delta);
-        }
-        base
+        (r.radius_km * 1000.0 * self.params.radar_inflation).min(100_000.0)
     }
 
-    /// 单点累计探测概率（多雷达概率并集）。
+    /// 二值检测：任一雷达有效半径内 + LOS 未遮蔽 → 1.0，否则 0.0。
     pub fn point_probability(
         &self,
         lon: f64,
@@ -128,44 +79,19 @@ impl<'a> SphericalRadarThreat<'a> {
         alt_m: f64,
         terrain: Option<&dyn TerrainSource>,
     ) -> f64 {
-        let mut p_union = 0.0;
         for r in self.radars {
             let d = haversine_m(r.lon, r.lat, lon, lat);
-            let eff = self.effective_radius_m(r);
-            if d > eff {
+            if d > self.effective_radius_m(r) {
                 continue;
             }
-            // LOS：视线被地形遮挡（含 NoData 保守）→ 该雷达不探测
-            if let Some(t) = terrain
-                && !line_of_sight(t, r.lon, r.lat, r.alt_m, lon, lat, alt_m)
-            {
-                continue;
-            }
-            let u = (d / eff).clamp(0.0, 1.0);
-            let p = match self.params.detection_curve {
-                DetectionCurve::Linear => self.params.base_p * (1.0 - u),
-                DetectionCurve::Exponential => self.params.base_p * (-4.0 * u).exp(),
-                // Swerling I（典型监视雷达，2026-08-13 标定方案 A）：
-                // Pd(d) = exp(−VT/(1 + SNR₀·(R_eff/d)⁴))
-                //   VT = ln(1/Pfa), Pfa = 1e-6 → 13.8155
-                //   SNR₀ 由 R_eff 处 Pd = base_p 反解：1+SNR₀ = VT/(−ln base_p) → 130.1（21.1 dB）
-                // u=0（中心）：SNR→∞ → Pd→1（必探测）；u=1：Pd = base_p（数学恒等）
-                DetectionCurve::Swerling1 => {
-                    // 防御：base_p 出 (0,1) 时退化为指数近似，避免 ln(0)/除零
-                    let bp = self.params.base_p.clamp(1e-9, 1.0 - 1e-9);
-                    let vt = 1e6_f64.ln();
-                    let snr0 = vt / (-bp.ln()) - 1.0;
-                    let snr = if u <= 0.0 {
-                        f64::INFINITY
-                    } else {
-                        snr0 / (u * u * u * u)
-                    };
-                    (-vt / (1.0 + snr)).exp()
+            if let Some(t) = terrain {
+                if !line_of_sight(t, r.lon, r.lat, r.alt_m, lon, lat, alt_m) {
+                    continue;
                 }
-            };
-            p_union = 1.0 - (1.0 - p_union) * (1.0 - p);
+            }
+            return 1.0;
         }
-        p_union
+        0.0
     }
 
     /// 静态几何并集概率（无 LOS——FMM 代价场用）。
@@ -175,10 +101,6 @@ impl<'a> SphericalRadarThreat<'a> {
 }
 
 impl ThreatModel for SphericalRadarThreat<'_> {
-    fn p_cross(&self) -> f64 {
-        self.params.p_cross
-    }
-
     fn static_detected(&self, lon: f64, lat: f64, alt_m: f64) -> bool {
         self.point_probability(lon, lat, alt_m, None) > 0.0
     }
@@ -200,9 +122,8 @@ impl ThreatModel for SphericalRadarThreat<'_> {
     }
 
     fn evaluate(&self, path: &Path, terrain: Option<&dyn TerrainSource>) -> ThreatReport {
-        let mut rep = ThreatReport::default();
         if path.len() < 2 {
-            return rep;
+            return ThreatReport::default();
         }
         const SEG_SAMPLES: usize = 8;
         let n = path.len();
@@ -211,21 +132,15 @@ impl ThreatModel for SphericalRadarThreat<'_> {
             let b = path.points[i];
             for k in 0..=SEG_SAMPLES {
                 let t = k as f64 / SEG_SAMPLES as f64;
-                let (lon, lat, alt) = (
-                    a.lon + (b.lon - a.lon) * t,
-                    a.lat + (b.lat - a.lat) * t,
-                    a.alt_m + (b.alt_m - a.alt_m) * t,
-                );
-                let p = self.point_probability(lon, lat, alt, terrain);
-                rep.cumulative_p = 1.0 - (1.0 - rep.cumulative_p) * (1.0 - p);
-                if p > rep.peak_p {
-                    rep.peak_p = p;
-                    rep.peak_point = Some((lon, lat, alt));
+                let lon = a.lon + (b.lon - a.lon) * t;
+                let lat = a.lat + (b.lat - a.lat) * t;
+                let alt = a.alt_m + (b.alt_m - a.alt_m) * t;
+                if self.point_probability(lon, lat, alt, terrain) > 0.0 {
+                    return ThreatReport { detected: true };
                 }
             }
         }
-        rep.over_threshold = rep.cumulative_p > self.params.p_cross;
-        rep
+        ThreatReport { detected: false }
     }
 }
 
