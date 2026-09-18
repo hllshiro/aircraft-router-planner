@@ -75,6 +75,7 @@ fn build_request_body(index: Option<&crate::config::TerrainIndex>) -> String {
                     ParamNode { name: "maximum_turn_rate_dps", type_label: "f64", required: false, description: "最大转弯角速率 °/s".into(), children: vec![] },
                     ParamNode { name: "maximum_climb_rate_mps", type_label: "f64", required: false, description: "最大爬升率 m/s".into(), children: vec![] },
                     ParamNode { name: "maximum_altitude_m", type_label: "f64", required: false, description: "最大飞行高度 m".into(), children: vec![] },
+                    ParamNode { name: "cruise_alt_m", type_label: "f64", required: false, description: "巡航高度 m（默认：固定翼 10000 / 旋翼 1000）".into(), children: vec![] },
                 ]},
                 ParamNode { name: "mid_waypoints", type_label: "array<object>", required: false, description: "中途必经点".into(), children: vec![
                     ParamNode { name: "lon", type_label: "f64", required: true, description: "经度".into(), children: vec![] },
