@@ -409,6 +409,14 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
     } else {
         (inflation_m / cell_m.max(1.0)).ceil() as usize
     };
+    // 收集所有航路点（起点 + 必经点 + 终点）用于雷达硬墙化判定
+    let mut all_waypoints: Vec<Geo> = Vec::new();
+    for v in &specs {
+        all_waypoints.push(v.start);
+        all_waypoints.extend(v.mid_waypoints.iter().copied());
+        all_waypoints.push(v.target);
+    }
+    let hard_avoid_radars = threat.hard_avoid_list(&all_waypoints);
     let mut field = build_cost_field(
         &region,
         grid,
@@ -418,6 +426,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
         &threat,
         terrain.as_source().is_some(),
         !input.red_forces.radars.is_empty(),
+        &hard_avoid_radars,
     );
     let mut grid_refined = false; // ④ 已细分重试（每机最多一次）
 
@@ -803,6 +812,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                         &threat,
                         terrain.as_source().is_some(),
                         !input.red_forces.radars.is_empty(),
+                        &hard_avoid_radars,
                     );
                     degradations.push(format!(
                         "coarse FMM no path at grid {old_grid}; corridor refined to grid {grid} (v={})",
@@ -4020,6 +4030,7 @@ fn build_cost_field(
     threat: &SphericalRadarThreat,
     has_terrain: bool,
     has_radars: bool,
+    hard_avoid_radars: &[bool],
 ) -> crate::costfield::CostField {
     // 硬墙判定闭包（每格：墙内 → Forbidden 禁行）——par_local 与串行回退共用。
     // 多边形墙用"格子矩形与多边形相交"（2026-08-11 zz_nosolution_case：中心点
@@ -4129,23 +4140,45 @@ fn build_cost_field(
 
     // 5b. 雷达静态代价：探测区 cost ×(1+coef·(p + 深穿惩罚))，p 为二值 0/1。
     //     有地形时用 LOS 检测；无地形时无遮蔽（零回归）。
+    //     可绕行雷达（hard_avoid_radars[i]=true）→ 硬墙化（INF），不可绕行保持软约束。
     const RADAR_COST_COEF: f64 = 200.0;
-    let terrain_src = terrain.as_source();
     if has_radars {
+        let terrain_src = terrain.as_source();
         for r in 0..grid {
             for c in 0..grid {
                 let (lon, lat) = cell_lonlat(r, c, region, grid);
-                let p = if has_terrain && terrain_src.is_some() {
-                    threat.point_probability(lon, lat, LOS_REF_ALT_M, terrain_src)
-                } else {
-                    threat.static_union_probability(lon, lat)
-                };
-                if p > 0.0 {
-                    let idx = r * grid + c;
+                let idx = r * grid + c;
+
+                // 检查是否在任何需要硬墙化的雷达内
+                let mut hard_wall = false;
+                for (i, radar) in threat.radars().iter().enumerate() {
+                    if hard_avoid_radars.get(i).copied().unwrap_or(false) {
+                        let d = crate::path::haversine_m(radar.lon, radar.lat, lon, lat);
+                        if d <= threat.effective_radius_m(radar) {
+                            hard_wall = true;
+                            break;
+                        }
+                    }
+                }
+
+                if hard_wall {
+                    // 硬墙化：设为 INF
                     if field.cost[idx].is_finite() {
-                        let u = threat.static_penetration(lon, lat, 0.0);
-                        let geom = if u < 1.0 { 1.0 - u } else { 0.0 };
-                        field.cost[idx] *= (1.0 + RADAR_COST_COEF * (p + geom)) as f32;
+                        field.cost[idx] = f32::INFINITY;
+                    }
+                } else {
+                    // 原有软约束逻辑（不可绕行的雷达）
+                    let p = if has_terrain && terrain_src.is_some() {
+                        threat.point_probability(lon, lat, LOS_REF_ALT_M, terrain_src)
+                    } else {
+                        threat.static_union_probability(lon, lat)
+                    };
+                    if p > 0.0 {
+                        if field.cost[idx].is_finite() {
+                            let u = threat.static_penetration(lon, lat, 0.0);
+                            let geom = if u < 1.0 { 1.0 - u } else { 0.0 };
+                            field.cost[idx] *= (1.0 + RADAR_COST_COEF * (p + geom)) as f32;
+                        }
                     }
                 }
             }
