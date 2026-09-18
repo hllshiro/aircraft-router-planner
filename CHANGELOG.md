@@ -11,6 +11,8 @@
 
 ### Changed
 - 移除未使用的依赖（criterion、geotiff、geo-types）以加快编译速度
+- 前端雷达覆盖可视化：地形遮蔽（LOS 射线检测）替代固定球体，与 CLI 一致
+- CLI threat.rs: NoData 区域不再遮挡雷达信号（保守策略，假设雷达看穿数据空洞）
 
 ## [0.8.1] - 2026-09-18
 

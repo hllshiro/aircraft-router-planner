@@ -146,7 +146,7 @@ impl ThreatModel for SphericalRadarThreat<'_> {
     }
 }
 
-/// 雷达天线到点视线是否被地形遮挡（等距 8 点采样；NoData 保守视为遮挡）。
+/// 雷达天线到点视线是否被地形遮挡（等距 8 点采样；NoData 不遮挡——保守策略，假设雷达看穿数据空洞）。
 fn line_of_sight(
     t: &dyn TerrainSource,
     lon1: f64,
@@ -168,7 +168,7 @@ fn line_of_sight(
                     return false;
                 }
             }
-            Sample::NoData => return false,
+            Sample::NoData => {}, // 不遮挡：保守策略，假设雷达看穿数据空洞，航线更安全
             Sample::Water | Sample::Lake(_) | Sample::OutOfBounds => {}
             Sample::Forbidden => return false, // 禁行墙（防御：地形源不产生，出现即遮挡）
         }
