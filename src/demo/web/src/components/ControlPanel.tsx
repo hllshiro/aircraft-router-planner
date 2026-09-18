@@ -1120,37 +1120,21 @@ export function ControlPanel({
       <h3>参数覆盖</h3>
       <div className="field-row">
         <div>
-          <label>P_cross</label>
-          <input
-            type="number"
-            step="0.01"
-            value={config.parameters.p_cross ?? 0.1}
-            onChange={(e) =>
-              update({
-                parameters: {
-                  ...config.parameters,
-                  p_cross: +e.target.value,
-                },
-              })
-            }
-          />
-        </div>
-        <div>
-          <label>探测曲线</label>
+          <label>精度档位</label>
           <select
-            value={config.parameters.detection_curve ?? 'swerling1'}
+            value={config.parameters.precision ?? 'balanced'}
             onChange={(e) =>
               update({
                 parameters: {
                   ...config.parameters,
-                  detection_curve: e.target.value,
+                  precision: e.target.value as 'fast' | 'balanced' | 'accurate',
                 },
               })
             }
           >
-            <option value="swerling1">Swerling I</option>
-            <option value="exponential">指数</option>
-            <option value="linear">线性</option>
+            <option value="fast">快速 (128)</option>
+            <option value="balanced">均衡 (256)</option>
+            <option value="accurate">精确 (512)</option>
           </select>
         </div>
       </div>
