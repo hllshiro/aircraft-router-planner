@@ -85,6 +85,9 @@ pub struct AircraftProfile {
     /// 最大飞行高度 m
     #[serde(default)]
     pub maximum_altitude_m: Option<f64>,
+    /// 巡航高度 m（用户指定优先，未指定按机型默认值）
+    #[serde(default)]
+    pub cruise_alt_m: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
@@ -103,6 +106,22 @@ impl Default for AircraftProfile {
             maximum_turn_rate_dps: None,
             maximum_climb_rate_mps: None,
             maximum_altitude_m: None,
+            cruise_alt_m: None,
+        }
+    }
+}
+
+impl AircraftProfile {
+    /// 获取巡航高度：用户指定优先，否则按机型默认值
+    /// - 固定翼：10000 m
+    /// - 旋翼机：1000 m
+    pub fn cruise_altitude(&self) -> f64 {
+        if let Some(alt) = self.cruise_alt_m {
+            return alt;
+        }
+        match self.aircraft_type {
+            AircraftType::FixedWing => 10000.0,
+            AircraftType::Rotorcraft => 1000.0,
         }
     }
 }
@@ -627,6 +646,12 @@ fn validate_aircraft(a: &AircraftInput) -> Result<(), AppError> {
     // 最大高度校验
     if let Some(a) = p.maximum_altitude_m {
         if !(100.0..=30000.0).contains(&a) {
+            return Err(AppError::InputInvalid(InputInvalidReason::OutOfBounds));
+        }
+    }
+    // 巡航高度校验
+    if let Some(alt) = p.cruise_alt_m {
+        if !(100.0..=30000.0).contains(&alt) {
             return Err(AppError::InputInvalid(InputInvalidReason::OutOfBounds));
         }
     }

@@ -20,6 +20,7 @@ import { useViewportTiles, type TileEntry } from '../tiles';
 import { StartMarker } from './StartMarker';
 import { TargetZone } from './TargetZone';
 import { RadarSphere } from './RadarSphere';
+import { MaskedRadarVolume } from './MaskedRadarVolume';
 import { NFZPrism } from './NFZPrism';
 import { PathLine } from './PathLine';
 import { TerrainMesh } from './TerrainMesh';
@@ -419,6 +420,7 @@ export function Scene3D({
     id: r.id,
     center: geoPointToLocal(r.lon, r.lat, r.alt_m ?? 10, stableGeoRef, zScale),
     radiusM: r.radius_km * 1000,
+    radarAltM: r.alt_m ?? 10,
   }));
 
   const zoneMeshes = zones.map((z) => {
@@ -541,17 +543,31 @@ export function Scene3D({
       ))}
       <TargetZone center={targetPos} />
 
-      {radarMeshes.map((r) => (
-        <RadarSphere
-          key={r.id}
-          id={r.id}
-          center={r.center}
-          radiusM={r.radiusM}
-          geoRef={stableGeoRef}
-          onRadarMove={onRadarMove}
-          onDragStateChange={handleDragState}
-        />
-      ))}
+      {radarMeshes.map((r) =>
+        tiles.length > 0 ? (
+          <MaskedRadarVolume
+            key={r.id}
+            id={r.id}
+            center={r.center}
+            radiusM={r.radiusM}
+            radarAltM={r.radarAltM}
+            geoRef={stableGeoRef}
+            sampleHeight={sampleHeight}
+            onRadarMove={onRadarMove}
+            onDragStateChange={handleDragState}
+          />
+        ) : (
+          <RadarSphere
+            key={r.id}
+            id={r.id}
+            center={r.center}
+            radiusM={r.radiusM}
+            geoRef={stableGeoRef}
+            onRadarMove={onRadarMove}
+            onDragStateChange={handleDragState}
+          />
+        ),
+      )}
       {zoneMeshes.map((z) => (
         <NFZPrism
           key={z.id}

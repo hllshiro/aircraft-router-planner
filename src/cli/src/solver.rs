@@ -409,6 +409,14 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
     } else {
         (inflation_m / cell_m.max(1.0)).ceil() as usize
     };
+    // 收集所有航路点（起点 + 必经点 + 终点）用于雷达硬墙化判定
+    let mut all_waypoints: Vec<Geo> = Vec::new();
+    for v in &specs {
+        all_waypoints.push(v.start);
+        all_waypoints.extend(v.mid_waypoints.iter().copied());
+        all_waypoints.push(v.target);
+    }
+    let hard_avoid_radars = threat.hard_avoid_list(&all_waypoints);
     let mut field = build_cost_field(
         &region,
         grid,
@@ -418,6 +426,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
         &threat,
         terrain.as_source().is_some(),
         !input.red_forces.radars.is_empty(),
+        &hard_avoid_radars,
     );
     let mut grid_refined = false; // ④ 已细分重试（每机最多一次）
 
@@ -803,6 +812,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                         &threat,
                         terrain.as_source().is_some(),
                         !input.red_forces.radars.is_empty(),
+                        &hard_avoid_radars,
                     );
                     degradations.push(format!(
                         "coarse FMM no path at grid {old_grid}; corridor refined to grid {grid} (v={})",
@@ -1877,6 +1887,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
             &mid_anchors,
             terrain.as_source(),
             opts.clearance_m,
+            opts.max_climb_deg,
         );
         // 地形跟随细化（方案 B 2026-08-14）：中间段沿地形缓爬升/下降，起终点保持
         // 用户高度；插值不足以覆盖地形处插入段内细化点（净空 ≥ clearance）；起点段/
@@ -2153,6 +2164,7 @@ fn apply_vertical_profile(
     mid_anchors: &[(f64, f64, f64)],
     terrain: Option<&dyn TerrainSource>,
     clearance_m: f64,
+    max_climb_angle_deg: f64,
 ) {
     // 抬升场景（cruise > start）：即使起终点同高也必须处理（起终点钉用户高度、
     // 中间段按自动锚点/保底抬升）；非抬升且同高 → 无高度调整需求（保持现状）。
@@ -2171,14 +2183,34 @@ fn apply_vertical_profile(
         cum[i] = cum[i - 1] + dx.hypot(dy);
     }
     let clearance = clearance_m.max(1.0);
-    // 方案 B（2026-08-14）：不再强制中间点 ≥ 抬升巡航高度（raise_floor）——
-    // 中间段高度 = 锚点线性插值（起终点 + 用户必经点 + 自动撞山锚点）+ 地形保底，
-    // 形成"起点爬升 → 过山 → 下降回目标"的自然轮廓，起终点不被抬升。
-    // P8 M2：必经点高度锚点分段（mid_anchors = (lon, lat, alt) 序列）。
-    // 分段插值节点表 [(idx, alt)]：起点 (0, start_alt) → 必经点最近点 → 终点。
-    // 段端点（必经点/目标）是硬约束不被平滑移除 → 最近点顺序匹配可靠（index 递增）。
-    let mut anchors: Vec<(usize, f64)> = Vec::with_capacity(mid_anchors.len() + 2);
-    anchors.push((0, start_alt));
+    let total_dist = cum.last().copied().unwrap_or(0.0);
+    
+    // 三段式高度计算：起飞段 → 巡航段 → 降落段
+    let max_climb_angle = max_climb_angle_deg.to_radians();
+    let climb_alt_diff = (cruise_alt - start_alt).abs();
+    let descend_alt_diff = (cruise_alt - target_alt).abs();
+    let climb_dist = if max_climb_angle > 0.0 && climb_alt_diff > 0.5 {
+        climb_alt_diff / max_climb_angle.tan()
+    } else {
+        0.0
+    };
+    let descend_dist = if max_climb_angle > 0.0 && descend_alt_diff > 0.5 {
+        descend_alt_diff / max_climb_angle.tan()
+    } else {
+        0.0
+    };
+    
+    // 确定巡航段起止点索引（不超过总距离的40%/60%）
+    let cruise_start_dist = climb_dist.min(total_dist * 0.4);
+    let cruise_end_dist = (total_dist - descend_dist).max(total_dist * 0.6);
+    
+    // 找距离对应的索引
+    let cruise_start_idx = cum.partition_point(|&d| d < cruise_start_dist);
+    let cruise_end_idx = cum.partition_point(|&d| d <= cruise_end_dist);
+    
+    // 收集必经点最近点索引及高度（mid_anchors = (lon, lat, alt) 序列）。
+    // 锚点插值仅在连续必经点区间内覆盖三段式基线；起终点区间使用三段式基线。
+    let mut mid_pts: Vec<(usize, f64)> = Vec::with_capacity(mid_anchors.len());
     if !mid_anchors.is_empty() {
         let mut search_from = 0usize;
         for &(alon, alat, aalt) in mid_anchors {
@@ -2194,13 +2226,12 @@ fn apply_vertical_profile(
                 }
             }
             search_from = best + 1;
-            // 重复 idx（必经点与上一锚点/终点重合）→ 跳过（高度被覆盖，无独立效果）
-            if best > anchors.last().unwrap().0 {
-                anchors.push((best, aalt));
+            if best > mid_pts.last().map_or(0, |&(idx, _)| idx) {
+                mid_pts.push((best, aalt));
             }
         }
     }
-    anchors.push((pts.len() - 1, target_alt));
+
     for i in 0..pts.len() {
         // 剖面段保持：原高度显著偏离巡航高度 → 受限区底部/顶部剖面（主动升降高），
         // 垂直剖面不覆盖（其高度已经 build_restricted_profiles 语义验证）。
@@ -2209,14 +2240,35 @@ fn apply_vertical_profile(
         if (pts[i].alt_m - cruise_alt).abs() > 0.5 {
             continue;
         }
-        // 找 i 所在锚点区间 [anchors[k], anchors[k+1]]（anchors 严格递增；
-        // i == 最后锚点（终点）时 k+1 越界 → clamp 到自身 = 精确锚点高度）
-        let k = anchors.partition_point(|&(idx, _)| idx <= i) - 1;
-        let (lo, h_lo) = anchors[k];
-        let (hi, h_hi) = anchors[(k + 1).min(anchors.len() - 1)];
-        let seg_len = (cum[hi] - cum[lo]).max(1.0);
-        let t = ((cum[i] - cum[lo]) / seg_len).clamp(0.0, 1.0);
-        let mut h = h_lo + (h_hi - h_lo) * t;
+
+        // 三段式高度计算（基线）
+        let mut h = if i <= cruise_start_idx && cruise_start_idx > 0 {
+            // 起飞段：线性爬升
+            let t = i as f64 / cruise_start_idx as f64;
+            start_alt + (cruise_alt - start_alt) * t
+        } else if i >= cruise_end_idx {
+            // 降落段：线性下降（含 cruise_end_idx == pts.len()-1 的边界情况）
+            let range = pts.len() - 1 - cruise_end_idx;
+            let t = if range > 0 { (i - cruise_end_idx) as f64 / range as f64 } else { 1.0 };
+            cruise_alt + (target_alt - cruise_alt) * t
+        } else {
+            // 巡航段：保持巡航高度
+            cruise_alt
+        };
+
+        // 必经点区间锚点插值：仅在连续 mid_pts 之间覆盖三段式基线。
+        // 起点→首个必经点、末个必经点→终点区间保持三段式基线不变。
+        for w in 0..mid_pts.len().saturating_sub(1) {
+            let (lo_idx, lo_alt) = mid_pts[w];
+            let (hi_idx, hi_alt) = mid_pts[w + 1];
+            if i >= lo_idx && i <= hi_idx && hi_idx > lo_idx {
+                let seg_len = (cum[hi_idx] - cum[lo_idx]).max(1.0);
+                let t = ((cum[i] - cum[lo_idx]) / seg_len).clamp(0.0, 1.0);
+                h = lo_alt + (hi_alt - lo_alt) * t;
+                break;
+            }
+        }
+
         // 地形保底：中间点 ≥ 地形 + 净空（2026-08-14 主管低空场景：保底余量 +100
         // 会让起点段形成"余量高台阶"（如起点 500m、地形 377m → 保底 578m，起点旁
         // 250m 内爬升 78m ≈ 17° 超过 15° 爬升率）→ 保底 = 地形 + 净空，恰为 verify
@@ -4020,6 +4072,7 @@ fn build_cost_field(
     threat: &SphericalRadarThreat,
     has_terrain: bool,
     has_radars: bool,
+    hard_avoid_radars: &[bool],
 ) -> crate::costfield::CostField {
     // 硬墙判定闭包（每格：墙内 → Forbidden 禁行）——par_local 与串行回退共用。
     // 多边形墙用"格子矩形与多边形相交"（2026-08-11 zz_nosolution_case：中心点
@@ -4129,23 +4182,45 @@ fn build_cost_field(
 
     // 5b. 雷达静态代价：探测区 cost ×(1+coef·(p + 深穿惩罚))，p 为二值 0/1。
     //     有地形时用 LOS 检测；无地形时无遮蔽（零回归）。
+    //     可绕行雷达（hard_avoid_radars[i]=true）→ 硬墙化（INF），不可绕行保持软约束。
     const RADAR_COST_COEF: f64 = 200.0;
-    let terrain_src = terrain.as_source();
     if has_radars {
+        let terrain_src = terrain.as_source();
         for r in 0..grid {
             for c in 0..grid {
                 let (lon, lat) = cell_lonlat(r, c, region, grid);
-                let p = if has_terrain && terrain_src.is_some() {
-                    threat.point_probability(lon, lat, LOS_REF_ALT_M, terrain_src)
-                } else {
-                    threat.static_union_probability(lon, lat)
-                };
-                if p > 0.0 {
-                    let idx = r * grid + c;
+                let idx = r * grid + c;
+
+                // 检查是否在任何需要硬墙化的雷达内
+                let mut hard_wall = false;
+                for (i, radar) in threat.radars().iter().enumerate() {
+                    if hard_avoid_radars.get(i).copied().unwrap_or(false) {
+                        let d = crate::path::haversine_m(radar.lon, radar.lat, lon, lat);
+                        if d <= threat.effective_radius_m(radar) {
+                            hard_wall = true;
+                            break;
+                        }
+                    }
+                }
+
+                if hard_wall {
+                    // 硬墙化：设为 INF
                     if field.cost[idx].is_finite() {
-                        let u = threat.static_penetration(lon, lat, 0.0);
-                        let geom = if u < 1.0 { 1.0 - u } else { 0.0 };
-                        field.cost[idx] *= (1.0 + RADAR_COST_COEF * (p + geom)) as f32;
+                        field.cost[idx] = f32::INFINITY;
+                    }
+                } else {
+                    // 原有软约束逻辑（不可绕行的雷达）
+                    let p = if has_terrain && terrain_src.is_some() {
+                        threat.point_probability(lon, lat, LOS_REF_ALT_M, terrain_src)
+                    } else {
+                        threat.static_union_probability(lon, lat)
+                    };
+                    if p > 0.0 {
+                        if field.cost[idx].is_finite() {
+                            let u = threat.static_penetration(lon, lat, 0.0);
+                            let geom = if u < 1.0 { 1.0 - u } else { 0.0 };
+                            field.cost[idx] *= (1.0 + RADAR_COST_COEF * (p + geom)) as f32;
+                        }
                     }
                 }
             }
