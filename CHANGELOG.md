@@ -11,6 +11,7 @@
 
 ### Added
 - feat(altitude): 新增 `cruise_alt_m` 巡航高度参数，用户指定优先，未指定按机型默认值（固定翼 10000m / 旋翼 1000m）
+- test: 新增雷达绝对避让与高度分段功能测试用例
 
 ### Changed
 - 移除未使用的依赖（criterion、geotiff、geo-types）以加快编译速度
