@@ -28,7 +28,7 @@ serde_json.workspace = true
 schemars.workspace = true
 thiserror.workspace = true
 # 数据源（发布版必含，技术方案 3.2 C）
-geotiff = "0.1"
+# geotiff = "0.1"  # 未使用，代码中使用 tiff crate
 tiff = "0.9"
 dted2 = "1.0.0"
 ruzstd = "0.9"
@@ -37,7 +37,7 @@ ruzstd = "0.9"
 # 不存在（ruzstd 仅解码；zstd-pure-rs 为 immature LLM 翻译有数据损坏风险），
 # 实测 deflate 在真实地形差分块上压缩比 4.06:1 ≥ zstd 3.98:1 → 采用 COMPRESSION_DEFLATE。
 miniz_oxide = "0.8"
-geo-types = "0.7"
+# geo-types = "0.7"  # 未直接使用，geo 已依赖
 sha2 = "0.10"
 # 按需读取：mmap（pure Rust，零 C 依赖红线；大型 ARPK1 打开 O(1) + 块按需）
 memmap2 = "0.9"

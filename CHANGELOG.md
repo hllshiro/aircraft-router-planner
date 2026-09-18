@@ -9,6 +9,9 @@
 
 ## [Unreleased]
 
+### Changed
+- 移除未使用的依赖（criterion、geotiff、geo-types）以加快编译速度
+
 ## [0.8.1] - 2026-09-18
 
 ### Changed
