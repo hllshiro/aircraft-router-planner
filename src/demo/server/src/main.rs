@@ -446,12 +446,12 @@ fn data_dir() -> PathBuf {
 
 /// 根据 id 解析实际文件路径：扫描 data 目录，查找匹配 id（文件名去扩展名）的文件。
 /// 返回 data_dir/{id}.{ext} 完整路径。
-fn resolve_index_id(id: &str) -> Option<PathBuf> {
+fn resolve_index_id(id: &str, extensions: &[&str]) -> Option<PathBuf> {
     let dir = data_dir();
     if !dir.is_dir() {
         return None;
     }
-    for ext in &["arpack", "mask"] {
+    for ext in extensions {
         let path = dir.join(format!("{id}.{ext}"));
         if path.exists() {
             return Some(path);
@@ -463,12 +463,22 @@ fn resolve_index_id(id: &str) -> Option<PathBuf> {
 /// 解析地形路径：先尝试 index id 解析，再回退到文件路径解析。
 pub(crate) fn resolve_terrain_or_index(path: &str) -> Result<PathBuf, String> {
     // 先尝试作为 index id 解析
-    if let Some(p) = resolve_index_id(path) {
+    if let Some(p) = resolve_index_id(path, &["arpack", "mask"]) {
         if p.exists() {
             return Ok(p);
         }
     }
     // 回退到原文件路径解析
+    resolve_terrain_path(path)
+}
+
+/// 解析掩膜索引路径：只查找 .mask 扩展名，避免 arpack 文件被错误解析。
+pub(crate) fn resolve_mask_index(path: &str) -> Result<PathBuf, String> {
+    if let Some(p) = resolve_index_id(path, &["mask"]) {
+        if p.exists() {
+            return Ok(p);
+        }
+    }
     resolve_terrain_path(path)
 }
 

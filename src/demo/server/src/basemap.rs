@@ -128,7 +128,7 @@ fn mask_color(c: MaskClass) -> [u8; 4] {
 }
 
 fn mask_basemap(req: &BasemapReq, nx: usize, ny: usize) -> Value {
-    let key = match crate::resolve_terrain_or_index(&req.path) {
+    let key = match crate::resolve_mask_index(&req.path) {
         Ok(p) => p,
         Err(e) => return serde_json::json!({ "error": e }),
     };
