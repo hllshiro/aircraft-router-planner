@@ -13,11 +13,24 @@ html, body, #root { height: 100%; overflow: hidden; }
   min-width: 340px;
   background: #22263f;
   color: #eef0f8;
-  padding: 16px;
+  padding: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.panel-scroll {
+  flex: 1;
   overflow-y: auto;
+  padding: 16px;
   display: flex;
   flex-direction: column;
   gap: 12px;
+}
+
+.panel-footer {
+  flex-shrink: 0;
+  padding: 0 16px 16px;
 }
 
 .panel h2 {

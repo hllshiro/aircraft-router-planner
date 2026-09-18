@@ -68,7 +68,9 @@ impl<'a> SphericalRadarThreat<'a> {
 
     /// 单雷达有效探测半径（膨胀 + cap 100km）。
     fn effective_radius_m(&self, r: &Radar) -> f64 {
-        (r.radius_km * 1000.0 * self.params.radar_inflation).min(100_000.0)
+        let inflated = r.radius_km * 1000.0 * self.params.radar_inflation;
+        let capped = r.radius_km * 1000.0 + 100_000.0;
+        inflated.min(capped)
     }
 
     /// 二值检测：任一雷达有效半径内 + LOS 未遮蔽 → 1.0，否则 0.0。
