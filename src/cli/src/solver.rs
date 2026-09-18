@@ -2208,14 +2208,9 @@ fn apply_vertical_profile(
     let cruise_start_idx = cum.partition_point(|&d| d < cruise_start_dist);
     let cruise_end_idx = cum.partition_point(|&d| d <= cruise_end_dist);
     
-    // 方案 B（2026-08-14）：不再强制中间点 ≥ 抬升巡航高度（raise_floor）——
-    // 中间段高度 = 锚点线性插值（起终点 + 用户必经点 + 自动撞山锚点）+ 地形保底，
-    // 形成"起点爬升 → 过山 → 下降回目标"的自然轮廓，起终点不被抬升。
-    // P8 M2：必经点高度锚点分段（mid_anchors = (lon, lat, alt) 序列）。
-    // 分段插值节点表 [(idx, alt)]：起点 (0, start_alt) → 必经点最近点 → 终点。
-    // 段端点（必经点/目标）是硬约束不被平滑移除 → 最近点顺序匹配可靠（index 递增）。
-    let mut anchors: Vec<(usize, f64)> = Vec::with_capacity(mid_anchors.len() + 2);
-    anchors.push((0, start_alt));
+    // 收集必经点最近点索引及高度（mid_anchors = (lon, lat, alt) 序列）。
+    // 锚点插值仅在连续必经点区间内覆盖三段式基线；起终点区间使用三段式基线。
+    let mut mid_pts: Vec<(usize, f64)> = Vec::with_capacity(mid_anchors.len());
     if !mid_anchors.is_empty() {
         let mut search_from = 0usize;
         for &(alon, alat, aalt) in mid_anchors {
@@ -2231,13 +2226,12 @@ fn apply_vertical_profile(
                 }
             }
             search_from = best + 1;
-            // 重复 idx（必经点与上一锚点/终点重合）→ 跳过（高度被覆盖，无独立效果）
-            if best > anchors.last().unwrap().0 {
-                anchors.push((best, aalt));
+            if best > mid_pts.last().map_or(0, |&(idx, _)| idx) {
+                mid_pts.push((best, aalt));
             }
         }
     }
-    anchors.push((pts.len() - 1, target_alt));
+
     for i in 0..pts.len() {
         // 剖面段保持：原高度显著偏离巡航高度 → 受限区底部/顶部剖面（主动升降高），
         // 垂直剖面不覆盖（其高度已经 build_restricted_profiles 语义验证）。
@@ -2246,14 +2240,14 @@ fn apply_vertical_profile(
         if (pts[i].alt_m - cruise_alt).abs() > 0.5 {
             continue;
         }
-        
-        // 三段式高度计算
+
+        // 三段式高度计算（基线）
         let mut h = if i <= cruise_start_idx && cruise_start_idx > 0 {
             // 起飞段：线性爬升
             let t = i as f64 / cruise_start_idx as f64;
             start_alt + (cruise_alt - start_alt) * t
-        } else if i >= cruise_end_idx && cruise_end_idx < pts.len() - 1 {
-            // 降落段：线性下降
+        } else if i >= cruise_end_idx {
+            // 降落段：线性下降（含 cruise_end_idx == pts.len()-1 的边界情况）
             let range = pts.len() - 1 - cruise_end_idx;
             let t = if range > 0 { (i - cruise_end_idx) as f64 / range as f64 } else { 1.0 };
             cruise_alt + (target_alt - cruise_alt) * t
@@ -2261,17 +2255,20 @@ fn apply_vertical_profile(
             // 巡航段：保持巡航高度
             cruise_alt
         };
-        
-        // 锚点覆盖：如果有必经点锚点且在当前区间内，使用锚点插值
-        let k = anchors.partition_point(|&(idx, _)| idx <= i) - 1;
-        let (lo, h_lo) = anchors[k];
-        let (hi, h_hi) = anchors[(k + 1).min(anchors.len() - 1)];
-        if hi > lo {
-            let seg_len = (cum[hi] - cum[lo]).max(1.0);
-            let t = ((cum[i] - cum[lo]) / seg_len).clamp(0.0, 1.0);
-            h = h_lo + (h_hi - h_lo) * t;
+
+        // 必经点区间锚点插值：仅在连续 mid_pts 之间覆盖三段式基线。
+        // 起点→首个必经点、末个必经点→终点区间保持三段式基线不变。
+        for w in 0..mid_pts.len().saturating_sub(1) {
+            let (lo_idx, lo_alt) = mid_pts[w];
+            let (hi_idx, hi_alt) = mid_pts[w + 1];
+            if i >= lo_idx && i <= hi_idx && hi_idx > lo_idx {
+                let seg_len = (cum[hi_idx] - cum[lo_idx]).max(1.0);
+                let t = ((cum[i] - cum[lo_idx]) / seg_len).clamp(0.0, 1.0);
+                h = lo_alt + (hi_alt - lo_alt) * t;
+                break;
+            }
         }
-        
+
         // 地形保底：中间点 ≥ 地形 + 净空（2026-08-14 主管低空场景：保底余量 +100
         // 会让起点段形成"余量高台阶"（如起点 500m、地形 377m → 保底 578m，起点旁
         // 250m 内爬升 78m ≈ 17° 超过 15° 爬升率）→ 保底 = 地形 + 净空，恰为 verify
