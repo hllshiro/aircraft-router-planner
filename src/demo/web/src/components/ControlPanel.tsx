@@ -256,7 +256,8 @@ export function ControlPanel({
     });
 
   return (
-    <div>
+    <>
+      <div className="panel-scroll">
       <h2>AircraftRouterPlanner Demo</h2>
       <div className="subtitle">开发期工具 · schema 0.21</div>
 
@@ -1139,22 +1140,24 @@ export function ControlPanel({
         </div>
       </div>
 
-      {/* Plan button */}
-      <button
-        onClick={onPlan}
-        disabled={loading}
-        style={{
-          marginTop: 16,
-          padding: '14px',
-          fontSize: 16,
-          width: '100%',
-        }}
-      >
-        {loading ? '⏳ 计算中...' : '开始规划'}
-      </button>
-
       {/* Results */}
       <ResultPanel result={result} />
-    </div>
+      </div>
+      <div className="panel-footer">
+        {/* Plan button */}
+        <button
+          onClick={onPlan}
+          disabled={loading}
+          style={{
+            marginTop: 16,
+            padding: '14px',
+            fontSize: 16,
+            width: '100%',
+          }}
+        >
+          {loading ? '⏳ 计算中...' : '开始规划'}
+        </button>
+      </div>
+    </>
   );
 }
