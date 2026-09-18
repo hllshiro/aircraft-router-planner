@@ -75,7 +75,7 @@ dependencies = [
 
 [[package]]
 name = "arp-convert"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "arpcli",
  "clap",
@@ -89,7 +89,7 @@ dependencies = [
 
 [[package]]
 name = "arpcli"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "clap",
  "dted2",
