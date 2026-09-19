@@ -17,3 +17,4 @@ pub mod solver;
 pub mod spatial;
 pub mod terrain;
 pub mod threat;
+pub mod zone;
