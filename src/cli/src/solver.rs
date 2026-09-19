@@ -928,6 +928,8 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                     inflation_km,
                     terrain.as_source(),
                     opts.clearance_m,
+                    Some(&threat),
+                    &hard_avoid_radars,
                 );
                 let ctx = VerifyContext {
                     terrain: terrain.as_source(),
@@ -1745,8 +1747,27 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                         }
                     }
                     if rep_now.detected && penetrates {
+                        // 禁止直线穿过硬墙雷达：用 make_segment_check 检查整段
+                        let straight_through_hard_wall = {
+                            let hard_check = make_segment_check(
+                                &all_zones,
+                                Some(&threat as &dyn crate::threat::ThreatModel),
+                                inflation_km,
+                                terrain.as_source(),
+                                opts.clearance_m,
+                                Some(&threat),
+                                &hard_avoid_radars,
+                            );
+                            straight.points.windows(2).any(|w| {
+                                !hard_check(
+                                    w[0].lon, w[0].lat, w[0].alt_m,
+                                    w[1].lon, w[1].lat, w[1].alt_m,
+                                )
+                            })
+                        };
                         let cur_dist = Path::new(pts.clone()).length_m();
-                        if straight.points.len() >= 2
+                        if !straight_through_hard_wall
+                            && straight.points.len() >= 2
                             && cur_dist > straight.length_m() * 1.05 + 1_000.0
                         {
                             let rep_s = crate::smooth::verify_path(
@@ -1890,6 +1911,14 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
             opts.clearance_m,
             opts.max_climb_deg,
         );
+        // 强制起终点 = 用户高度（任务硬约束）：apply_vertical_profile 中 range=0
+        // 时 t=0/0 导致末点可能未降到目标高度。
+        if let Some(last) = pts.last_mut() {
+            last.alt_m = target_alt_norm;
+        }
+        if let Some(first) = pts.first_mut() {
+            first.alt_m = start_alt_norm;
+        }
         // 地形跟随细化（方案 B 2026-08-14）：中间段沿地形缓爬升/下降，起终点保持
         // 用户高度；插值不足以覆盖地形处插入段内细化点（净空 ≥ clearance）；起点段/
         // 终点段（起飞/降落）插入点按 max_climb_angle 爬升/下降线（净空 < 100 允许、
@@ -2825,6 +2854,8 @@ fn make_segment_check<'a>(
     inflation_km: f64,
     terrain: Option<&'a dyn TerrainSource>,
     clearance_m: f64,
+    radar_threat: Option<&'a SphericalRadarThreat<'a>>,
+    hard_avoid_radars: &'a [bool],
 ) -> impl Fn(f64, f64, f64, f64, f64, f64) -> bool + 'a {
     move |lon1, lat1, alt1, lon2, lat2, alt2| {
         const N: usize = 16;
@@ -2933,13 +2964,31 @@ fn make_segment_check<'a>(
         }
         if let Some(tm) = threat {
             // 始终检查中间点：即使端点在雷达内，拉直弦也可能穿过其他雷达区
-            // （FMM 路径仅边缘触碰雷达 → 端点在内 → 拉直弦深穿 → 不可接受）
+            // 仅对硬墙雷达（可绕行雷达）拒绝连接；软约束雷达允许（FMM 已用高代价处理）。
+            // 端点不在雷达内时，用严格距离检查（不依赖 LOS，避免高海拔 LOS 通透导致误放行）。
+            let rthreat = radar_threat;
+            let deep_a = tm.static_detected(lon1, lat1, alt1);
+            let deep_b = tm.static_detected(lon2, lat2, alt2);
             for i in 0..=N {
                 let t = i as f64 / N as f64;
                 let lon = lon1 + (lon2 - lon1) * t;
                 let lat = lat1 + (lat2 - lat1) * t;
                 let alt = alt1 + (alt2 - alt1) * t;
-                if tm.static_detected(lon, lat, alt) {
+                // 检查是否在硬墙雷达有效半径内（距离检查，不依赖 LOS）
+                let in_hard_wall = rthreat.is_some_and(|rt| {
+                    rt.radars().iter().enumerate().any(|(idx, r)| {
+                        if !hard_avoid_radars.get(idx).copied().unwrap_or(false) {
+                            return false;
+                        }
+                        let d = crate::path::haversine_m(r.lon, r.lat, lon, lat);
+                        d <= rt.effective_radius_m(r)
+                    })
+                });
+                if in_hard_wall {
+                    return false;
+                }
+                // 端点不在雷达内时，额外用 LOS 检查（防止中间点被软约束雷达检测到后误放行）
+                if !deep_a && !deep_b && tm.static_detected(lon, lat, alt) {
                     return false;
                 }
             }
