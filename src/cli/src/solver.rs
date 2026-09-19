@@ -11,7 +11,7 @@
 use std::time::Instant;
 
 use crate::config::{
-    Input, Output, PathPoint, Stats, TerrainIndex, AircraftOutput, Zone, ZoneShape,
+    Input, Output, PathPoint, Radar, Stats, TerrainIndex, AircraftOutput, Zone, ZoneShape,
     point_in_polygon_xy, pt_seg_dist_km, zone_contains, zone_contains_at
 };
 use crate::coord::Geo;
@@ -26,6 +26,7 @@ use crate::terrain::builtin::BuiltinSource;
 use crate::terrain::mask::{GeoMask, MaskedSource};
 use crate::terrain::{BulkPrefetch, Sample, TerrainSource};
 use crate::threat::{SphericalRadarThreat, ThreatModel, ThreatParams};
+use crate::zone::{RadarUnified, UnifiedZone, ZoneUnified};
 
 /// 地形高度过滤的松弛量（2026-08-10）：只挡「明显高于巡航高度（+300m）」的山。
 /// 3000m 任务经过 3058m 五台山（净空不足但历史行为可过）不得被区域级过滤困住而
@@ -417,6 +418,12 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
         all_waypoints.push(v.target);
     }
     let hard_avoid_radars = threat.hard_avoid_list(&all_waypoints);
+    let (_unified_zones, _zone_warnings) = collect_unified_zones(
+        &all_zones,
+        &input.red_forces.radars,
+        &threat_params,
+        &all_waypoints,
+    );
     let mut field = build_cost_field(
         &region,
         grid,
@@ -2788,6 +2795,44 @@ fn radar_threat_params(d: &crate::config::DefaultParams) -> ThreatParams {
     ThreatParams {
         radar_inflation: d.radar_inflation,
     }
+}
+
+/// 收集所有区域并标记端点穿透区为可穿越。
+fn collect_unified_zones(
+    zones: &[Zone],
+    radars: &[Radar],
+    threat_params: &ThreatParams,
+    waypoints: &[Geo],
+) -> (Vec<Box<dyn UnifiedZone>>, Vec<String>) {
+    let mut unified: Vec<Box<dyn UnifiedZone>> = Vec::new();
+    let mut warnings = Vec::new();
+
+    for z in zones {
+        unified.push(Box::new(ZoneUnified {
+            zone: z.clone(),
+            traversable: false,
+        }));
+    }
+
+    for r in radars {
+        unified.push(Box::new(RadarUnified::new(r.clone(), threat_params.radar_inflation)));
+    }
+
+    for zone in &mut unified {
+        for wp in waypoints {
+            if zone.contains(wp.lon, wp.lat, 0.0) {
+                zone.set_traversable(true);
+                warnings.push(format!(
+                    "航路点在{}({})内，降级为可穿越区",
+                    zone.zone_type() as u8,
+                    zone.id()
+                ));
+                break;
+            }
+        }
+    }
+
+    (unified, warnings)
 }
 
 /// 无效参数回落默认的降级报告。
