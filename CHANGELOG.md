@@ -15,6 +15,9 @@
 - test: 新增雷达绝对避让与高度分段功能测试用例
 
 ### Changed
+- 统一区域模型：雷达、禁飞区、限飞区、障碍物使用同一套 UnifiedZone trait
+- 端点穿透判定：自动标记起终点/必经点所在的区域为可穿越区
+- 简化 build_cost_field 和 make_segment_check 逻辑
 - 移除未使用的依赖（criterion、geotiff、geo-types）以加快编译速度
 - 前端雷达覆盖可视化：地形遮蔽（LOS 射线检测）替代固定球体，与 CLI 一致
 - CLI threat.rs: NoData 区域不再遮挡雷达信号（保守策略，假设雷达看穿数据空洞）

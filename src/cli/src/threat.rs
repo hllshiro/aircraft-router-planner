@@ -8,7 +8,6 @@
 //! - 多雷达：任一雷达探测到即返回 1.0。
 
 use crate::config::Radar;
-use crate::coord::Geo;
 use crate::path::{Path, haversine_m};
 use crate::terrain::{Sample, TerrainSource};
 
@@ -100,29 +99,6 @@ impl<'a> SphericalRadarThreat<'a> {
     /// 静态几何并集概率（无 LOS——FMM 代价场用）。
     pub fn static_union_probability(&self, lon: f64, lat: f64) -> f64 {
         self.point_probability(lon, lat, 0.0, None)
-    }
-
-    /// 判断单个雷达是否应该绝对避让：
-    /// 起点、终点、所有必经点都在该雷达有效半径外 → 可绕行 → 硬墙化
-    pub fn should_hard_avoid(&self, radar_idx: usize, waypoints: &[Geo]) -> bool {
-        if radar_idx >= self.radars.len() || waypoints.is_empty() {
-            return false;
-        }
-        let r = &self.radars[radar_idx];
-        let eff = self.effective_radius_m(r);
-
-        // 所有航路点都在雷达外才可绕行
-        waypoints.iter().all(|w| {
-            let d = haversine_m(r.lon, r.lat, w.lon, w.lat);
-            d >= eff
-        })
-    }
-
-    /// 批量判定哪些雷达需要硬墙化
-    pub fn hard_avoid_list(&self, waypoints: &[Geo]) -> Vec<bool> {
-        (0..self.radars.len())
-            .map(|i| self.should_hard_avoid(i, waypoints))
-            .collect()
     }
 
     /// 返回雷达列表引用（用于代价场硬墙判定）
