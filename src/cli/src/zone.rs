@@ -11,7 +11,7 @@ pub enum ZoneType {
 }
 
 /// 统一区域 trait
-pub trait UnifiedZone {
+pub trait UnifiedZone: Send + Sync {
     /// 点是否在区域内
     fn contains(&self, lon: f64, lat: f64, alt_m: f64) -> bool;
     /// 区域类型
