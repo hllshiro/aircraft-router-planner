@@ -522,7 +522,8 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
         let mut terrain_alt_raised = false; // 已抬升巡航高度
         let mut terrain_fallback_done = false; // 已回退无过滤场（保底）
         // 有效巡航高度（可被抬升逻辑更新；初始 = 起终点地面抬升后的起点高度）
-        let mut alt_eff = start_alt_norm;
+        let cruise_alt = v.profile.cruise_altitude();
+        let mut alt_eff = start_alt_norm.max(cruise_alt);
         // 方案 B（主管 2026-08-14）：抬升决策记录撞山区段最高地形点 → 自动中间锚点
         // (lon, lat, 抬升高度)；apply_vertical_profile 据此在中间爬升/下降，
         // 起点/终点保持用户高度（不再整条路径强制抬到抬升巡航高度）。
@@ -878,7 +879,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                 if path_max_terr > 0.0
                     && path_max_terr + clearance >= alt_eff + TERRAIN_MASK_SLACK_M
                 {
-                    let new_alt = (path_max_terr + clearance + 100.0).max(v.alt_m);
+                    let new_alt = (path_max_terr + clearance + 100.0).max(v.alt_m).max(cruise_alt);
                     let ceiling_ok = v.profile.maximum_altitude_m.is_none_or(|c| new_alt <= c);
                     if new_alt > alt_eff + 0.5 && ceiling_ok {
                         terrain_alt_raised = true;
@@ -1386,7 +1387,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                     let terr_max = terr_max.max(seg_terr_max);
                     if terr_max > 0.0 {
                         let clearance = opts.clearance_m.max(1.0);
-                        let new_alt = (terr_max + clearance + 100.0).max(v.alt_m);
+                        let new_alt = (terr_max + clearance + 100.0).max(v.alt_m).max(cruise_alt);
                         let ceiling_ok = v.profile.maximum_altitude_m.is_none_or(|c| new_alt <= c);
                         if new_alt > alt_eff + 0.5 && ceiling_ok {
                             terrain_alt_raised = true;
@@ -2931,19 +2932,15 @@ fn make_segment_check<'a>(
             }
         }
         if let Some(tm) = threat {
-            // 雷达：二值检测——任一端点在雷达探测区内即视为深穿，允许拉直（该端点
-            // 进圈不可避免，拉直只简化 FMM 网格伪影，不引入新的绕行决策破坏）。
-            let deep_a = tm.static_detected(lon1, lat1, alt1);
-            let deep_b = tm.static_detected(lon2, lat2, alt2);
-            if !deep_a && !deep_b {
-                for i in 0..=N {
-                    let t = i as f64 / N as f64;
-                    let lon = lon1 + (lon2 - lon1) * t;
-                    let lat = lat1 + (lat2 - lat1) * t;
-                    let alt = alt1 + (alt2 - alt1) * t;
-                    if tm.static_detected(lon, lat, alt) {
-                        return false;
-                    }
+            // 始终检查中间点：即使端点在雷达内，拉直弦也可能穿过其他雷达区
+            // （FMM 路径仅边缘触碰雷达 → 端点在内 → 拉直弦深穿 → 不可接受）
+            for i in 0..=N {
+                let t = i as f64 / N as f64;
+                let lon = lon1 + (lon2 - lon1) * t;
+                let lat = lat1 + (lat2 - lat1) * t;
+                let alt = alt1 + (alt2 - alt1) * t;
+                if tm.static_detected(lon, lat, alt) {
+                    return false;
                 }
             }
         }
