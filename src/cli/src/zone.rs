@@ -32,6 +32,12 @@ pub struct ZoneUnified {
     pub traversable: bool,
 }
 
+impl ZoneUnified {
+    pub fn new(zone: Zone, traversable: bool) -> Self {
+        Self { zone, traversable }
+    }
+}
+
 impl UnifiedZone for ZoneUnified {
     fn contains(&self, lon: f64, lat: f64, alt_m: f64) -> bool {
         let Ok(g) = crate::coord::Geo::new(lon, lat) else {
