@@ -12,7 +12,7 @@ use std::time::Instant;
 
 use crate::config::{
     Input, Output, PathPoint, Radar, Stats, TerrainIndex, AircraftOutput, Zone, ZoneShape,
-    point_in_polygon_xy, pt_seg_dist_km, zone_contains, zone_contains_at
+    point_in_polygon_xy, pt_seg_dist_km, zone_contains
 };
 use crate::coord::Geo;
 use crate::costfield::{
@@ -392,7 +392,6 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
             (opts.turn_radius_m * 0.5).clamp(2_000.0, 10_000.0)
         })
         .fold(0.0f64, f64::max);
-    let inflation_km = inflation_m / 1000.0;
 
     // 5. 语义代价场（Land=1 / Water=1 / Lake=1 / NoData=5 / OOB=5（2026-08-11 放开）/
     //    Forbidden=INF；NoFly/Obstacle 墙用 Forbidden——OOB 不再表达墙）
@@ -417,7 +416,6 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
         all_waypoints.extend(v.mid_waypoints.iter().copied());
         all_waypoints.push(v.target);
     }
-    let hard_avoid_radars = threat.hard_avoid_list(&all_waypoints);
     let (unified_zones, _zone_warnings) = collect_unified_zones(
         &all_zones,
         &input.red_forces.radars,
@@ -922,13 +920,9 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
             pts = raw_joined.points.clone();
             if pts.len() >= 2 {
                 let check = make_segment_check(
-                    &all_zones,
-                    Some(&threat as &dyn crate::threat::ThreatModel),
-                    inflation_km,
+                    &unified_zones,
                     terrain.as_source(),
                     opts.clearance_m,
-                    Some(&threat),
-                    &hard_avoid_radars,
                 );
                 let ctx = VerifyContext {
                     terrain: terrain.as_source(),
@@ -1749,13 +1743,9 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                         // 禁止直线穿过硬墙雷达：用 make_segment_check 检查整段
                         let straight_through_hard_wall = {
                             let hard_check = make_segment_check(
-                                &all_zones,
-                                Some(&threat as &dyn crate::threat::ThreatModel),
-                                inflation_km,
+                                &unified_zones,
                                 terrain.as_source(),
                                 opts.clearance_m,
-                                Some(&threat),
-                                &hard_avoid_radars,
                             );
                             straight.points.windows(2).any(|w| {
                                 !hard_check(
@@ -2887,13 +2877,9 @@ fn join_paths(segs: &[Path]) -> Path {
 /// OOB 拒绝）。Theta* 是 O(n²) 贪心跳点，每个候选段都查地形 → 上限
 /// 256 点控制 worst case（段长 256km 已超 demo 场景量级）。
 fn make_segment_check<'a>(
-    zones: &'a [Zone],
-    threat: Option<&'a dyn crate::threat::ThreatModel>,
-    inflation_km: f64,
+    unified_zones: &'a [Box<dyn UnifiedZone>],
     terrain: Option<&'a dyn TerrainSource>,
     clearance_m: f64,
-    radar_threat: Option<&'a SphericalRadarThreat<'a>>,
-    hard_avoid_radars: &'a [bool],
 ) -> impl Fn(f64, f64, f64, f64, f64, f64) -> bool + 'a {
     move |lon1, lat1, alt1, lon2, lat2, alt2| {
         const N: usize = 16;
@@ -2920,184 +2906,23 @@ fn make_segment_check<'a>(
                 }
             }
         }
-        for z in zones {
-            let clr = crate::config::zone_segment_clearance_km(lon1, lat1, lon2, lat2, z);
-            if z.is_wall() {
-                if clr <= 1e-9 || clr < inflation_km {
-                    return false;
-                }
-            } else if let crate::config::ZoneShape::Circle { center, radius_km } = &z.shape {
-                // restricted 圆：与 verify 完全同口径，**两层**判定都做——
-                // 1) 解析二次方程得到穿圆参数区间 [t1,t2]，**区间内**采样高度
-                //    （0..N 等距采样会漏掉浅穿/短弦：段擦圆边缘穿入仅 0.03 宽，
-                //    16 个等距点可能全在圆外 → check 放行 verify 会拒的穿区段，
-                //    2026-08-06 zigzag9 theta_star 拉直段擦过 restricted 圆）；
-                // 2) 整段等距采样 + haversine 点判定（verify 层 2 同口径）——解析
-                //    区间用等距投影（固定中纬 cos），点判定用 Geo::distance_m（大圆），
-                //    半径 100km 边缘偏差 ~±2% 可翻转"穿/不穿"，边缘浅穿场景 check
-                //    放行 verify 拒（2026-08-07 zigzag16 restricted 圆心东移）。
-                if let Some((t1, t2)) = crate::smooth::segment_circle_intersect_t(
-                    lon1, lat1, lon2, lat2, center[0], center[1], *radius_km,
-                ) {
-                    for i in 0..=N {
-                        let t = t1 + (t2 - t1) * i as f64 / N as f64;
-                        let lon = lon1 + (lon2 - lon1) * t;
-                        let lat = lat1 + (lat2 - lat1) * t;
-                        let alt = alt1 + (alt2 - alt1) * t;
-                        if let Ok(g) = Geo::new(lon, lat) {
-                            if zone_contains_at(z, &g, alt) {
-                                return false;
-                            }
-                        }
-                    }
-                }
-                // 层 2：整段等距采样（与 verify 的 sample inside zone 完全同口径）
-                for i in 0..=N {
-                    let t = i as f64 / N as f64;
-                    let lon = lon1 + (lon2 - lon1) * t;
-                    let lat = lat1 + (lat2 - lat1) * t;
-                    let alt = alt1 + (alt2 - alt1) * t;
-                    if let Ok(g) = Geo::new(lon, lat) {
-                        if zone_contains_at(z, &g, alt) {
-                            return false;
-                        }
-                    }
-                }
-            } else if clr <= 1e-9 {
-                // restricted 多边形：解析求交成带（线段×各边交点参数）→ 带内加密采样。
-                // 旧 N=16 整段等距采样会漏掉长段上的短穿带（2026-08-12 主管 rz_poly2：
-                // 250km theta_star 拉直弦穿多边形北端 ~15km，16 等距点恰全落带外 →
-                // check 放行直穿弦 → verify 拒 → 全链 smooth 失败 → 无解）。
-                let ZoneShape::Polygon { vertices } = &z.shape else {
-                    continue; // 非圆非墙（理论不可达）
-                };
-                let bands = segment_polygon_bands_t(lon1, lat1, lon2, lat2, vertices);
-                for (t1, t2) in bands {
-                    for i in 0..=N {
-                        let t = t1 + (t2 - t1) * i as f64 / N as f64;
-                        let lon = lon1 + (lon2 - lon1) * t;
-                        let lat = lat1 + (lat2 - lat1) * t;
-                        let alt = alt1 + (alt2 - alt1) * t;
-                        if let Ok(g) = Geo::new(lon, lat) {
-                            if zone_contains_at(z, &g, alt) {
-                                return false;
-                            }
-                        }
-                    }
-                }
-                // 层 2：整段等距采样（与 verify 的 sample inside zone 完全同口径；
-                // 求交退化/共线兜底，双保险）
-                for i in 0..=N {
-                    let t = i as f64 / N as f64;
-                    let lon = lon1 + (lon2 - lon1) * t;
-                    let lat = lat1 + (lat2 - lat1) * t;
-                    let alt = alt1 + (alt2 - alt1) * t;
-                    if let Ok(g) = Geo::new(lon, lat) {
-                        if zone_contains_at(z, &g, alt) {
-                            return false;
-                        }
-                    }
-                }
+        // 统一区域检查：遍历所有不可穿越区域，采样 N 个点判定是否穿过
+        for zone in unified_zones {
+            if zone.is_traversable() {
+                continue;
             }
-        }
-        if let Some(tm) = threat {
-            // 始终检查中间点：即使端点在雷达内，拉直弦也可能穿过其他雷达区
-            // 仅对硬墙雷达（可绕行雷达）拒绝连接；软约束雷达允许（FMM 已用高代价处理）。
-            // 端点不在雷达内时，用严格距离检查（不依赖 LOS，避免高海拔 LOS 通透导致误放行）。
-            let rthreat = radar_threat;
-            let deep_a = tm.static_detected(lon1, lat1, alt1);
-            let deep_b = tm.static_detected(lon2, lat2, alt2);
             for i in 0..=N {
                 let t = i as f64 / N as f64;
                 let lon = lon1 + (lon2 - lon1) * t;
                 let lat = lat1 + (lat2 - lat1) * t;
                 let alt = alt1 + (alt2 - alt1) * t;
-                // 检查是否在硬墙雷达有效半径内（距离检查，不依赖 LOS）
-                let in_hard_wall = rthreat.is_some_and(|rt| {
-                    rt.radars().iter().enumerate().any(|(idx, r)| {
-                        if !hard_avoid_radars.get(idx).copied().unwrap_or(false) {
-                            return false;
-                        }
-                        let d = crate::path::haversine_m(r.lon, r.lat, lon, lat);
-                        d <= rt.effective_radius_m(r)
-                    })
-                });
-                if in_hard_wall {
-                    return false;
-                }
-                // 端点不在雷达内时，额外用 LOS 检查（防止中间点被软约束雷达检测到后误放行）
-                if !deep_a && !deep_b && tm.static_detected(lon, lat, alt) {
+                if zone.contains(lon, lat, alt) {
                     return false;
                 }
             }
         }
         true
     }
-}
-
-/// 线段与多边形（经纬度平面，中纬等距缩放，同 zone_segment_clearance_km 口径）
-/// 各边求交 → 穿行参数区间列表（进/出成对）。端点在内 → 补 0/1。共线退化保守
-/// 并入边端点投影参数。2026-08-12 主管 rz_poly2：make_segment_check 多边形分支
-/// 用此函数替代 N=16 整段等距采样（长段短穿带漏检）。
-fn segment_polygon_bands_t(
-    lon1: f64,
-    lat1: f64,
-    lon2: f64,
-    lat2: f64,
-    vertices: &[[f64; 2]],
-) -> Vec<(f64, f64)> {
-    if vertices.len() < 3 {
-        return Vec::new();
-    }
-    let mlat = ((lat1 + lat2) / 2.0).to_radians();
-    let kx = 111.320 * mlat.cos();
-    let ky = 111.0;
-    let (ax, ay) = (lon1 * kx, lat1 * ky);
-    let (bx, by) = (lon2 * kx, lat2 * ky);
-    let (dx1, dy1) = (bx - ax, by - ay);
-    let len2 = dx1 * dx1 + dy1 * dy1;
-    if len2 < 1e-12 {
-        return Vec::new();
-    }
-    let mut ts: Vec<f64> = Vec::new();
-    let mut j = vertices.len() - 1;
-    for i in 0..vertices.len() {
-        let (cx, cy) = (vertices[j][0] * kx, vertices[j][1] * ky);
-        let (dx2, dy2) = (vertices[i][0] * kx - cx, vertices[i][1] * ky - cy);
-        let denom = dx1 * dy2 - dy1 * dx2;
-        let (rx, ry) = (cx - ax, cy - ay);
-        if denom.abs() > 1e-9 {
-            let t = (rx * dy2 - ry * dx2) / denom;
-            let u = (rx * dy1 - ry * dx1) / denom;
-            if t >= -1e-9 && t <= 1.0 + 1e-9 && u >= -1e-9 && u <= 1.0 + 1e-9 {
-                ts.push(t.clamp(0.0, 1.0));
-            }
-        } else if (rx * dy1 - ry * dx1).abs() < 1e-6 {
-            // 平行且共线：边两端点投影到段上的参数并入（重合段保守采样）
-            let te0 = ((cx - ax) * dx1 + (cy - ay) * dy1) / len2;
-            let te1 = ((cx + dx2 - ax) * dx1 + (cy + dy2 - ay) * dy1) / len2;
-            ts.push(te0.clamp(0.0, 1.0));
-            ts.push(te1.clamp(0.0, 1.0));
-        }
-        j = i;
-    }
-    if crate::config::point_in_polygon_xy(lon1, lat1, vertices) {
-        ts.push(0.0);
-    }
-    if crate::config::point_in_polygon_xy(lon2, lat2, vertices) {
-        ts.push(1.0);
-    }
-    ts.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let mut bands: Vec<(f64, f64)> = Vec::new();
-    let mut k = 0;
-    while k + 1 < ts.len() {
-        let (t0, t1) = (ts[k], ts[k + 1]);
-        if t1 - t0 > 1e-9 {
-            bands.push((t0.max(0.0), t1.min(1.0)));
-        }
-        k += 2;
-    }
-    bands
 }
 
 /// Restricted 是否按该飞行高度视为禁行墙（底部可通行语义，主管 2026-08-06）：
