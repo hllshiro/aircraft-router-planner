@@ -649,9 +649,9 @@ fn validate_aircraft(a: &AircraftInput) -> Result<(), AppError> {
             return Err(AppError::InputInvalid(InputInvalidReason::OutOfBounds));
         }
     }
-    // 巡航高度校验
+    // 巡航高度校验（0 = 贴地飞行模式，允许）
     if let Some(alt) = p.cruise_alt_m {
-        if !(100.0..=30000.0).contains(&alt) {
+        if alt < 0.0 || (alt > 0.0 && !(100.0..=30000.0).contains(&alt)) {
             return Err(AppError::InputInvalid(InputInvalidReason::OutOfBounds));
         }
     }

@@ -2159,6 +2159,36 @@ fn seg_seg_closest(
     (best_h, best_ta, best_tb)
 }
 
+/// 沿路径段等距插入中间点（不改变水平路径几何，仅增加剖面插值锚点）。
+/// Theta* 可能把无障碍直线路径简化到只剩起终点；三段式剖面需要足够中间点。
+fn subdivide_path(pts: &mut Vec<crate::path::PathPoint>, max_seg_m: f64) {
+    if pts.len() < 2 || max_seg_m <= 0.0 {
+        return;
+    }
+    let mut i = 0;
+    while i + 1 < pts.len() {
+        let a = pts[i];
+        let b = pts[i + 1];
+        let d = crate::path::haversine_m(a.lon, a.lat, b.lon, b.lat);
+        if d > max_seg_m * 1.5 {
+            let n = ((d / max_seg_m).ceil() as usize).max(2);
+            let mut new_pts = Vec::with_capacity(n - 1);
+            for k in 1..n {
+                let t = k as f64 / n as f64;
+                new_pts.push(crate::path::PathPoint::new(
+                    a.lon + (b.lon - a.lon) * t,
+                    a.lat + (b.lat - a.lat) * t,
+                    a.alt_m + (b.alt_m - a.alt_m) * t,
+                ));
+            }
+            pts.splice(i + 1..i + 1, new_pts);
+            i += n;
+        } else {
+            i += 1;
+        }
+    }
+}
+
 /// 垂直剖面（2026-08-12 主管 demo 轨迹倾斜 + 2026-08-14 起终点约束修正）：
 /// 输出路径高度从起点高度按累计水平距离线性过渡到目标高度。
 /// - **起终点 = 任务硬约束**：起点/终点锚点 = 用户设定（低于地面时已在输入侧抬到
@@ -2176,7 +2206,7 @@ fn seg_seg_closest(
 /// - 不重跑 verify：中间段高度由保底保证净空（≥ 既有 verify 高度或更高）；
 ///   起终点按用户约束（输入侧已保证 ≥ 地面）。
 fn apply_vertical_profile(
-    pts: &mut [crate::path::PathPoint],
+    pts: &mut Vec<crate::path::PathPoint>,
     start_alt: f64,
     target_alt: f64,
     cruise_alt: f64,
@@ -2191,6 +2221,10 @@ fn apply_vertical_profile(
     if pts.len() < 2 || ((target_alt - start_alt).abs() < 0.5 && !raised) {
         return;
     }
+    // 路径细分：Theta* 可能把无障碍直线简化到只剩起终点（2点），
+    // 三段式剖面无法在2点上表达爬升→巡航→下降。沿现有段等距插入中间点，
+    // 不改变水平路径几何（新点在原段直线上），仅提供足够锚点给剖面插值。
+    subdivide_path(pts, 5000.0);
     // 累计水平距离（等距投影近似，仅作剖面插值参数）
     let lat0 = pts[0].lat.to_radians();
     let kx = 111_320.0 * lat0.cos();
@@ -2317,7 +2351,7 @@ fn apply_vertical_profile(
 /// 起点→终点按累计水平距离线性过渡，地形保底 + 爬升率平滑。
 /// 不使用三段式模型，不强制巡航高度——飞机沿地形自然飞行。
 fn simple_linear_altitude(
-    pts: &mut [crate::path::PathPoint],
+    pts: &mut Vec<crate::path::PathPoint>,
     start_alt: f64,
     target_alt: f64,
     terrain: Option<&dyn TerrainSource>,
@@ -2327,6 +2361,7 @@ fn simple_linear_altitude(
     if pts.len() < 2 {
         return;
     }
+    subdivide_path(pts, 5000.0);
     let lat0 = pts[0].lat.to_radians();
     let kx = 111_320.0 * lat0.cos();
     let ky = 111_320.0;
@@ -2350,7 +2385,8 @@ fn simple_linear_altitude(
     }
     apply_climb_rate_inner(pts, max_climb_angle_deg, terrain, clearance);
     pts[0].alt_m = start_alt;
-    pts[pts.len() - 1].alt_m = target_alt;
+    let last = pts.len() - 1;
+    pts[last].alt_m = target_alt;
 }
 
 /// 地形跟随细化（方案 B，主管 2026-08-14）：沿路径各段 250m 细采样找段内
