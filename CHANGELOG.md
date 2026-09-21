@@ -9,6 +9,12 @@
 
 ## [Unreleased]
 
+### Added
+- feat(altitude): `cruise_alt_m=0` 贴地飞行模式——关闭三段式巡航高度控制，路径按线性插值 + 地形跟随 + 爬升率平滑生成，适用于贴地躲避雷达探测场景
+
+### Fixed
+- fix(altitude): 修复三段式垂直剖面巡航段归零——将 `apply_climb_rate` 合并到 `apply_vertical_profile` 内部，避免 FMM 网格离散化的近距离点对产生假爬升率连锁压低所有中间点
+
 ## [0.9.0] - 2026-09-21
 
 ### Added

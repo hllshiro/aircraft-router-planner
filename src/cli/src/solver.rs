@@ -1890,18 +1890,31 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
         if let Some((alon, alat, aalt)) = terrain_anchor {
             mid_anchors.push((alon, alat, aalt));
         }
-        apply_vertical_profile(
-            &mut pts,
-            start_alt_norm,
-            target_alt_norm,
-            alt_eff,
-            &mid_anchors,
-            terrain.as_source(),
-            opts.clearance_m,
-            opts.max_climb_deg,
-        );
-        // 强制起终点 = 用户高度（任务硬约束）：apply_vertical_profile 中 range=0
-        // 时 t=0/0 导致末点可能未降到目标高度。
+        // 垂直剖面：cruise_alt_m=0 → 贴地飞行模式（线性插值 + 地形跟随）；
+        // 否则 → 三段式（爬升→巡航→下降）+ 地形保底 + 爬升率平滑。
+        let cruise_disabled = v.profile.cruise_alt_m == Some(0.0);
+        if cruise_disabled {
+            simple_linear_altitude(
+                &mut pts,
+                start_alt_norm,
+                target_alt_norm,
+                terrain.as_source(),
+                opts.clearance_m,
+                opts.max_climb_deg,
+            );
+        } else {
+            apply_vertical_profile(
+                &mut pts,
+                start_alt_norm,
+                target_alt_norm,
+                alt_eff,
+                &mid_anchors,
+                terrain.as_source(),
+                opts.clearance_m,
+                opts.max_climb_deg,
+            );
+        }
+        // 强制起终点 = 用户高度（任务硬约束）。
         if let Some(last) = pts.last_mut() {
             last.alt_m = target_alt_norm;
         }
@@ -1917,14 +1930,6 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
             terrain.as_source(),
             opts.clearance_m,
             opts.max_climb_deg,
-        );
-        // 爬升率平滑（主管 2026-08-14 低空场景）：起终点/绕障处抬升下降近乎垂直，
-        // 固定翼巡航不可行 → 限制相邻点坡度 ≤ max_climb_angle_deg（净空优先）。
-        apply_climb_rate(
-            &mut pts,
-            opts.max_climb_deg,
-            terrain.as_source(),
-            opts.clearance_m,
         );
         // P7：发射包线到达判定（docs/技术方案 §4.2：落点 ∈ [Rmin,Rmax] ∧ 发射包线
         // 都满足才算到达）。heading/alt/环带距离 = 硬校验（不满足 → 未到达 →
@@ -2286,10 +2291,10 @@ fn apply_vertical_profile(
         // 地形保底：中间点 ≥ 地形 + 净空（2026-08-14 主管低空场景：保底余量 +100
         // 会让起点段形成"余量高台阶"（如起点 500m、地形 377m → 保底 578m，起点旁
         // 250m 内爬升 78m ≈ 17° 超过 15° 爬升率）→ 保底 = 地形 + 净空，恰为 verify
-        // 口径；更高的余量由抬升锚点（new_alt = 地形+净空+100）与 apply_climb_rate
-        // 兜底）；起终点 ≥ 地面（主管 2026-08-14 三反：起终点是起飞/降落场景，贴地
-        // 合理、不叠加净空余量——起终点是任务约束，地面是物理可达底线；起飞段允许
-        // 贴近地形，中间巡航段才保净空；输入侧已规范化）。
+        // 口径；更高的余量由抬升锚点（new_alt = 地形+净空+100）与爬升率平滑兜底）；
+        // 起终点 ≥ 地面（主管 2026-08-14 三反：起终点是起飞/降落场景，贴地合理、
+        // 不叠加净空余量——起终点是任务约束，地面是物理可达底线；起飞段允许贴近
+        // 地形，中间巡航段才保净空；输入侧已规范化）。
         if let Some(tsrc) = terrain {
             if let Sample::Land(g) = tsrc.sample_at(pts[i].lon, pts[i].lat) {
                 if i == 0 || i == pts.len() - 1 {
@@ -2301,6 +2306,51 @@ fn apply_vertical_profile(
         }
         pts[i].alt_m = h;
     }
+
+    // 爬升率平滑（原独立 apply_climb_rate 合并至此，2026-09-21 修复：
+    // 三段式设置高度后立即约束爬升率，避免 FMM 网格离散化的近距离点对
+    // （~200m）产生 87° 假爬升率 → 连锁压低 → 巡航段归零）。
+    apply_climb_rate_inner(pts, max_climb_angle_deg, terrain, clearance);
+}
+
+/// 简单线性高度插值（cruise_alt_m=0 贴地飞行模式）：
+/// 起点→终点按累计水平距离线性过渡，地形保底 + 爬升率平滑。
+/// 不使用三段式模型，不强制巡航高度——飞机沿地形自然飞行。
+fn simple_linear_altitude(
+    pts: &mut [crate::path::PathPoint],
+    start_alt: f64,
+    target_alt: f64,
+    terrain: Option<&dyn TerrainSource>,
+    clearance_m: f64,
+    max_climb_angle_deg: f64,
+) {
+    if pts.len() < 2 {
+        return;
+    }
+    let lat0 = pts[0].lat.to_radians();
+    let kx = 111_320.0 * lat0.cos();
+    let ky = 111_320.0;
+    let mut cum = vec![0.0_f64; pts.len()];
+    for i in 1..pts.len() {
+        let dx = (pts[i].lon - pts[i - 1].lon) * kx;
+        let dy = (pts[i].lat - pts[i - 1].lat) * ky;
+        cum[i] = cum[i - 1] + dx.hypot(dy);
+    }
+    let total = cum.last().copied().unwrap_or(1.0).max(1.0);
+    let clearance = clearance_m.max(1.0);
+    for i in 1..pts.len() - 1 {
+        let t = cum[i] / total;
+        let mut h = start_alt + (target_alt - start_alt) * t;
+        if let Some(tsrc) = terrain {
+            if let Sample::Land(g) = tsrc.sample_at(pts[i].lon, pts[i].lat) {
+                h = h.max(g + clearance);
+            }
+        }
+        pts[i].alt_m = h;
+    }
+    apply_climb_rate_inner(pts, max_climb_angle_deg, terrain, clearance);
+    pts[0].alt_m = start_alt;
+    pts[pts.len() - 1].alt_m = target_alt;
 }
 
 /// 地形跟随细化（方案 B，主管 2026-08-14）：沿路径各段 250m 细采样找段内
@@ -2311,7 +2361,7 @@ fn apply_vertical_profile(
 /// 又避免逐 500m 采样导致的避障段航路点过密（主管 2026-08-14 反馈：62 点）。
 /// 插入点坐标在原段直线上（纯细分，不改变水平路径形状/转弯角）；起终点保持
 /// 用户高度（任务硬约束），中间段沿地形缓爬升/下降；更高的余量由抬升锚点
-/// （new_alt = 地形+净空+100）与 apply_climb_rate 兜底。
+/// （new_alt = 地形+净空+100）兜底。
 fn terrain_follow_insert(
     pts: &mut Vec<crate::path::PathPoint>,
     terrain: Option<&dyn TerrainSource>,
@@ -2394,14 +2444,14 @@ fn terrain_follow_insert(
     }
 }
 
-/// 爬升率平滑（主管 2026-08-14：起终点/绕障处抬升下降近乎垂直，固定翼巡航不可行）：
+/// 爬升率平滑内部实现（被 apply_vertical_profile 和 simple_linear_altitude 调用）：
 /// 限制相邻路径点坡度 ≤ max_climb_angle_deg（上坡与下坡同限）。
 /// - 前向（起点→终点）：超陡爬升段压低到「前点 + tan×距离」，但不低于地形保底
 ///   （净空优先，压不低则保持保底——物理上该段只能绕飞或贴地爬升）；
 /// - 后向（终点→起点）：超陡下降段压低前点到「后点 + tan×距离」（同样不低于
 ///   地形保底；压低只会让该点净空更紧张但保底兜底，不会穿山）；
 /// - 迭代直到收敛（前向压低可能改变后向可行性）。
-fn apply_climb_rate(
+fn apply_climb_rate_inner(
     pts: &mut [crate::path::PathPoint],
     max_climb_angle_deg: f64,
     terrain: Option<&dyn TerrainSource>,
