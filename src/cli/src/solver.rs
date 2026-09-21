@@ -2061,12 +2061,6 @@ const REGION_PAD_DEG: f64 = 0.15;
 // （≈9 个默认格距；越过则判几何无解 → no_solution）。
 const RELAX_TARGET_MAX_KM: f64 = 10.0;
 
-/// P8 M5 LOS mask 静态代价场参考高度（米，MSL）：代价场多机共享，LOS 判定用
-/// 固定参考高度近似（地形遮蔽随高度变化小；verify 威胁评估仍用实际路径高度精确
-/// 判定）。默认巡航量级，与各机 start.alt_m 同量级。
-#[allow(dead_code)]
-const LOS_REF_ALT_M: f64 = 3000.0;
-
 // ==================== P6-C 多机交叉检测 ====================
 // docs/01 §7.1 方案：输出后处理检测多机路径空间交叉，检出显式告警；
 // 时间维 out-of-scope（不判是否同时到达，仅空间接近告警）。
@@ -2791,10 +2785,7 @@ fn collect_unified_zones(
     let mut warnings = Vec::new();
 
     for z in zones {
-        unified.push(Box::new(ZoneUnified {
-            zone: z.clone(),
-            traversable: false,
-        }));
+        unified.push(Box::new(ZoneUnified::new(z.clone(), false)));
     }
 
     for r in radars {
@@ -4009,7 +4000,6 @@ fn build_cost_field(
             }
         })
     };
-    let cell_deg = region.span_deg / grid as f64;
     let mut field = match &terrain {
         // 候选③：并行 + 无锁批量预取（3.71× vs 串行，对比测试 9504381 之后验证）
         TerrainHandle::Plain(t) => build_semantic_cost_field_par_local(

@@ -6,7 +6,6 @@ use crate::path::haversine_m;
 pub enum ZoneType {
     NoFly,
     Restricted,
-    Obstacle,
     Radar,
 }
 
