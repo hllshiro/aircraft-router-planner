@@ -23,6 +23,8 @@ export interface AircraftProfile {
   maximum_turn_rate_dps?: number;
   maximum_climb_rate_mps?: number;
   maximum_altitude_m?: number;
+  /** 巡航高度（米）；0 = 贴地飞行模式（关闭三段式巡航控制）；省略 = 按机型默认 */
+  cruise_alt_m?: number;
 }
 
 export interface AircraftInput {
