@@ -324,19 +324,16 @@ export function ControlPanel({
           </div>
           <div className="field-row">
             <div>
-              <label>
-                <input
-                  type="checkbox"
-                  checked={aircraft.profile?.cruise_alt_m === 0}
-                  onChange={(e) =>
-                    updateProfile({
-                      cruise_alt_m: e.target.checked ? 0 : undefined,
-                    })
-                  }
-                />
-                {' '}贴地飞行
-              </label>
-              <span className="field-hint" title="关闭三段式巡航高度控制，路径沿地形自然飞行，适用于贴地躲避雷达探测">ⓘ</span>
+              <label>巡航高度 (m)</label>
+              <input
+                type="number"
+                value={aircraft.profile?.cruise_alt_m ?? ''}
+                placeholder="留空默认，0贴地"
+                onChange={(e) => {
+                  const v = e.target.value;
+                  updateProfile({ cruise_alt_m: v === '' ? undefined : +v });
+                }}
+              />
             </div>
           </div>
           <div className="field-row">
