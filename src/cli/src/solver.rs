@@ -26,7 +26,7 @@ use crate::terrain::builtin::BuiltinSource;
 use crate::terrain::mask::{GeoMask, MaskedSource};
 use crate::terrain::{BulkPrefetch, Sample, TerrainSource};
 use crate::threat::{SphericalRadarThreat, ThreatModel, ThreatParams};
-use crate::zone::{RadarUnified, UnifiedZone, ZoneType, ZoneUnified};
+use crate::zone::{CircleZone, PolygonZone, SphereZone, UnifiedZone, ZoneType};
 
 /// 地形高度过滤的松弛量（2026-08-10）：只挡「明显高于巡航高度（+300m）」的山。
 /// 3000m 任务经过 3058m 五台山（净空不足但历史行为可过）不得被区域级过滤困住而
@@ -2785,11 +2785,18 @@ fn collect_unified_zones(
     let mut warnings = Vec::new();
 
     for z in zones {
-        unified.push(Box::new(ZoneUnified::new(z.clone(), false)));
+        match &z.shape {
+            ZoneShape::Circle { .. } => {
+                unified.push(Box::new(CircleZone::new(z)));
+            }
+            ZoneShape::Polygon { .. } => {
+                unified.push(Box::new(PolygonZone::new(z)));
+            }
+        }
     }
 
     for r in radars {
-        unified.push(Box::new(RadarUnified::new(r.clone(), threat_params.radar_inflation)));
+        unified.push(Box::new(SphereZone::new(r, threat_params.radar_inflation)));
     }
 
     for zone in &mut unified {
@@ -2831,6 +2838,70 @@ fn join_paths(segs: &[Path]) -> Path {
         }
     }
     Path::new(pts)
+}
+
+/// 线段与多边形（经纬度平面，中纬等距缩放，同 zone_segment_clearance_km 口径）
+/// 各边求交 → 穿行参数区间列表（进/出成对）。端点在内 → 补 0/1。共线退化保守
+/// 并入边端点投影参数。2026-08-12 主管 rz_poly2：make_segment_check 多边形分支
+/// 用此函数替代 N=16 整段等距采样（长段短穿带漏检）。
+fn segment_polygon_bands_t(
+    lon1: f64,
+    lat1: f64,
+    lon2: f64,
+    lat2: f64,
+    vertices: &[[f64; 2]],
+) -> Vec<(f64, f64)> {
+    if vertices.len() < 3 {
+        return Vec::new();
+    }
+    let mlat = ((lat1 + lat2) / 2.0).to_radians();
+    let kx = 111.320 * mlat.cos();
+    let ky = 111.0;
+    let (ax, ay) = (lon1 * kx, lat1 * ky);
+    let (bx, by) = (lon2 * kx, lat2 * ky);
+    let (dx1, dy1) = (bx - ax, by - ay);
+    let len2 = dx1 * dx1 + dy1 * dy1;
+    if len2 < 1e-12 {
+        return Vec::new();
+    }
+    let mut ts: Vec<f64> = Vec::new();
+    let mut j = vertices.len() - 1;
+    for i in 0..vertices.len() {
+        let (cx, cy) = (vertices[j][0] * kx, vertices[j][1] * ky);
+        let (dx2, dy2) = (vertices[i][0] * kx - cx, vertices[i][1] * ky - cy);
+        let denom = dx1 * dy2 - dy1 * dx2;
+        let (rx, ry) = (cx - ax, cy - ay);
+        if denom.abs() > 1e-9 {
+            let t = (rx * dy2 - ry * dx2) / denom;
+            let u = (rx * dy1 - ry * dx1) / denom;
+            if t >= -1e-9 && t <= 1.0 + 1e-9 && u >= -1e-9 && u <= 1.0 + 1e-9 {
+                ts.push(t.clamp(0.0, 1.0));
+            }
+        } else if (rx * dy1 - ry * dx1).abs() < 1e-6 {
+            let te0 = ((cx - ax) * dx1 + (cy - ay) * dy1) / len2;
+            let te1 = ((cx + dx2 - ax) * dx1 + (cy + dy2 - ay) * dy1) / len2;
+            ts.push(te0.clamp(0.0, 1.0));
+            ts.push(te1.clamp(0.0, 1.0));
+        }
+        j = i;
+    }
+    if crate::config::point_in_polygon_xy(lon1, lat1, vertices) {
+        ts.push(0.0);
+    }
+    if crate::config::point_in_polygon_xy(lon2, lat2, vertices) {
+        ts.push(1.0);
+    }
+    ts.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let mut bands: Vec<(f64, f64)> = Vec::new();
+    let mut k = 0;
+    while k + 1 < ts.len() {
+        let (t0, t1) = (ts[k], ts[k + 1]);
+        if t1 - t0 > 1e-9 {
+            bands.push((t0.max(0.0), t1.min(1.0)));
+        }
+        k += 2;
+    }
+    bands
 }
 
 /// Theta* 去锯齿段检查：直连 (a)→(b) 不穿任何 Zone（几何精确判定——
@@ -2897,18 +2968,72 @@ fn make_segment_check<'a>(
                 }
             }
         }
-        // 统一区域检查：遍历所有不可穿越区域，采样 N 个点判定是否穿过
+        // 统一区域检查：遍历所有不可穿越区域，解析求交 + 区间内密集采样
         for zone in unified_zones {
             if zone.is_traversable() {
                 continue;
             }
-            for i in 0..=N {
-                let t = i as f64 / N as f64;
-                let lon = lon1 + (lon2 - lon1) * t;
-                let lat = lat1 + (lat2 - lat1) * t;
-                let alt = alt1 + (alt2 - alt1) * t;
-                if zone.contains(lon, lat, alt) {
-                    return false;
+            match zone.zone_type() {
+                ZoneType::Sphere => {
+                    // 球形区域：距离采样（无解析二次方程，等距采样）
+                    for i in 0..=N {
+                        let t = i as f64 / N as f64;
+                        let lon = lon1 + (lon2 - lon1) * t;
+                        let lat = lat1 + (lat2 - lat1) * t;
+                        let alt = alt1 + (alt2 - alt1) * t;
+                        if zone.contains(lon, lat, alt) {
+                            return false;
+                        }
+                    }
+                }
+                _ => {
+                    // 圆形/多边形：解析求交 + 区间内密集采样
+                    if let Some(z) = zone.as_zone() {
+                        match &z.shape {
+                            ZoneShape::Circle { center, radius_km } => {
+                                if let Some((t1, t2)) = segment_circle_intersect_t(
+                                    lon1, lat1, lon2, lat2, center[0], center[1], *radius_km,
+                                ) {
+                                    for i in 0..=N {
+                                        let t = t1 + (t2 - t1) * i as f64 / N as f64;
+                                        let lon = lon1 + (lon2 - lon1) * t;
+                                        let lat = lat1 + (lat2 - lat1) * t;
+                                        let alt = alt1 + (alt2 - alt1) * t;
+                                        if zone.contains(lon, lat, alt) {
+                                            return false;
+                                        }
+                                    }
+                                }
+                            }
+                            ZoneShape::Polygon { vertices } => {
+                                let bands = segment_polygon_bands_t(
+                                    lon1, lat1, lon2, lat2, vertices,
+                                );
+                                for (t1, t2) in bands {
+                                    for i in 0..=N {
+                                        let t = t1 + (t2 - t1) * i as f64 / N as f64;
+                                        let lon = lon1 + (lon2 - lon1) * t;
+                                        let lat = lat1 + (lat2 - lat1) * t;
+                                        let alt = alt1 + (alt2 - alt1) * t;
+                                        if zone.contains(lon, lat, alt) {
+                                            return false;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        // 无原始 Zone 数据的区域（不应发生），回退等距采样
+                        for i in 0..=N {
+                            let t = i as f64 / N as f64;
+                            let lon = lon1 + (lon2 - lon1) * t;
+                            let lat = lat1 + (lat2 - lat1) * t;
+                            let alt = alt1 + (alt2 - alt1) * t;
+                            if zone.contains(lon, lat, alt) {
+                                return false;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -3983,21 +4108,7 @@ fn build_cost_field(
             if z.is_traversable() {
                 return false;
             }
-            match z.zone_type() {
-                ZoneType::Radar => z.contains(lon, lat, 0.0),
-                _ => {
-                    if let Some(zu) = (z as &dyn std::any::Any).downcast_ref::<ZoneUnified>() {
-                        match &zu.zone.shape {
-                            crate::config::ZoneShape::Circle { .. } => z.contains(lon, lat, 0.0),
-                            crate::config::ZoneShape::Polygon { vertices } => {
-                                crate::config::rect_intersects_polygon(rx0, ry0, rx1, ry1, vertices)
-                            }
-                        }
-                    } else {
-                        z.contains(lon, lat, 0.0)
-                    }
-                }
-            }
+            z.rect_intersects(rx0, ry0, rx1, ry1)
         })
     };
     let mut field = match &terrain {
