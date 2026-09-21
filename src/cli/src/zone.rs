@@ -44,7 +44,7 @@ pub struct CircleZone {
 impl CircleZone {
     pub fn new(zone: &Zone) -> Self {
         let ZoneShape::Circle { center, radius_km } = &zone.shape else {
-            panic!("CircleZone::new called with non-circle zone");
+            unreachable!("CircleZone::new called with non-circle zone");
         };
         Self {
             zone: zone.clone(),
@@ -124,7 +124,7 @@ pub struct PolygonZone {
 impl PolygonZone {
     pub fn new(zone: &Zone) -> Self {
         let ZoneShape::Polygon { .. } = &zone.shape else {
-            panic!("PolygonZone::new called with non-polygon zone");
+            unreachable!("PolygonZone::new called with non-polygon zone");
         };
         Self {
             zone: zone.clone(),
@@ -140,7 +140,7 @@ impl UnifiedZone for PolygonZone {
         };
         let vertices = match &self.zone.shape {
             ZoneShape::Polygon { vertices } => vertices,
-            _ => return false,
+            _ => unreachable!(),
         };
         if !crate::config::point_in_polygon(&g, vertices) {
             return false;
@@ -178,7 +178,7 @@ impl UnifiedZone for PolygonZone {
     fn rect_intersects(&self, rx0: f64, ry0: f64, rx1: f64, ry1: f64) -> bool {
         let vertices = match &self.zone.shape {
             ZoneShape::Polygon { vertices } => vertices,
-            _ => return false,
+            _ => unreachable!(),
         };
         crate::config::rect_intersects_polygon(rx0, ry0, rx1, ry1, vertices)
     }

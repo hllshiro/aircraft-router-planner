@@ -2856,7 +2856,7 @@ fn segment_polygon_bands_t(
     }
     let mlat = ((lat1 + lat2) / 2.0).to_radians();
     let kx = 111.320 * mlat.cos();
-    let ky = 111.0;
+    let ky = 111.32;
     let (ax, ay) = (lon1 * kx, lat1 * ky);
     let (bx, by) = (lon2 * kx, lat2 * ky);
     let (dx1, dy1) = (bx - ax, by - ay);
@@ -2894,8 +2894,14 @@ fn segment_polygon_bands_t(
     ts.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let mut bands: Vec<(f64, f64)> = Vec::new();
     let mut k = 0;
-    while k + 1 < ts.len() {
-        let (t0, t1) = (ts[k], ts[k + 1]);
+    while k < ts.len() {
+        let t0 = ts[k];
+        let t1 = if k + 1 < ts.len() {
+            ts[k + 1]
+        } else {
+            // 奇数个交点：保守地将区间延伸到线段终点
+            1.0
+        };
         if t1 - t0 > 1e-9 {
             bands.push((t0.max(0.0), t1.min(1.0)));
         }
@@ -2986,7 +2992,7 @@ fn make_segment_check<'a>(
                         }
                     }
                 }
-                _ => {
+                ZoneType::NoFly | ZoneType::Restricted => {
                     // 圆形/多边形：解析求交 + 区间内密集采样
                     if let Some(z) = zone.as_zone() {
                         match &z.shape {
