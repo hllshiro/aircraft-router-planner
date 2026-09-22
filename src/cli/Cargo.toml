@@ -1,6 +1,6 @@
 # AircraftRouterPlanner 核心 CLI（Phase 1 核心骨架）
 #
-# 依赖说明（技术方案 3.2/3.2.1）：
+# 依赖说明：
 #   - 核心 8 依赖 + 数据源 3 依赖（geotiff/dted2/ruzstd），全部纯 Rust 零 C 依赖
 #   - 静态编译红线：禁 blas/proj/flate2 C 后端（红线注释见 phase0/Cargo.toml 同款）
 #   - 版本锁定（2026-08 crates.io 实测）：
@@ -27,7 +27,7 @@ serde.workspace = true
 serde_json.workspace = true
 schemars.workspace = true
 thiserror.workspace = true
-# 数据源（发布版必含，技术方案 3.2 C）
+# 数据源（发布版必含）
 geotiff = "0.1"
 tiff = "0.9"
 dted2 = "1.0.0"

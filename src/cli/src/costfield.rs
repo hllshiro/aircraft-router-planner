@@ -1,4 +1,4 @@
-//! 代价场 + FMM 粗层传播（技术方案 4.4 定案主方案；迁移自 phase0 fmm.rs，B1 实测）。
+//! 代价场 + FMM 粗层传播（迁移自 phase0 fmm.rs，B1 实测）。
 //!
 //! - `CostField`：2D 代价场（行优先，cost ≥ 1）；
 //! - `fmm_propagate`：Godunov 迎风差分 + BinaryHeap 窄带，O(NlogN)，确定性；

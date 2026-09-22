@@ -1,4 +1,4 @@
-//! 地形数据源（技术方案 4.3 TerrainSource trait）。
+//! 地形数据源（TerrainSource trait）。
 //!
 //! 实现：SRTM/HGT（自研 .hgt）、GeoTIFF（geotiff）、DTED/DTED2（dted2）、
 //! 自建紧凑格式（16-bit 分块差分 + ruzstd，S9）。

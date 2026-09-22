@@ -50,7 +50,7 @@ pnpm demo:build               # build frontend
 ## Conventions
 
 - CLI help style must be `arpcli` / `arpcli help` — **no `--help`**. Pipeline: `arpcli plan --file <file> --out <path>` reads task JSON from file, writes result JSON to file.
-- On every feature/fix: must update the matching `docs/NN` doc's "与设计的差异/占位" section + `CHANGELOG.md` (Keep a Changelog). `docs/技术方案.md` + code win over status docs on conflict.
+- On every feature/fix: must update the matching `docs/NN` doc's "与设计的差异/占位" section + `CHANGELOG.md` (Keep a Changelog). code wins over status docs on conflict.
 - Version source of truth: `[workspace.package] version` in root `Cargo.toml`; release tags must be `v<version>`; see `docs/发版流程.md` for release process.
 - Windows MSVC builds must be static CRT (`+crt-static`) — exe must not depend on VCRUNTIME140.dll (`src/cli/check_pe_deps.py` audits imports).
 

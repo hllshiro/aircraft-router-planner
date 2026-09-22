@@ -64,8 +64,7 @@
 
 ### Changed
 - **Breaking**: 移除 `ZoneType` 枚举和 `zone_type` 字段，zone 行为由 `alt_min_m`/`alt_max_m` 决定：两者都不存在 → 全高度墙（禁飞/障碍）；任一存在 → 高度层禁入（限飞区）。
-- 移除所有测试用例（src/cli/src 内联测试、src/cli/tests/、phase0/），测试覆盖范围分析文档：`docs/测试覆盖范围分析.md`
-- 移除 phase0 历史原型目录
+- 移除所有测试用例
 - 移除 scripts/check.sh、perf_regress.sh、gen_overview_test.py
 
 ## [0.4.0] - 2026-09-15

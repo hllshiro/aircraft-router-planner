@@ -1,4 +1,4 @@
-//! 错误类型与 JSON 错误码（技术方案 4.2 输出 status 契约）。
+//! 错误类型与 JSON 错误码（输出 status 契约）。
 //!
 //! 输出契约四态：`success` / `degraded_timeout` / `no_solution` / `input_invalid`。
 //! 任何错误最终以 JSON 形式从 stdout 输出（管道形态），硬故障（IO/内部）才走 stderr。

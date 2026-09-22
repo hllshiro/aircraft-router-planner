@@ -681,7 +681,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
             let mut raw_segs: Vec<Path> = Vec::new();
             let mut no_solution = false;
             // P7：环带目标集只作用于最后一段（→ target）；有武器时 FMM 传播
-            // 到环带 [Rmin, Rmax] 内 T 最小可达 cell 即停（docs/技术方案 §4.2）。
+            // 到环带 [Rmin, Rmax] 内 T 最小可达 cell 即停（§4.2）。
             let ring_range: Option<[f64; 2]> =
                 v.weapon.as_ref().and_then(|w| w.effective_range_km());
             let seg_total = seg_ends.windows(2).len();
@@ -967,7 +967,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                 let mut turn_exempt: Vec<(f64, f64)> = Vec::new();
                 let mut seg_warnings = Vec::new();
                 let mut entry_heading: Option<f64> = None;
-                // P7：发射包线终端航向下放平滑级（docs/技术方案 §4.2：终端姿态不只是
+                // P7：发射包线终端航向下放平滑级（§4.2：终端姿态不只是
                 // 到达判据，作为平滑级输入）——最后一段末点 heading_deg = 窗口中心，
                 // Dubins 拟合天然吃终端 pose（docs/08：heading 已支持）。不提供 heading
                 // 窗口 → 不约束（现状点目标语义）。
@@ -1840,7 +1840,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
         // 距离线性过渡到目标高度（起终点不同高时轨迹呈现爬升/下降，而非恒为
         // 巡航高度的水平直线）；地形可用时保底（下降段不穿山）。起终点同高 →
         // 曲线水平，行为与既往一致（含受限区剖面/抬升巡航语义）。
-        // P7：发射包线高度窗口优先（docs/技术方案 §4.2：区域与包线冲突时以包线
+        // P7：发射包线高度窗口优先（§4.2：区域与包线冲突时以包线
         // 优先）——终点目标高度 clamp 到 [lo, hi] 窗口（若提供）。
         let target_alt_eff = v
             .weapon
@@ -1896,13 +1896,13 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
             terrain.as_source(),
             opts.clearance_m,
         );
-        // P7：发射包线到达判定（docs/技术方案 §4.2：落点 ∈ [Rmin,Rmax] ∧ 发射包线
+        // P7：发射包线到达判定（§4.2：落点 ∈ [Rmin,Rmax] ∧ 发射包线
         // 都满足才算到达）。heading/alt/环带距离 = 硬校验（不满足 → 未到达 →
         // no_solution，宁可不给路径，不给违禁路径）；speed 是常量输入（规划不可
         // 调）→ 软校验（degradation 告警）。无武器 / 无 envelope → 不校验（现状
         // 点目标语义，零回归）。
         if let Some(w) = &v.weapon {
-            // Rmin 未定（lo ≤ 0）→ 显式告警（docs/技术方案 §4.2：不静默当无下限处理）
+            // Rmin 未定（lo ≤ 0）→ 显式告警（§4.2：不静默当无下限处理）
             if let Some([lo, _]) = w.effective_range_km() {
                 if lo <= 0.0 {
                     degradations.push(format!(
@@ -1972,7 +1972,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                 emit_classified(
                     &v.id,
                     "geometrically_impossible",
-                    "launch envelope not satisfied (docs/技术方案 §4.2)",
+                    "launch envelope not satisfied (§4.2)",
                     &mut degradations,
                 );
                 out_aircraft.push(AircraftOutput {
@@ -2456,7 +2456,7 @@ pub(crate) fn detect_multi_aircraft_crossings(aircraft: &mut [AircraftOutput]) {
 const REGION_CIRCLE_MARGIN_DEG: f64 = 0.03;
 
 /// P7：环带目标集——在距目标 ∈ [rmin_km, rmax_km] 的网格 cell 中选 FMM 到达时间
-/// 最小的可达 cell（等价"传播到环带即停"，docs/技术方案 §4.2）。环带超出 region
+/// 最小的可达 cell（等价"传播到环带即停"，§4.2）。环带超出 region
 /// 的 cell 自然 clip（cell 索引在 grid 内）。环带内无可达 → None。
 fn ring_target_cell(
     res: &crate::costfield::FmmResult,
@@ -2493,7 +2493,7 @@ fn heading_in_window(h: f64, lo: f64, hi: f64) -> bool {
 }
 
 /// P7：heading 窗口中心（顺时针中点，归一到 [0,360)）。供 Dubins 终端 pose 下放
-/// （docs/技术方案 §4.2：终端姿态不只是到达判据，作为平滑级输入）。
+/// （§4.2：终端姿态不只是到达判据，作为平滑级输入）。
 fn heading_window_center(lo: f64, hi: f64) -> f64 {
     (lo + (hi - lo).rem_euclid(360.0) / 2.0).rem_euclid(360.0)
 }

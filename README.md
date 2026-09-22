@@ -15,7 +15,7 @@
 │   ├── convert/    # 内部地形转换工具（arp-convert：外部格式 → ARPK1；不随核心 CLI 发布，随用随编）
 │   └── demo/       # 开发期可视化工具（server: Axum 后端 / web: React+Three.js 前端）
 ├── phase0/         # Phase 0 性能原型与基准 crate（历史，b1–b5 可复跑，见 phase0/README.md）
-├── docs/           # 技术文档集（技术方案.md 权威设计 + 01–11 实现现状）
+├── docs/           # 技术文档集
 ├── scripts/        # release.js / check.js / start-demo.js 等门禁与发布脚本
 └── data/ install/  # gitignore：地形/掩膜数据与发布包，需另行准备
 ```
@@ -45,8 +45,7 @@ pnpm check:quick               # 快速检查（跳过回归套件）
 
 ## 文档
 
-- 技术方案（权威设计蓝图）：[docs/技术方案.md](docs/技术方案.md)
-- 实现现状文档集入口：[docs/README.md](docs/README.md)
+- 实现现状文档集：[docs/README.md](docs/README.md)
 - 输入/输出 JSON 契约：[docs/02-输入输出契约.md](docs/02-输入输出契约.md)
 - 构建/依赖/发布：[docs/11-工程化与构建.md](docs/11-工程化与构建.md)
 - Demo 可视化：[docs/09-演示应用.md](docs/09-演示应用.md) / [src/demo/README.md](src/demo/README.md)
