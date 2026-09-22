@@ -701,7 +701,7 @@ impl TerrainSource for BuiltinSource {
 
 // ==================== Writer（测试/开发期工具；raw 块，zstd 块由开发期脚本产出） ====================
 
-/// 生成 ARPK1 字节（raw 块，供测试/工具；压缩块由 phase0 脚本 pyzstd 产出）。
+/// 生成 ARPK1 字节（raw 块，供测试/工具）。
 /// `h`：行优先 i16 高度（rows × cols）。
 pub fn write_pack_raw(
     rows: usize,

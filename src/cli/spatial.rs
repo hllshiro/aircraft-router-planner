@@ -2,7 +2,7 @@
 //!
 //! - `RadarIndex`：雷达（膨胀后球体投影圆）R-tree，范围查询 + 最近邻；
 //! - `CircleNoFlyIndex`：圆形禁飞/限飞区 R-tree；多边形禁飞区走线性扫
-//!   （config::zone_contains），Phase 1 场景规模线性可接受。
+//!   （config::zone_contains），场景规模线性可接受。
 //!
 //! 确定性（13 轮共识热路径）：查询结果按 (id) 排序输出，迭代序与插入序无关。
 

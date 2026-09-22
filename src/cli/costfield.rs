@@ -1,4 +1,4 @@
-//! 代价场 + FMM 粗层传播（迁移自 phase0 fmm.rs，B1 实测）。
+//! 代价场 + FMM 粗层传播（B1 实测）。
 //!
 //! - `CostField`：2D 代价场（行优先，cost ≥ 1）；
 //! - `fmm_propagate`：Godunov 迎风差分 + BinaryHeap 窄带，O(NlogN)，确定性；
@@ -6,9 +6,9 @@
 //! - `synthetic_cost_field`：测试用合成场（平滑地形 + 雷达球 + 禁飞块）；
 //! - `build_semantic_cost_field`：空洞分层语义代价场（Land/Water/Lake 基础 1.0、
 //!   NoData 5x 初值、OOB 禁行墙，主管 2026-08-04 拍板）；
-//! - Phase 2 以真实威胁/地形构建代价场（本模块只做传播骨架）。
+//! - 以真实威胁/地形构建代价场（本模块只做传播骨架）。
 //!
-//! Phase 0 实测（docs/10 §8 标定值）：128² 单次传播 2.62ms，常数 11-12.5ns/op。
+//! 实测（docs/10 §8 标定值）：128² 单次传播 2.62ms，常数 11-12.5ns/op。
 
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
@@ -48,7 +48,7 @@ impl CostField {
     }
 }
 
-/// 合成代价场（测试用，Phase 0 B1 语义）：平滑地形 + 雷达高代价球 + 禁飞区矩形块。
+/// 合成代价场（测试用）：平滑地形 + 雷达高代价球 + 禁飞区矩形块。
 /// `cell_m`：网格单元边长（米），把公里级障碍参数换算成格数。
 pub fn synthetic_cost_field(rows: usize, cols: usize, cell_m: f64, seed: u64) -> CostField {
     use rand::{RngExt, SeedableRng};

@@ -1,4 +1,4 @@
-//! 端到端 solver（Phase 4 M1）：把 Phase 0-3 库层组件串成主流程。
+//! 端到端 solver：把库层组件串成主流程。
 //!
 //! parse → validate（main）→ TerrainSource（ARPK1/无地形）→ 语义代价场
 //! （Land/Water/NoData/NODATA 5x + Zone 硬墙 INF）→ FMM → 回溯 → 平滑链
@@ -62,7 +62,7 @@ enum InnerSource {
 ///   （候选③，3.71×，对比测试验证）；
 /// - `External`/`MaskedExternal`：外部格式直读（GeoTIFF/DTED/SRTM，`open_source` 分派
 ///   对应解析库，2026-08-11 主管：外部格式不需要转换）——无 BulkPrefetch → 带锁采样；
-/// - 掩膜包装（Phase 2 水体判定）：海洋 → Sample::Water（0 高程）、内陆湖 → Sample::Lake(DEM)、
+/// - 掩膜包装（水体判定）：海洋 → Sample::Water（0 高程）、内陆湖 → Sample::Lake(DEM)、
 /// 陆地 → 委托内层；平滑链/代价场统一走 TerrainSource/BulkPrefetch 抽象。
 enum TerrainHandle {
     None,
@@ -110,9 +110,9 @@ struct AircraftSpec {
     alt_m: f64,
     /// 每机目标高度（2026-08-12 垂直剖面：路径终点高度；来自 aircraft.target.alt_m）。
     target_alt_m: f64,
-    /// 机型配置（Phase 4 M4：平滑参数派生输入）。
+    /// 机型配置（平滑参数派生输入）。
     profile: crate::config::AircraftProfile,
-    /// 中途必经点（Phase 4 M5：start → mid[0..] → target 分段拼接）。
+    /// 中途必经点（start → mid[0..] → target 分段拼接）。
     mid_waypoints: Vec<Geo>,
     /// 必经点高度（P8 M2：与 mid_waypoints 对齐；垂直剖面分段锚点，缺省同 start 无效果）。
     mid_alts: Vec<f64>,

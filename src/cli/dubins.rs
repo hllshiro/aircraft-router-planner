@@ -1,4 +1,4 @@
-//! Dubins 路径基元（Phase 0 S6 / B5 基准）。
+//! Dubins 路径基元。
 //!
 //! 实现 CSC 四类型（LSL / RSR / LSR / RSL）最短路径解析求解 + CCC（RLR/LRL）
 //! 三圆弧兜底（2026-08-13 P9 T2）：

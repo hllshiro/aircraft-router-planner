@@ -43,7 +43,7 @@ pub struct AircraftInput {
     pub start: Waypoint,
     /// 目标点（必填）
     pub target: Waypoint,
-    /// 中途必经点（Phase 4 M5 每机独立序列）：start → mid[0..] → target。
+    /// 中途必经点（每机独立序列）：start → mid[0..] → target。
     /// 分段 FMM（共享代价场）→ 拼接 → 整路径平滑复验。alt_m 为垂直剖面分段锚点（起→必经点→终点按段内比例插值）。
     #[serde(default)]
     pub mid_waypoints: Vec<Waypoint>,
@@ -150,7 +150,7 @@ pub struct Zone {
 }
 
 impl Zone {
-    /// 是否代价场硬墙（Phase 4 M2）：无高度区间的区域为全高度禁入；
+    /// 是否代价场硬墙：无高度区间的区域为全高度禁入；
     /// 有高度区间的区域为高度层禁入（区间外可穿越），不画墙。
     pub fn is_wall(&self) -> bool {
         self.alt_min_m.is_none() && self.alt_max_m.is_none()
@@ -641,7 +641,7 @@ fn validate_aircraft(a: &AircraftInput) -> Result<(), AppError> {
     Ok(())
 }
 
-/// 点是否在禁飞/限飞区内部（圆 / 多边形；水平几何，高度层判定 Phase 4 M2）。
+/// 点是否在禁飞/限飞区内部（圆 / 多边形；水平几何，高度层判定）。
 pub(crate) fn zone_contains(z: &Zone, p: &Geo) -> bool {
     match &z.shape {
         ZoneShape::Circle { center, radius_km } => {
@@ -655,7 +655,7 @@ pub(crate) fn zone_contains(z: &Zone, p: &Geo) -> bool {
     }
 }
 
-/// 射线法点在多边形内（经纬度平面近似，Phase 1 足够——区域校验用途）。
+/// 射线法点在多边形内（经纬度平面近似，区域校验用途）。
 pub(crate) fn point_in_polygon(p: &Geo, vertices: &[[f64; 2]]) -> bool {
     point_in_polygon_xy(p.lon, p.lat, vertices)
 }
@@ -893,7 +893,7 @@ fn on_seg2(px: f64, py: f64, ax: f64, ay: f64, bx: f64, by: f64) -> bool {
         && py <= ay.max(by) + EPS
 }
 
-/// 点是否在 Zone 内且高度落入禁入区间 [alt_min, alt_max]（Phase 4 M2 高度层）。
+/// 点是否在 Zone 内且高度落入禁入区间 [alt_min, alt_max]。
 /// - NoFly/Obstacle（全高度禁入）或未提供高度区间 → 几何命中即禁入；
 /// - Restricted：高度一律 MSL 直比（v0.21 起无 AGL 语义）。
 pub(crate) fn zone_contains_at(z: &Zone, p: &Geo, alt_m: f64) -> bool {

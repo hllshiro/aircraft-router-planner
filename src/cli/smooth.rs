@@ -1,4 +1,4 @@
-//! Phase 3 输出美化链（九轮链序修正 + 十轮复验清单）。
+//! 输出美化链（九轮链序修正 + 十轮复验清单）。
 //!
 //! 默认链序：Theta* 去锯齿 → Dubins/样条拟合 → 贪心抽稀 → 弦高/运动学复验；
 //! 优先级：安全（不撞山/不越禁飞） > 运动学约束（机动可飞） > 美化（平滑/抽稀）。
@@ -6,7 +6,7 @@
 //! `smoothing_failed`（宁丑勿违，不静默交付违规路径）。
 //!
 //! 本模块为纯几何后处理：输入折线路径（经纬度+高度），输出平滑路径；
-//! 与 Phase 2 细层搜索解耦，地形净空/禁飞检查通过注入接口接入。
+//! 与细层搜索解耦，地形净空/禁飞检查通过注入接口接入。
 
 use crate::config::{AircraftType, DefaultParams, AircraftProfile};
 use crate::dubins::dubins_path;
@@ -23,13 +23,13 @@ const DUBINS_CHORD_TOL_M: f64 = 1000.0;
 /// 运动学/地形/禁飞仍严格复验。
 const CATMULL_CHORD_TOL_M: f64 = 500.0;
 
-/// 平滑器参数（Phase 0 标定前用保守初值，参数化可调；标定项见 docs/10 §8）。
+/// 平滑器参数（参数化可调；标定项见 docs/10 §8）。
 #[derive(Debug, Clone)]
 pub struct SmoothOptions {
-    /// 机型（Phase 4 机型分流；旋翼机可悬停/极小转弯半径——急转/垂直机动合法，
+    /// 机型（旋翼机可悬停/极小转弯半径——急转/垂直机动合法，
     /// 复验按机型放宽，链不拟合 Dubins 圆弧）。
     pub aircraft_type: AircraftType,
-    /// 抽稀弦高容差（米）。Phase 0 标定项，初值 100m（粗层 1-2km 格距的 ~1/10）。
+    /// 抽稀弦高容差（米）。初值 100m（粗层 1-2km 格距的 ~1/10）。
     pub chord_tol_m: f64,
     /// 最小转弯半径（米，Dubins 拟合 + 运动学复验；仅固定翼）。
     pub turn_radius_m: f64,
@@ -60,7 +60,7 @@ impl Default for SmoothOptions {
     }
 }
 
-/// Phase 4 M4：机型分流参数派生（AircraftProfile → SmoothOptions + A6 物理下限）。
+/// 机型分流参数派生（AircraftProfile → SmoothOptions + A6 物理下限）。
 ///
 /// 派生规则（A6 自洽 + 八轮共识缺省落默认参数表）：
 /// - 最大速度 v：`maximum_speed_mps` → 机型默认
@@ -769,15 +769,15 @@ pub struct VerifyReport {
     pub warnings: Vec<String>,
 }
 
-/// 复验上下文：地形净空 + 禁飞/限飞包含 + 雷达威胁（接口化；Phase 4 机型接入后扩展）。
+/// 复验上下文：地形净空 + 禁飞/限飞包含 + 雷达威胁。
 #[derive(Default)]
 pub struct VerifyContext<'a> {
     pub terrain: Option<&'a dyn crate::terrain::TerrainSource>,
     pub nofly: Option<&'a crate::spatial::CircleIndex>,
-    /// Phase 4 M2 高度层：完整 Zone 语义（水平 + [alt_min, alt_max] + AGL 换算）。
+    /// 完整 Zone 语义（水平 + [alt_min, alt_max] + AGL 换算）。
     /// 提供时优先于 nofly（nofly 仅水平圆快查）；None 时回退 nofly。
     pub zones: Option<&'a [crate::config::Zone]>,
-    /// Phase 4 M3 雷达威胁模型：累计探测概率超 P_cross → 软性告警（degradation，不阻断平滑）。
+    /// 雷达威胁模型：累计探测概率超 P_cross → 软性告警（degradation，不阻断平滑）。
     pub threat: Option<&'a dyn crate::threat::ThreatModel>,
     /// Zone 硬墙（NoFly/Obstacle）水平膨胀距离（m；主管 2026-08-06：绕飞贴边→考虑
     /// 飞机机动——绕行需留物理转弯空间）。段到墙净距 < 该值即判定不合法；0 = 不膨胀。
@@ -801,7 +801,7 @@ pub struct VerifyContext<'a> {
 /// - 转角：相邻段航向差 ≤ opts.max_turn_deg（仅固定翼）；
 /// - 爬升角：段高度差/水平距离 ≤ tan(max_climb_deg)（仅固定翼）；
 /// - 弦高：相对 `reference`（美化前）逐点弦高 ≤ opts.chord_tol_m（几何逼近误差）；
-/// - A6：`phys_min_radius_m` 提供时校验 r_min ≥ phys_min_radius_m（参数化，Phase 4 接入）。
+/// - A6：`phys_min_radius_m` 提供时校验 r_min ≥ phys_min_radius_m（参数化）。
 /// 段-圆水平相交参数区间（解析二次方程，局部等距投影）。返回 Some((t1,t2))
 /// 当相交区间与 [0,1] 有重叠（含边界接触，保守）；否则 None。
 /// 统一 check（Theta* 拉直）与 verify 的圆判定口径——此前 check 用净距

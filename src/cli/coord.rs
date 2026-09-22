@@ -55,7 +55,7 @@ impl Ellipsoid {
     }
 }
 
-/// 基准面：Phase 1 椭球级基准（无 7 参数地心变换；跨基准转换属开发期预处理）。
+/// 基准面：椭球级基准（无 7 参数地心变换；跨基准转换属开发期预处理）。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Datum {
     Wgs84,
@@ -118,7 +118,7 @@ impl Geo {
 pub enum VerticalDatum {
     /// 椭球高（默认，内置数据契约）
     Ellipsoid,
-    /// EGM96 大地水准面（需外部偏移表，Phase 1 无表时报数据错误）
+    /// EGM96 大地水准面（需外部偏移表，无表时报数据错误）
     Egm96,
 }
 
@@ -297,7 +297,7 @@ impl WebMercator {
 
 // ==================== 近场 ENU ====================
 
-/// 近场 ENU（局部东-北-上，原点为任务锚点）。Phase 1 用球面近似（R=a），
+/// 近场 ENU（局部东-北-上，原点为任务锚点）。用球面近似（R=a），
 /// 覆盖近场（≤10km 起降/近场基元）误差 ≤米级；远场应切换主 TM 投影面。
 #[derive(Debug, Clone, Copy)]
 pub struct EnuFrame {
@@ -330,7 +330,7 @@ impl EnuFrame {
 
 // ==================== 输出投影 codec ====================
 
-/// 输出投影选择（config 声明，Phase 1 提供四种 + 自定义 TM）。
+/// 输出投影选择（config 声明，提供四种 + 自定义 TM）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputProjection {
     LonLat,

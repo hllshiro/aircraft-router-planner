@@ -14,9 +14,8 @@
 │   │   └── examples/# 开发期调试工具
 │   ├── convert/    # 内部地形转换工具（arp-convert：外部格式 → ARPK1；不随核心 CLI 发布，随用随编）
 │   └── demo/       # 开发期可视化工具（server: Axum 后端 / web: React+Three.js 前端）
-├── phase0/         # Phase 0 性能原型与基准 crate（历史，b1–b5 可复跑，见 phase0/README.md）
 ├── docs/           # 技术文档集
-├── scripts/        # release.js / check.js / start-demo.js 等门禁与发布脚本
+├── scripts/        # release.js / start-demo.js 等发布脚本
 └── data/ install/  # gitignore：地形/掩膜数据与发布包，需另行准备
 ```
 
@@ -39,8 +38,7 @@ target/release/arp-convert convert <in.tif> <out.arpack>
 
 # 测试与全量门禁
 pnpm test                      # 单元测试
-pnpm check                     # 构建 + 全套回归 + 静态红线
-pnpm check:quick               # 快速检查（跳过回归套件）
+
 ```
 
 ## 文档

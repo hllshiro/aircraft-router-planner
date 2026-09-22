@@ -14,7 +14,7 @@ Deterministic 3D aircraft route planning CLI (Rust 2024 edition): FMM + semantic
 
 ## Workspace layout
 
-- `src/cli/` — the product (lib+bin, package `arpcli`). All real work happens here. Entry: `src/cli/src/lib.rs`.
+- `src/cli/` — the product (lib+bin, package `arpcli`). All real work happens here. Entry: `src/cli/lib.rs`.
 - `src/convert/` — internal `arp-convert` terrain tool; NOT shipped, build on demand.
 - `src/demo/server` (`demo-server`, Axum) + `src/demo/web` (React/Vite, pnpm, NOT a workspace member) — dev visualization only, not in release. `demo-server` calls the CLI via stdin/stdout pipe; `ARP_CLI` env var overrides CLI path.
 - `data/` and `install/` are gitignored (large terrain/mask files).
@@ -25,8 +25,7 @@ Deterministic 3D aircraft route planning CLI (Rust 2024 edition): FMM + semantic
 pnpm cli:build               # cargo build --release -p arpcli (the product)
 pnpm test                     # cargo test --lib (unit tests only)
 pnpm test:all                 # cargo test --workspace
-pnpm check                    # build + crash_suite + determinism + dependency red-line (full gate)
-pnpm check:quick              # quick check (skip regression suite)
+
 pnpm demo:server              # cargo run --release -p demo-server
 pnpm demo:dev                 # dev frontend (Vite :5173)
 pnpm demo:build               # build frontend
@@ -52,7 +51,7 @@ pnpm demo:build               # build frontend
 - CLI help style must be `arpcli` / `arpcli help` — **no `--help`**. Pipeline: `arpcli plan --file <file> --out <path>` reads task JSON from file, writes result JSON to file.
 - On every feature/fix: must update the matching `docs/NN` doc's "与设计的差异/占位" section + `CHANGELOG.md` (Keep a Changelog). code wins over status docs on conflict.
 - Version source of truth: `[workspace.package] version` in root `Cargo.toml`; release tags must be `v<version>`; see `docs/发版流程.md` for release process.
-- Windows MSVC builds must be static CRT (`+crt-static`) — exe must not depend on VCRUNTIME140.dll (`src/cli/check_pe_deps.py` audits imports).
+- Windows MSVC builds must be static CRT (`+crt-static`) — exe must not depend on VCRUNTIME140.dll.
 
 ## opencode.json custom commands
 

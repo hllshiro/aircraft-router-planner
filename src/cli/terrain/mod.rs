@@ -111,7 +111,7 @@ impl Sample {
     /// - Land：地形遮挡由高度判定（`z <= height`），本方法不返回结论；
     /// - Water/Lake：水面不遮挡（无地形遮蔽）；
     /// - NoData：不确定区间保守端 → 视为不遮挡（探测概率高估 → 威胁高估 → 路径避开，
-    ///   与高代价通行方向一致；修正 Phase 0"空洞不遮挡=非保守"的低估问题）；
+    ///   与高代价通行方向一致）；
     /// - OutOfBounds：同 NoData（2026-08-11 放开输入点限制）→ 不遮挡。
     /// - Forbidden：禁行硬墙 → 遮挡。
     pub fn los_unblocked(&self) -> bool {
@@ -277,10 +277,10 @@ fn open_dir_source(dir: &Path) -> Result<Box<dyn TerrainSource>, AppError> {
 /// - `Land(h)` 且 `z <= h` → 地形遮挡（blocked）；
 /// - `Water` / `Lake` → 水面不遮挡；
 /// - `NoData` → 不确定区间保守端：不遮挡（探测概率高估 → 威胁高估 → 路径避开，
-///   与 NODATA 高代价通行方向一致；修正 Phase 0"空洞不遮挡=非保守"的低估问题）；
+///   与 NODATA 高代价通行方向一致）；
 /// - `OutOfBounds` → 同 NoData：不遮挡（2026-08-11 放开输入点限制）。
 ///
-/// 与 Phase 0 原型 `Terrain::ray_blocked_ll` 的差别：原型空洞/出界一律视为不遮挡，
+/// 与原型 `Terrain::ray_blocked_ll` 的差别：原型空洞/出界一律视为不遮挡，
 /// 本函数为正式语义（NoData/OOB 保守端不遮挡）。
 pub fn los_blocked<T: TerrainSource + ?Sized>(
     src: &T,
