@@ -10,16 +10,9 @@
 ## [Unreleased]
 
 ### Added
-- feat(altitude): `cruise_alt_m=0` 贴地飞行模式——关闭三段式巡航高度控制，路径按线性插值 + 地形跟随 + 爬升率平滑生成，适用于贴地躲避雷达探测场景
-
-### Fixed
-- fix(altitude): 修复三段式垂直剖面巡航段归零——将 `apply_climb_rate` 合并到 `apply_vertical_profile` 内部，避免 FMM 网格离散化的近距离点对产生假爬升率连锁压低所有中间点
-
-## [0.9.0] - 2026-09-21
-
-### Added
 - feat(radar): 雷达绝对避让硬墙化——路径进入雷达探测范围（radius_km × inflation × 1.1，上限 100km）即判定为不可行，代价场置 INF 阻断，确保路径不会穿越雷达区域（仅地形遮蔽窗口可例外绕行）
 - feat(altitude): 三段式垂直剖面——路径自动分为爬升段、巡航段、降落段；巡航高度由新增 `cruise_alt_m` 参数指定（用户优先），未指定时按机型默认值（固定翼 10000m / 旋翼 1000m）
+- feat(altitude): `cruise_alt_m=0` 贴地飞行模式——关闭三段式巡航高度控制，路径按线性插值 + 地形跟随 + 爬升率平滑生成，适用于贴地躲避雷达探测场景
 - feat(zone): 统一区域模型——定义 `UnifiedZone` trait，三种实现：`CircleZone`（圆形区域）、`PolygonZone`（多边形区域）、`SphereZone`（球形区域，原雷达区域）；每种类型独立实现点包含判定、矩形相交判定、解析几何求交
 - feat(zone): `rect_intersects` trait 方法——各区域类型自行实现矩形相交检测，消除 `build_cost_field` 中的 downcast，保证任何分辨率下格子贴墙判定不漏窄带
 
@@ -31,6 +24,7 @@
 - CLI threat.rs: NoData 区域不再遮挡雷达信号（保守策略，假设雷达看穿数据空洞）
 
 ### Fixed
+- fix(altitude): 三段式垂直剖面巡航段归零——将 `apply_climb_rate` 合并到 `apply_vertical_profile` 内部，避免 FMM 网格离散化的近距离点对产生假爬升率连锁压低所有中间点
 - fix(altitude): 三段式垂直剖面不再被锚点插值覆盖——锚点插值现在仅在连续必经点区间内生效，起终点区间使用三段式基线（爬升→巡航→降落）；修复降落段边界条件（cruise_end_idx == pts.len()-1 时不再跳过）
 - fix(zone): `segment_polygon_bands_t` 奇数交点不再静默丢弃区间，保守延伸到线段终点
 - fix(zone): 统一纬度缩放系数 `ky` 为 111.32（`segment_polygon_bands_t` 与 `segment_circle_intersect_t` 一致）
