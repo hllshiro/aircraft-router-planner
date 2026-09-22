@@ -60,8 +60,33 @@ pnpm demo:build               # build frontend
 - `commit` — Conventional Commits（中文描述，英文 type/scope），自动更新 CHANGELOG
 - `release` — 分析变更、推荐版本号、更新 CHANGELOG、tag + push
 
+## 分支工作流
+
+```
+功能分支 (feat/*)  ──PR──▶  dev  ──PR──▶  master  ──tag──▶  release
+      │                         │
+      └── CI 门禁 ──────────────┘── CI 门禁
+```
+
+- **dev**: 开发主分支，功能分支通过 PR 合并到此，CI 通过后方可合并
+- **master**: 稳定版分支，从 dev 合并用于发版，tag 触发 release 流水线
+- **功能分支**: `feat/*`、`fix/*`、`refactor/*` 等，需先通过 PR 合并到 dev
+
 ## CI 流水线细节
 
-- `ci.yml`：push/PR 跑 **static-check**（`cargo check --workspace --all-targets` + 依赖红线），不执行测试（测试用例在 v0.5.0 中已移除）。
+- `ci.yml`：push 到 dev/master 与 PR 都跑 **static-check**（`cargo check --workspace --all-targets` + 依赖红线），不执行测试（测试用例在 v0.5.0 中已移除）。
 - `release.yml`：`v*` tag 触发，交叉编译 windows/linux × amd64/arm64 四产物，校验 tag 与 Cargo.toml version 一致。
 - Linux release 用 `cross`（Docker 交叉工具链）构建 musl 静态二进制。
+
+## GitHub 分支保护规则（需手动配置）
+
+在 GitHub Settings → Branches 中设置：
+
+**dev 分支：**
+- Require pull requests before merging（至少 1 个 approval）
+- Require status checks to pass before merging（`static-check`）
+- Require branches to be up to date before merging
+
+**master 分支：**
+- 同上保护规则
+- 仅允许 dev 分支合并（Restrict who can push to matching branches）
