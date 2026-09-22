@@ -1,6 +1,6 @@
-//! 海陆掩膜（GSHHG 3 态，Phase 2 水体判定先验 B 档：岸线掩膜）。
+//! 海陆掩膜（GSHHG 3 态，水体判定先验 B 档：岸线掩膜）。
 //!
-//! 格式（`phase0/scripts/gshhg_mask.py` 产出，V2 3 态）：
+//! 格式（V2 3 态）：
 //! ```text
 //! [0..16)   magic "ARPACK_MASK_V2__"
 //! [16..64)  header：version u32 BE / arcsec u32 BE / rows u32 BE / cols u32 BE /

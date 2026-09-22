@@ -1,8 +1,8 @@
-# AircraftRouterPlanner 核心 CLI（Phase 1 核心骨架）
+# AircraftRouterPlanner 核心 CLI（核心骨架）
 #
-# 依赖说明（技术方案 3.2/3.2.1）：
+# 依赖说明：
 #   - 核心 8 依赖 + 数据源 3 依赖（geotiff/dted2/ruzstd），全部纯 Rust 零 C 依赖
-#   - 静态编译红线：禁 blas/proj/flate2 C 后端（红线注释见 phase0/Cargo.toml 同款）
+#   - 静态编译红线：禁 blas/proj/flate2 C 后端
 #   - 版本锁定（2026-08 crates.io 实测）：
 #       rand ^0.10（geo 0.33.1 非可选依赖，勿降 0.8）
 #       rstar ^0.12（geo 0.33.1 锁 ^0.12，勿升 0.13）
@@ -17,6 +17,13 @@ version.workspace = true
 edition.workspace = true
 description = "AircraftRouterPlanner 核心 CLI（lib+bin）：JSON 契约解析 / 坐标系统 / 地形数据源 / 代价场 / 空间索引"
 
+[lib]
+path = "lib.rs"
+
+[[bin]]
+name = "arpcli"
+path = "main.rs"
+
 [dependencies]
 clap.workspace = true
 geo.workspace = true
@@ -27,7 +34,7 @@ serde.workspace = true
 serde_json.workspace = true
 schemars.workspace = true
 thiserror.workspace = true
-# 数据源（发布版必含，技术方案 3.2 C）
+# 数据源（发布版必含）
 geotiff = "0.1"
 tiff = "0.9"
 dted2 = "1.0.0"

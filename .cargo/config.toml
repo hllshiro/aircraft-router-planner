@@ -1,4 +1,4 @@
-# AircraftRouterPlanner —— 确定性构建配置（技术方案 5.2）
+# AircraftRouterPlanner —— 确定性构建配置
 # 跨平台逐位复现约定：
 #  - 编译期 IEEE754 严格语义（默认即严格，不引入 fast-math 类优化）
 #  - x86_64 显式禁 FMA 收缩：-C target-feature=-fma（防 LLVM 自动 FMA 引入跨平台位差）

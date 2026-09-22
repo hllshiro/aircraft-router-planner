@@ -1,4 +1,4 @@
-//! DTED/DTED2 数据源（技术方案 4.3：运行时用 `dted2` crate，纯 Rust）。
+//! DTED/DTED2 数据源（运行时用 `dted2` crate，纯 Rust）。
 //!
 //! DTED 为无压缩裸高度数据，读取性能接近 SRTM（5.1）；`dted2` 的
 //! `get_elevation(lat, lon)` 直接匹配 TerrainSource 接口。
