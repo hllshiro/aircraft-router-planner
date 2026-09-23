@@ -20,7 +20,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          token: ${{ secrets.RELEASE_TOKEN }}
+          token: ${{ secrets.GITHUB_TOKEN }}
           ref: main
 
       - name: Validate version format
@@ -71,6 +71,9 @@ jobs:
           git tag "v${{ inputs.version }}"
 
       - name: Push to main
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN }}
         run: |
+          git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git"
           git push origin main
           git push origin "v${{ inputs.version }}"
