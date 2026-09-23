@@ -53,11 +53,20 @@ pnpm demo:build               # build frontend
 - Version source of truth: `[workspace.package] version` in root `Cargo.toml`; release tags must be `v<version>`; see `docs/发版流程.md` for release process.
 - Windows MSVC builds must be static CRT (`+crt-static`) — exe must not depend on VCRUNTIME140.dll.
 
-## opencode.json custom commands
+## Commit & Release conventions
 
-`opencode.json` defines two custom commands; must update `CHANGELOG.md` before commit:
-- `commit` — Conventional Commits (Chinese description, English type/scope), auto-update CHANGELOG.
-- `release` — analyze changes, recommend version, update CHANGELOG, trigger `release-prepare` workflow.
+On every commit, must update `CHANGELOG.md`:
+- Read `[Unreleased]` section; add the change under the matching category (Added/Changed/Fixed/Removed).
+- If a similar item already exists, merge instead of duplicating.
+- Skip only if the change is truly invisible to users.
+- Writing style: describe impact from user perspective, start with a verb (新增/优化/修复/移除), ≤ 20 chars per line.
+
+**Commit message**: Conventional Commits format — Chinese description, English type/scope:
+```
+<type>(<scope>): <简洁描述>
+```
+
+**Release**: trigger `release-prepare` workflow (GitHub Actions → Run workflow → enter version number). See `docs/发版流程.md`.
 
 ## Branch workflow
 
