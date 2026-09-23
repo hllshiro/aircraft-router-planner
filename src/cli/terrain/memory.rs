@@ -1,8 +1,7 @@
-//! 内存地形网格（迁移自 phase0 terrain.rs，Phase 0 B4/B6 验证）。
+//! 内存地形网格（B4/B6 验证）。
 //!
 //! - 经纬度网格：行 = 纬度方向（北向），列 = 经度方向（东向）；
-//! - 双线性插值采样；空洞（NaN）或出界 → `None`（Phase 0 验证：空洞不遮挡语义，
-//!   非保守侧风险由 Phase 1 空洞策略裁决处理——见 PHASE1_TODO S6）；
+//! - 双线性插值采样；空洞（NaN）或出界 → `None`（空洞不遮挡语义）；
 //! - `from_raw`：Float32 行优先二进制 + 文本元数据
 //!   `rows cols origin_lon origin_lat cell_lon_deg cell_lat_deg`。
 
@@ -89,7 +88,7 @@ impl Terrain {
 
     /// 射线遮挡判断（经纬度射线，4.2.2 语义）：起点 `(olon, olat, oz)` 沿方向
     /// `(dlon, dlat, dz)` 长度 `len_deg`（经度单位），等距采样 `n` 个点；
-    /// 任一采样点高度 ≤ 地形高度则视为被遮挡。空洞 → 该点不遮挡（Phase 0 语义）。
+    /// 任一采样点高度 ≤ 地形高度则视为被遮挡。空洞 → 该点不遮挡。
     pub fn ray_blocked_ll(
         &self,
         olon: f64,
@@ -108,7 +107,7 @@ impl Terrain {
             let z = oz + dz * t;
             match self.height_at_ll(lon, lat) {
                 Some(ht) if z <= ht => return true,
-                None => return false, // 出界/空洞视为不遮挡（Phase 0 语义）
+                None => return false, // 出界/空洞视为不遮挡
                 _ => {}
             }
         }

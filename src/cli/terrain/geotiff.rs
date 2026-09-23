@@ -1,4 +1,4 @@
-//! GeoTIFF 数据源（技术方案 4.3：tiff crate（image-rs）tile/strip 按需读取，纯 Rust）。
+//! GeoTIFF 数据源（tiff crate（image-rs）tile/strip 按需读取，纯 Rust）。
 //!
 //! 2026-08-07 主管拍板：外部格式按需读取，GeoTIFF 优先级最高。
 //! 两级策略：chunk（tile/strip）数 ≤ 阈值 → open 全量读入内存网格（现状语义，

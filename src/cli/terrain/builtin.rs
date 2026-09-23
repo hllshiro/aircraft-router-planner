@@ -1,4 +1,4 @@
-//! 自建紧凑格式数据源（技术方案 4.2.5：16-bit + 分块差分 + Zstd，运行时 ruzstd）。
+//! 自建紧凑格式数据源（16-bit + 分块差分 + Zstd，运行时 ruzstd）。
 //!
 //! ARPK1 格式（定长二进制头 + SHA-256 + 块索引 + 压缩块）：
 //! ```text
@@ -701,7 +701,7 @@ impl TerrainSource for BuiltinSource {
 
 // ==================== Writer（测试/开发期工具；raw 块，zstd 块由开发期脚本产出） ====================
 
-/// 生成 ARPK1 字节（raw 块，供测试/工具；压缩块由 phase0 脚本 pyzstd 产出）。
+/// 生成 ARPK1 字节（raw 块，供测试/工具）。
 /// `h`：行优先 i16 高度（rows × cols）。
 pub fn write_pack_raw(
     rows: usize,

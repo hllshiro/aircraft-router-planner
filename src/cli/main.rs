@@ -162,7 +162,7 @@ fn read_input(path: &std::path::Path) -> Result<String, AppError> {
 /// 输出/输入代码页切到 UTF-8（65001）。
 ///
 /// 实现说明：
-///   - 直接 FFI 链接 kernel32（系统 DLL，静态 CRT 红线不受影响，`check_pe_deps.py` 白名单内），
+///   - 直接 FFI 链接 kernel32（系统 DLL，静态 CRT 红线不受影响），
 ///     不引入 windows-sys 等额外依赖，保持零 C 依赖红线。
 ///   - 调用失败（输出被重定向到文件/管道，无关联控制台）返回 0，静默忽略——重定向场景下
 ///     字节本身就是 UTF-8，下游按 UTF-8 解码即可，无需改动代码页。
