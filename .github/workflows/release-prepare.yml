@@ -1,0 +1,76 @@
+name: release-prepare
+
+# 手动触发发版准备：更新版本号 + CHANGELOG → commit + tag → push main
+# tag push 会自动触发 release.yml 进行交叉编译和发布
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '版本号（X.Y.Z，不含 v 前缀）'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.RELEASE_TOKEN }}
+          ref: main
+
+      - name: Validate version format
+        run: |
+          version="${{ inputs.version }}"
+          if ! echo "$version" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::版本号格式不正确，应为 X.Y.Z（如 0.8.3）"
+            exit 1
+          fi
+
+      - name: Check tag does not exist
+        run: |
+          if git rev-parse "v${{ inputs.version }}" >/dev/null 2>&1; then
+            echo "::error::tag v${{ inputs.version }} 已存在"
+            exit 1
+          fi
+
+      - name: Check [Unreleased] has content
+        run: |
+          # 提取 [Unreleased] 到下一个 ## [ 之间的内容
+          unreleased=$(sed -n '/^## \[Unreleased\]/,/^## \[/p' CHANGELOG.md | sed '1d;$d')
+          if [ -z "$(echo "$unreleased" | tr -d '[:space:]')" ]; then
+            echo "::error::[Unreleased] 部分为空，无内容可发版"
+            exit 1
+          fi
+
+      - name: Update Cargo.toml version
+        run: |
+          sed -i '0,/^version = "[^"]*"/s/^version = "[^"]*"/version = "${{ inputs.version }}"/' Cargo.toml
+          cargo_version=$(sed -n 's/^version = "\([^"]*\)".*/\1/p' Cargo.toml | head -n1)
+          if [ "$cargo_version" != "${{ inputs.version }}" ]; then
+            echo "::error::Cargo.toml 版本更新失败"
+            exit 1
+          fi
+
+      - name: Update CHANGELOG.md
+        run: |
+          today=$(date +%Y-%m-%d)
+          # 在 [Unreleased] 行后插入新版本标题
+          sed -i '/^## \[Unreleased\]/a\\n## [${{ inputs.version }}] - '"$today"'' CHANGELOG.md
+
+      - name: Commit and tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml CHANGELOG.md
+          git commit -m "chore(release): v${{ inputs.version }}"
+          git tag "v${{ inputs.version }}"
+
+      - name: Push to main
+        run: |
+          git push origin main
+          git push origin "v${{ inputs.version }}"

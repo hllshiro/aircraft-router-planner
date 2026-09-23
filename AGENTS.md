@@ -57,7 +57,7 @@ pnpm demo:build               # build frontend
 
 `opencode.json` defines two custom commands; must update `CHANGELOG.md` before commit:
 - `commit` — Conventional Commits (Chinese description, English type/scope), auto-update CHANGELOG.
-- `release` — analyze changes, recommend version, update CHANGELOG, tag + push.
+- `release` — analyze changes, recommend version, update CHANGELOG, trigger `release-prepare` workflow.
 
 ## Branch workflow
 
@@ -71,10 +71,11 @@ feature branch (feat/*) ──PR──▶ main ──tag──▶ release
 - `main`: main development and stable branch, feature branches merge here via PR, tags trigger release pipeline.
 - Feature branches: `feat/*`, `fix/*`, `refactor/*`, etc.
 - No `dev` branch — all work goes directly to `main` through PRs.
-- Releases: update version + CHANGELOG on a feature branch, PR to main, merge, tag `v*` on main.
+- Releases: trigger `release-prepare` workflow with version number; it updates Cargo.toml + CHANGELOG, commits, tags, and pushes to main.
 
 ## CI pipeline
 
 - `ci.yml`: must run **static-check** (`cargo check --workspace --all-targets` + dependency red-line) on push to main and on PRs; no tests (removed in v0.5.0).
+- `release-prepare.yml`: workflow_dispatch with version input; updates Cargo.toml + CHANGELOG, commits, tags `v*`, pushes to main (uses `RELEASE_TOKEN` to bypass branch protection).
 - `release.yml`: must trigger on `v*` tag, cross-compile windows/linux × amd64/arm64, verify tag matches Cargo.toml version.
 - Linux release must use `cross` (Docker cross toolchain) for musl static binaries.
