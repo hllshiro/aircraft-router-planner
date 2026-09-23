@@ -9,6 +9,8 @@
 
 ## [Unreleased]
 
+## [0.8.3] - 2026-09-23
+
 ### Changed
 - 简化分支工作流：移除 dev 分支，master 重命名为 main，功能分支直接 PR 到 main
 - 新增 `release-prepare` workflow：GitHub Actions 页面输入版本号自动完成发版（更新版本号 + CHANGELOG → commit → tag → push）
