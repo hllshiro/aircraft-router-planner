@@ -82,9 +82,18 @@ feature branch (feat/*) ──PR──▶ main ──tag──▶ release
 - No `dev` branch — all work goes directly to `main` through PRs.
 - Releases: trigger `release-prepare` workflow with version number; it updates Cargo.toml + CHANGELOG, commits, tags, and pushes to main.
 
+### Branch discipline (normative — self-enforced)
+
+GitHub 管理员可绕过所有保护规则，因此以下约束无法从技术层面强制，依赖开发者自觉遵守：
+
+1. **禁止直接推 main**：任何代码变更必须通过 PR 合并，即使是管理员也不例外。
+2. **CI 必须通过**：PR 合并前 CI 检查必须全绿，不得绕过。
+3. **发版必须走 workflow**：版本号更新、CHANGELOG 整理、tag 创建、push 到 main，全部由 `release-prepare` workflow 完成，禁止手动操作。
+4. **唯一例外**：`release-prepare` workflow 是唯一允许直接推 main 的途径（由 GitHub Actions 自动执行，非人工操作）。
+
 ## CI pipeline
 
 - `ci.yml`: must run **static-check** (`cargo check --workspace --all-targets` + dependency red-line) on push to main and on PRs; no tests (removed in v0.5.0).
-- `release-prepare.yml`: workflow_dispatch with version input; updates Cargo.toml + CHANGELOG, commits, tags `v*`, pushes to main (uses `RELEASE_TOKEN` to bypass branch protection).
+- `release-prepare.yml`: workflow_dispatch with version input; updates Cargo.toml + CHANGELOG, commits, tags `v*`, pushes to main (uses default `GITHUB_TOKEN`).
 - `release.yml`: must trigger on `v*` tag, cross-compile windows/linux × amd64/arm64, verify tag matches Cargo.toml version.
 - Linux release must use `cross` (Docker cross toolchain) for musl static binaries.

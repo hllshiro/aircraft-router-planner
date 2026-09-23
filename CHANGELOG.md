@@ -14,6 +14,8 @@
 - 新增 `release-prepare` workflow：GitHub Actions 页面输入版本号自动完成发版（更新版本号 + CHANGELOG → commit → tag → push）
 - 移除 opencode.json，提交与发版规范合并至 AGENTS.md
 - 更新 README 匹配当前项目结构（移除已删除的 schema 子命令、修正数据文件名等）
+- 移除 RELEASE_TOKEN 密钥依赖，release-prepare workflow 改用默认 GITHUB_TOKEN
+- AGENTS.md 新增分支与发版规范约束（开发者自觉遵守，替代技术层面的分支保护）
 
 ## [0.8.2] - 2026-09-23
 
