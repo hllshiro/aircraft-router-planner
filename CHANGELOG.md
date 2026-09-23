@@ -9,8 +9,10 @@
 
 ## [Unreleased]
 
+## [0.8.2] - 2026-09-23
+
 ### Fixed
-- 修正 help 中 zones 参数树：shape/geometry 结构如实反映 adjacently-tagged 输入，高度区间描述改为同填同省语义
+- 修正 help 中 zones 参数树：shape/geometry 结构如实反映 adjacently-tagged 输入，高度区间描述为同填同省语义
 
 ## [0.8.1] - 2026-09-18
 
