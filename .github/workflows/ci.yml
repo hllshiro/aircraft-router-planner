@@ -1,16 +1,16 @@
 name: ci
 
 # 分层门禁：
-#   - static-check：push 到 master 与 PR 都跑，仅快速静态检查（cargo check + 依赖红线），不执行测试。
+#   - static-check：push 到 main 与 PR 都跑，仅快速静态检查（cargo check + 依赖红线），不执行测试。
 #   - 跨平台交叉编译与发布：见 release.yml，仅 v* tag 触发。
 #   - 注意：所有测试用例已在 v0.5.0 中移除。
 #
 # 工作流：
-#   - 功能分支 → PR → master（CI 门禁）→ 合并 → tag → release
+#   - 功能分支 → PR → main（CI 门禁）→ 合并 → tag → release
 
 on:
   push:
-    branches: [master]
+    branches: [main]
   pull_request:
   workflow_dispatch:
 

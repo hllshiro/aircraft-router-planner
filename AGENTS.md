@@ -62,19 +62,19 @@ pnpm demo:build               # build frontend
 ## Branch workflow
 
 ```
-feature branch (feat/*) ──PR──▶ master ──tag──▶ release
+feature branch (feat/*) ──PR──▶ main ──tag──▶ release
        │
        └── CI gate
 ```
 
-- All changes must be committed to a new branch and merged into `master` via pull request; CI checks must pass before merging.
-- `master`: main development and stable branch, feature branches merge here via PR, tags trigger release pipeline.
+- All changes must be committed to a new branch and merged into `main` via pull request; CI checks must pass before merging.
+- `main`: main development and stable branch, feature branches merge here via PR, tags trigger release pipeline.
 - Feature branches: `feat/*`, `fix/*`, `refactor/*`, etc.
-- No `dev` branch — all work goes directly to `master` through PRs.
-- Releases: update version + CHANGELOG on a feature branch, PR to master, merge, tag `v*` on master.
+- No `dev` branch — all work goes directly to `main` through PRs.
+- Releases: update version + CHANGELOG on a feature branch, PR to main, merge, tag `v*` on main.
 
 ## CI pipeline
 
-- `ci.yml`: must run **static-check** (`cargo check --workspace --all-targets` + dependency red-line) on push to master and on PRs; no tests (removed in v0.5.0).
+- `ci.yml`: must run **static-check** (`cargo check --workspace --all-targets` + dependency red-line) on push to main and on PRs; no tests (removed in v0.5.0).
 - `release.yml`: must trigger on `v*` tag, cross-compile windows/linux × amd64/arm64, verify tag matches Cargo.toml version.
 - Linux release must use `cross` (Docker cross toolchain) for musl static binaries.

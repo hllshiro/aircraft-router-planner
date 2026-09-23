@@ -10,7 +10,7 @@
 ## [Unreleased]
 
 ### Changed
-- 简化分支工作流：移除 dev 分支，功能分支直接 PR 到 master，发版在 master 上打 tag
+- 简化分支工作流：移除 dev 分支，master 重命名为 main，功能分支直接 PR 到 main，发版在 main 上打 tag
 
 ## [0.8.2] - 2026-09-23
 
