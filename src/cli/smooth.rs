@@ -179,7 +179,7 @@ pub fn theta_star_smooth(
             let a = *out.last().unwrap();
             let b = path.points[j];
             if !check(a.lon, a.lat, a.alt_m, b.lon, b.lat, b.alt_m) {
-                if std::env::var_os("ARP_DEBUG_SMOOTH").is_some() && out.len() < 4 {
+                if crate::verbose::on() && out.len() < 4 {
                     eprintln!(
                         "[ts-dbg] i={i} j={j} reject=check ({:.4},{:.4})->({:.4},{:.4})",
                         a.lon, a.lat, b.lon, b.lat
@@ -225,7 +225,7 @@ pub fn theta_star_smooth(
                         max_turn
                     };
                     if d > effective_max {
-                        if std::env::var_os("ARP_DEBUG_SMOOTH").is_some() && out.len() < 4 {
+                        if crate::verbose::on() && out.len() < 4 {
                             eprintln!(
                                 "[ts-dbg] i={i} j={j} reject=turn {d:.1}>={effective_max} h0={h0:.1} h1={h1:.1} entry={entry_heading:?} outlen={}",
                                 out.len()
@@ -272,7 +272,7 @@ pub fn theta_star_smooth(
                                 }
                                 i = k;
                                 advanced = true;
-                                if std::env::var_os("ARP_DEBUG_SMOOTH").is_some() {
+                                if crate::verbose::on() {
                                     eprintln!(
                                         "[ts-dbg] jump arc_transition at i={i} j={j} pts={npts} k={k}"
                                     );
@@ -321,10 +321,10 @@ pub fn theta_star_smooth(
                             }
                             i = k;
                             advanced = true;
-                            if std::env::var_os("ARP_DEBUG_SMOOTH").is_some() {
+                            if crate::verbose::on() {
                                 eprintln!("[ts-dbg] arc_transition at i={i} pts={npts} k={k}");
                             }
-                        } else if std::env::var_os("ARP_DEBUG_SMOOTH").is_some() {
+                        } else if crate::verbose::on() {
                             eprintln!(
                                 "[ts-dbg] arc_transition FAIL at i={i} turn={:.1} b=({:.4},{:.4}) c=({:.4},{:.4})",
                                 crate::path::angle_diff_deg(h0, h1).abs(),
@@ -346,7 +346,7 @@ pub fn theta_star_smooth(
             out.push(path.points[i.min(path.len() - 1)]);
         }
     }
-    if std::env::var_os("ARP_DEBUG_SMOOTH").is_some() {
+    if crate::verbose::on() {
         eprintln!(
             "[ts-dbg] RESULT n={} path={}",
             out.len(),
@@ -1426,7 +1426,7 @@ pub fn smooth_path_chain<'a>(
             // 运动学/地形/禁飞仍严格复验。
             let mut o = opts.clone();
             o.chord_tol_m = CATMULL_CHORD_TOL_M;
-            if std::env::var_os("ARP_DEBUG_SMOOTH").is_some() {
+            if crate::verbose::on() {
                 eprintln!("[smooth-dbg] verify {_name} chord_tol={:.0}", o.chord_tol_m);
             }
             verify_path(stage, Some(&reference), &o, ctx, phys_min_radius_m)
@@ -1453,7 +1453,7 @@ pub fn smooth_path_chain<'a>(
                 terrain_gap_m = Some(terrain_gap_m.map_or(t, |o| o.max(t)));
             }
         }
-        if std::env::var_os("ARP_DEBUG_SMOOTH").is_some() {
+        if crate::verbose::on() {
             let status = if rep.ok { "OK" } else { "FAIL" };
             eprintln!(
                 "[smooth-dbg] stage={} points={} status={} issues={} warnings={}",
@@ -1472,13 +1472,11 @@ pub fn smooth_path_chain<'a>(
                     pp.lon, pp.lat, pp.alt_m
                 );
             }
-            if std::env::var_os("ARP_DEBUG_SMOOTH_DEEP").is_some() {
-                for (pi, pp) in stage.points.iter().enumerate().skip(30).take(40) {
-                    eprintln!(
-                        "[smooth-dbg]   st-pt{pi}: lon={:.6} lat={:.6} alt={:.0}",
-                        pp.lon, pp.lat, pp.alt_m
-                    );
-                }
+            for (pi, pp) in stage.points.iter().enumerate().skip(30).take(40) {
+                eprintln!(
+                    "[smooth-dbg]   st-pt{pi}: lon={:.6} lat={:.6} alt={:.0}",
+                    pp.lon, pp.lat, pp.alt_m
+                );
             }
         }
     }
@@ -1522,12 +1520,14 @@ pub fn smooth_path_chain<'a>(
                 serde_json::json!({ "name": n, "issues": iss, "warnings": warn })
             }).collect::<Vec<_>>(),
         });
-        eprintln!(
-            "{}",
-            serde_json::to_string(&json).unwrap_or_else(|_| {
-                r#"{"event":"smooth_chain_failed","serialize_error":true}"#.into()
-            })
-        );
+        if crate::verbose::on() {
+            eprintln!(
+                "{}",
+                serde_json::to_string(&json).unwrap_or_else(|_| {
+                    r#"{"event":"smooth_chain_failed","serialize_error":true}"#.into()
+                })
+            );
+        }
     }
     SmoothResult {
         path: input.clone(),
