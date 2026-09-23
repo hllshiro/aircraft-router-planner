@@ -53,11 +53,20 @@ pnpm demo:build               # build frontend
 - Version source of truth: `[workspace.package] version` in root `Cargo.toml`; release tags must be `v<version>`; see `docs/发版流程.md` for release process.
 - Windows MSVC builds must be static CRT (`+crt-static`) — exe must not depend on VCRUNTIME140.dll.
 
-## opencode.json custom commands
+## Commit & Release conventions
 
-`opencode.json` defines two custom commands; must update `CHANGELOG.md` before commit:
-- `commit` — Conventional Commits (Chinese description, English type/scope), auto-update CHANGELOG.
-- `release` — analyze changes, recommend version, update CHANGELOG, tag + push.
+On every commit, must update `CHANGELOG.md`:
+- Read `[Unreleased]` section; add the change under the matching category (Added/Changed/Fixed/Removed).
+- If a similar item already exists, merge instead of duplicating.
+- Skip only if the change is truly invisible to users.
+- Writing style: describe impact from user perspective, start with a verb (新增/优化/修复/移除), ≤ 20 chars per line.
+
+**Commit message**: Conventional Commits format — Chinese description, English type/scope:
+```
+<type>(<scope>): <简洁描述>
+```
+
+**Release**: trigger `release-prepare` workflow (GitHub Actions → Run workflow → enter version number). See `docs/发版流程.md`.
 
 ## Branch workflow
 
@@ -71,10 +80,11 @@ feature branch (feat/*) ──PR──▶ main ──tag──▶ release
 - `main`: main development and stable branch, feature branches merge here via PR, tags trigger release pipeline.
 - Feature branches: `feat/*`, `fix/*`, `refactor/*`, etc.
 - No `dev` branch — all work goes directly to `main` through PRs.
-- Releases: update version + CHANGELOG on a feature branch, PR to main, merge, tag `v*` on main.
+- Releases: trigger `release-prepare` workflow with version number; it updates Cargo.toml + CHANGELOG, commits, tags, and pushes to main.
 
 ## CI pipeline
 
 - `ci.yml`: must run **static-check** (`cargo check --workspace --all-targets` + dependency red-line) on push to main and on PRs; no tests (removed in v0.5.0).
+- `release-prepare.yml`: workflow_dispatch with version input; updates Cargo.toml + CHANGELOG, commits, tags `v*`, pushes to main (uses `RELEASE_TOKEN` to bypass branch protection).
 - `release.yml`: must trigger on `v*` tag, cross-compile windows/linux × amd64/arm64, verify tag matches Cargo.toml version.
 - Linux release must use `cross` (Docker cross toolchain) for musl static binaries.

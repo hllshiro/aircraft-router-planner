@@ -9,9 +9,7 @@
 ├── src/
 │   ├── cli/        # ★ 核心 CLI（lib + bin）——正式工程，核心功能只有路径规划
 │   │   ├── src/    # 契约 / 坐标 / 地形数据源 / 代价场 / FMM / 平滑 / 求解器
-│   │   ├── tests/  # crash_suite / determinism / field_build_compare / 回归集
-│   │   ├── benches/# 内置格式加载基准
-│   │   └── examples/# 开发期调试工具
+│   │   └── Cargo.toml
 │   ├── convert/    # 内部地形转换工具（arp-convert：外部格式 → ARPK1；不随核心 CLI 发布，随用随编）
 │   └── demo/       # 开发期可视化工具（server: Axum 后端 / web: React+Three.js 前端）
 ├── docs/           # 技术文档集
@@ -25,20 +23,15 @@
 # 构建核心 CLI（静态编译红线：零第三方 C/DLL 依赖）
 pnpm cli:build
 
-# 运行（plan 子命令：从 stdin 读任务 JSON，输出路径 JSON）
-cat mission.json | target/release/arpcli plan
+# 运行（plan 子命令：从文件读任务 JSON，输出路径 JSON）
+target/release/arpcli plan --file mission.json --out result.json
 
-# 查看帮助（help 风格：arpcli / arpcli help / arpcli help <command>，不使用 --help）
+# 查看帮助（help 风格：arpcli / arpcli help，不使用 --help）
 target/release/arpcli          # 顶层 help
-target/release/arpcli schema   # 输出输入/输出 JSON Schema
 
-# 内部地形转换工具（不随核心 CLI 发布，随用随编）
-cargo build --release -p arp-convert
-target/release/arp-convert convert <in.tif> <out.arpack>
-
-# 测试与全量门禁
+# 测试
 pnpm test                      # 单元测试
-
+pnpm test:all                  # 全量测试
 ```
 
 ## 文档
@@ -53,11 +46,12 @@ pnpm test                      # 单元测试
 - 版本号唯一事实来源：`Cargo.toml` 的 `[workspace.package] version`；发布 tag 必须为 `v<version>`。
 - 变更记录：[CHANGELOG.md](CHANGELOG.md)（Keep a Changelog 格式）。
 - 发版流程：[docs/发版流程.md](docs/发版流程.md)。
-- 发布：推送 `v*` tag 触发 [.github/workflows/release.yml](.github/workflows/release.yml)，
-  交叉编译 `windows/linux × amd64/arm64` 四个 CLI 产物并创建 GitHub Release（含 SHA256SUMS）。
+- 发布：触发 `release-prepare` workflow（GitHub Actions → Run workflow → 输入版本号），
+  自动更新版本号 + CHANGELOG → commit → tag → push，
+  tag 触发 [release.yml](.github/workflows/release.yml) 交叉编译 `windows/linux × amd64/arm64` 四个 CLI 产物并创建 GitHub Release。
 
 ## 数据说明
 
-默认地形（`east_asia_7p5as.arpack`，GMTED2010 东亚 7.5 弧秒）与掩膜
-（`mask_7p5as.mask`，GSHHG 全球 V2 3 态）体积较大，**不入库**，需按
+默认地形（`global_7p5as.arpack`，GMTED2010 全球 7.5 弧秒）与掩膜
+（`global_7p5as.mask`，GSHHG 全球 V2 3 态）体积较大，**不入库**，需按
 [docs/04-地形数据源.md](docs/04-地形数据源.md) 自行放置到 `data/`（solver 会自动探测）。

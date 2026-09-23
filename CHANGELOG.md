@@ -10,10 +10,10 @@
 ## [Unreleased]
 
 ### Changed
-- 简化分支工作流：移除 dev 分支，master 重命名为 main，功能分支直接 PR 到 main，发版在 main 上打 tag
-- 畸形 JSON 的 `error.message` 改为真实解析错误文本（形如 `json error: ...`），`code` 仍为 `malformed_json`
-- CLI 全部 stderr 调试输出改由隐藏开关 `--verbose` 控制（默认静默）
-- 移除 `ARP_DEBUG_SMOOTH` / `ARP_DEBUG_SMOOTH_DEEP` 环境变量
+- 简化分支工作流：移除 dev 分支，master 重命名为 main，功能分支直接 PR 到 main
+- 新增 `release-prepare` workflow：GitHub Actions 页面输入版本号自动完成发版（更新版本号 + CHANGELOG → commit → tag → push）
+- 移除 opencode.json，提交与发版规范合并至 AGENTS.md
+- 更新 README 匹配当前项目结构（移除已删除的 schema 子命令、修正数据文件名等）
 
 ## [0.8.2] - 2026-09-23
 
