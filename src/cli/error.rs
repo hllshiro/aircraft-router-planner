@@ -90,6 +90,10 @@ impl ErrorBody {
         }
     }
 
+    pub fn malformed_json(e: &AppError) -> Self {
+        Self::input_invalid(InputInvalidReason::MalformedJson, e.to_string())
+    }
+
     pub fn code(mut self, code: impl Into<String>) -> Self {
         self.code = code.into();
         self
@@ -117,5 +121,21 @@ impl From<&AppError> for ErrorBody {
                 message: e.to_string(),
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn malformed_json_error_body() {
+        let json_err = serde_json::from_str::<serde_json::Value>("{").unwrap_err();
+        let app_err = AppError::Json(json_err);
+        let body = ErrorBody::malformed_json(&app_err);
+        assert_eq!(body.code, "malformed_json");
+        assert!(!body.message.is_empty());
+        assert_ne!(body.message, "malformed JSON input");
+        assert!(body.message.starts_with("json error:"));
     }
 }

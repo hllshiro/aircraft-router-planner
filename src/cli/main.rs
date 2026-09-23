@@ -14,8 +14,9 @@ use std::io::{Read, Write};
 use std::path::PathBuf;
 
 use arpcli::config::{self, Input, Output, TerrainIndex};
-use arpcli::error::{AppError, ErrorBody, InputInvalidReason};
+use arpcli::error::{AppError, ErrorBody};
 use arpcli::solver::{self, SolveParams};
+use arpcli::verbose;
 use arpcli::help;
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 
@@ -42,6 +43,9 @@ enum Command {
         /// 结果 JSON 文件
         #[arg(long)]
         out: PathBuf,
+        /// 开发调试输出（隐藏）
+        #[arg(long, hide = true)]
+        verbose: bool,
     },
 }
 
@@ -72,10 +76,13 @@ fn main() {
     let cli = Cli::from_arg_matches(&matches).expect("参数已由 clap 校验");
 
     match cli.command {
-        Command::Plan { file, out } => {
+        Command::Plan { file, out, verbose } => {
+            verbose::set(verbose);
             if let Err(e) = run_plan(&file, &out) {
-                // 硬故障（IO/内部）：stderr + 非零退出（不静默）
-                eprintln!("{bin} plan: hard failure: {e}");
+                // 硬故障（IO/内部）：--verbose 时输出 stderr，非零退出
+                if verbose::on() {
+                    eprintln!("{bin} plan: hard failure: {e}");
+                }
                 std::process::exit(2);
             }
         }
@@ -104,10 +111,12 @@ fn run_plan(file: &std::path::Path, out_path: &std::path::Path) -> Result<(), Ap
     let input: Input = match Input::from_json_str(&input_str) {
         Ok(i) => i,
         Err(e) => {
-            eprintln!("[debug] serde error: {e}");
+            if verbose::on() {
+                eprintln!("[debug] serde error: {e}");
+            }
             let out = Output::failure(
                 "input_invalid",
-                ErrorBody::input_invalid(InputInvalidReason::MalformedJson, "malformed JSON input"),
+                ErrorBody::malformed_json(&e),
                 started.elapsed().as_millis() as u64,
             );
             write_output(out_path, &out)?;

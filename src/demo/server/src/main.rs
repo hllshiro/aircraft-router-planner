@@ -99,6 +99,7 @@ fn run_cli(input_json: &str) -> Result<Value, String> {
 
     let output = Command::new(cli_bin())
         .arg("plan")
+        .arg("--verbose")
         .arg("--file")
         .arg(&tmp_input)
         .arg("--out")

@@ -168,7 +168,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
             }),
             (Some(_), None) => {
                 let msg = "data 目录不存在，无法加载地形".into();
-                eprintln!("[warn] {msg}");
+                if crate::verbose::on() { eprintln!("[warn] {msg}"); }
                 terrain_warnings.push(msg);
                 None
             }
@@ -183,7 +183,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
             }),
             (Some(_), None) => {
                 let msg = "data 目录不存在，无法加载掩膜".into();
-                eprintln!("[warn] {msg}");
+                if crate::verbose::on() { eprintln!("[warn] {msg}"); }
                 terrain_warnings.push(msg);
                 None
             }
@@ -209,7 +209,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                             p.display(),
                             e
                         );
-                        eprintln!("[warn] {msg}");
+                        if crate::verbose::on() { eprintln!("[warn] {msg}"); }
                         terrain_warnings.push(msg);
                         None
                     }
@@ -361,13 +361,15 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
     } else {
         base_grid
     };
-    eprintln!(
-        "[debug] region span={:.2}deg grid={} cell_m={:.0} (base {:.2})",
-        region.span_deg,
-        grid,
-        region.span_deg * 111_320.0 / grid as f64,
-        base_region.span_deg
-    );
+    if crate::verbose::on() {
+        eprintln!(
+            "[debug] region span={:.2}deg grid={} cell_m={:.0} (base {:.2})",
+            region.span_deg,
+            grid,
+            region.span_deg * 111_320.0 / grid as f64,
+            base_region.span_deg
+        );
+    }
 
     // 4. Zone 集合
     //    代价场墙策略（M2 高度层）：
@@ -591,12 +593,14 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                             serde_json::json!({ "attempt": a, "issues": iss })
                         }).collect::<Vec<_>>()
                     });
-                    eprintln!(
-                        "{}",
-                        serde_json::to_string(&json).unwrap_or_else(|_| {
-                            r#"{"event":"fmm_attempts_exhausted","serialize_error":true}"#.into()
-                        })
-                    );
+                    if crate::verbose::on() {
+                        eprintln!(
+                            "{}",
+                            serde_json::to_string(&json).unwrap_or_else(|_| {
+                                r#"{"event":"fmm_attempts_exhausted","serialize_error":true}"#.into()
+                            })
+                        );
+                    }
                 }
                 pts = raw_joined.points.clone();
                 warnings.push("smoothing_failed: max attempts exhausted".into());
@@ -672,11 +676,13 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                     None
                 };
             let field_ref = aircraft_field.as_ref().unwrap_or(&field);
-            eprintln!(
-                "[debug] fmm attempt {} field ready (aircraft={})",
-                attempts,
-                aircraft_field.is_some()
-            );
+            if crate::verbose::on() {
+                eprintln!(
+                    "[debug] fmm attempt {} field ready (aircraft={})",
+                    attempts,
+                    aircraft_field.is_some()
+                );
+            }
             // 逐段 FMM → 回溯 → 拼接（去重段端点）
             let mut raw_segs: Vec<Path> = Vec::new();
             let mut no_solution = false;
@@ -765,19 +771,23 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                 if use_terrain_mask && !terrain_probe_done {
                     // 过滤无解 → 无过滤场探测路径（区分「真无通道」与「区域级过度过滤」）
                     terrain_probe_done = true;
-                    eprintln!(
-                        "[debug] terrain-masked FMM no path -> probe unmasked (v={})",
-                        v.id
-                    );
+                    if crate::verbose::on() {
+                        eprintln!(
+                            "[debug] terrain-masked FMM no path -> probe unmasked (v={})",
+                            v.id
+                        );
+                    }
                     continue 'fmm_attempt;
                 }
                 if use_terrain_mask && !terrain_fallback_done {
                     // 抬升后仍无解 → 无过滤场保底（保可用性，宁丑勿违）
                     terrain_fallback_done = true;
-                    eprintln!(
-                        "[debug] raised FMM no path -> fallback unmasked (v={})",
-                        v.id
-                    );
+                    if crate::verbose::on() {
+                        eprintln!(
+                            "[debug] raised FMM no path -> fallback unmasked (v={})",
+                            v.id
+                        );
+                    }
                     continue 'fmm_attempt;
                 }
                 if !grid_refined && grid < 1024 {
@@ -808,10 +818,12 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                         "coarse FMM no path at grid {old_grid}; corridor refined to grid {grid} (v={})",
                         v.id
                     ));
-                    eprintln!(
-                        "[debug] coarse FMM no path -> refined grid {old_grid}->{grid} (v={})",
-                        v.id
-                    );
+                    if crate::verbose::on() {
+                        eprintln!(
+                            "[debug] coarse FMM no path -> refined grid {old_grid}->{grid} (v={})",
+                            v.id
+                        );
+                    }
                     continue 'fmm_attempt;
                 }
                 out_aircraft.push(AircraftOutput {
@@ -874,10 +886,12 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                         terrain_alt_raised = true;
                         alt_eff = new_alt;
                         terrain_anchor = Some((path_max_lon, path_max_lat, new_alt));
-                        eprintln!(
-                            "[debug] terrain path collision -> raise cruise alt {:.0}->{:.0}m (path terrain {:.0}m, v={})",
-                            v.alt_m, alt_eff, path_max_terr, v.id
-                        );
+                        if crate::verbose::on() {
+                            eprintln!(
+                                "[debug] terrain path collision -> raise cruise alt {:.0}->{:.0}m (path terrain {:.0}m, v={})",
+                                v.alt_m, alt_eff, path_max_terr, v.id
+                            );
+                        }
                         continue 'fmm_attempt;
                     }
                     // 超升限 → 不抬升，用当前路径（verify 会记穿山，保可用性）
@@ -992,7 +1006,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                 let hard_boundary: Vec<(f64, f64)> =
                     seg_ends.iter().map(|g| (g.lon, g.lat)).collect();
                 for (idx, seg) in smooth_src.iter().enumerate() {
-                    if std::env::var_os("ARP_DEBUG_SMOOTH").is_some() {
+                    if crate::verbose::on() {
                         eprintln!(
                             "[smooth-dbg] SEG{idx} mask={} len={} first=({:.4},{:.4})@{} last=({:.4},{:.4})@{}",
                             profile_mask[idx] as u8,
@@ -1110,7 +1124,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                                                 out_seg.points[0] = e;
                                             }
                                         }
-                                        if std::env::var_os("ARP_DEBUG_SMOOTH").is_some() {
+                                        if crate::verbose::on() {
                                             eprintln!(
                                                 "[smooth-dbg] boundary arc at ({:.4},{:.4}) turn {:.1}->{} pts",
                                                 b.lon, b.lat, d, arc_len
@@ -1210,7 +1224,7 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                                                         out_seg.points[0] = e2;
                                                     }
                                                 }
-                                                if std::env::var_os("ARP_DEBUG_SMOOTH").is_some() {
+                                                if crate::verbose::on() {
                                                     eprintln!(
                                                         "[smooth-dbg] boundary arc ext at ({:.4},{:.4}) turn {:.1}->{} pts (E' {:.0}m, steps {min_steps})",
                                                         b.lon, b.lat, d, arc_len2, ext_m
@@ -1223,14 +1237,14 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                                                 // arc 会破坏净空 → 不插弧，保持 b；该边界转角 ≤65
                                                 // 豁免（final verify 后过滤，宁丑勿违）。
                                                 turn_exempt.push((b.lon, b.lat));
-                                                if std::env::var_os("ARP_DEBUG_SMOOTH").is_some() {
+                                                if crate::verbose::on() {
                                                     eprintln!(
                                                         "[smooth-dbg] boundary arc SKIP (clearance) at ({:.4},{:.4}) turn {:.1} exempt",
                                                         b.lon, b.lat, d
                                                     );
                                                 }
                                             } else if !accepted
-                                                && std::env::var_os("ARP_DEBUG_SMOOTH").is_some()
+                                                && crate::verbose::on()
                                             {
                                                 eprintln!(
                                                     "[smooth-dbg] boundary arc FAIL (clearance, turn {:.1} > 65) at ({:.4},{:.4})",
@@ -1239,20 +1253,20 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                                             }
                                         } else if d <= 65.0 {
                                             turn_exempt.push((b.lon, b.lat));
-                                            if std::env::var_os("ARP_DEBUG_SMOOTH").is_some() {
+                                            if crate::verbose::on() {
                                                 eprintln!(
                                                     "[smooth-dbg] boundary arc SKIP (clearance, short seg) at ({:.4},{:.4}) turn {:.1} exempt",
                                                     b.lon, b.lat, d
                                                 );
                                             }
-                                        } else if std::env::var_os("ARP_DEBUG_SMOOTH").is_some() {
+                                        } else if crate::verbose::on() {
                                             eprintln!(
                                                 "[smooth-dbg] boundary arc FAIL (clearance, turn {:.1} > 65) at ({:.4},{:.4})",
                                                 d, b.lon, b.lat
                                             );
                                         }
                                     }
-                                } else if std::env::var_os("ARP_DEBUG_SMOOTH").is_some() {
+                                } else if crate::verbose::on() {
                                     eprintln!(
                                         "[smooth-dbg] boundary arc FAIL at ({:.4},{:.4}) turn {:.1} hard={is_hard}",
                                         b.lon, b.lat, d
@@ -1400,15 +1414,17 @@ pub fn solve(input: &Input, params: &SolveParams, elapsed_ms: u64) -> Result<Out
                             if let Some(a) = anchor {
                                 terrain_anchor = Some(a);
                             }
-                            eprintln!(
-                                "[debug] smooth terrain clearance -> raise cruise alt {:.0}->{:.0}m (terrain {:.0}m, v={})",
-                                start_alt_norm, alt_eff, terr_max, v.id
-                            );
+                            if crate::verbose::on() {
+                                eprintln!(
+                                    "[debug] smooth terrain clearance -> raise cruise alt {:.0}->{:.0}m (terrain {:.0}m, v={})",
+                                    start_alt_norm, alt_eff, terr_max, v.id
+                                );
+                            }
                             continue 'fmm_attempt;
                         }
                     }
                     // 终检失败 → 回退未平滑拼接（必经点保留，宁丑勿违）
-                    if std::env::var_os("ARP_DEBUG_SMOOTH").is_some() {
+                    if crate::verbose::on() {
                         eprintln!(
                             "[smooth-dbg] FINAL VERIFY FAIL points={} issues={} warnings={}",
                             joined.points.len(),
@@ -2542,11 +2558,13 @@ pub(crate) fn emit_classified(
         "category": category,
         "detail": detail
     });
-    eprintln!(
-        "{}",
-        serde_json::to_string(&json)
-            .unwrap_or_else(|_| r#"{"event":"classified","serialize_error":true}"#.into())
-    );
+    if crate::verbose::on() {
+        eprintln!(
+            "{}",
+            serde_json::to_string(&json)
+                .unwrap_or_else(|_| r#"{"event":"classified","serialize_error":true}"#.into())
+        );
+    }
     degradations.push(format!("classified: {category}"));
 }
 
