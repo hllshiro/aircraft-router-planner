@@ -114,17 +114,14 @@ fn build_request_body(index: Option<&crate::config::TerrainIndex>) -> String {
             description: "区域数组".into(),
             children: vec![
                 ParamNode { name: "id", type_label: "string", required: true, description: "区域 ID".into(), children: vec![] },
-                ParamNode { name: "shape", type_label: "tagged-union", required: true, description: "circle / polygon".into(), children: vec![
-                    ParamNode { name: "circle", type_label: "object", required: false, description: "".into(), children: vec![
-                        ParamNode { name: "center", type_label: "array<f64,2>", required: true, description: "圆心 [lon, lat]".into(), children: vec![] },
-                        ParamNode { name: "radius_km", type_label: "f64", required: true, description: "半径 km".into(), children: vec![] },
-                    ]},
-                    ParamNode { name: "polygon", type_label: "object", required: false, description: "".into(), children: vec![
-                        ParamNode { name: "vertices", type_label: "array<array<f64,2>>", required: true, description: "顶点列表".into(), children: vec![] },
-                    ]},
+                ParamNode { name: "shape", type_label: "string", required: true, description: "形状标签：circle / polygon".into(), children: vec![] },
+                ParamNode { name: "geometry", type_label: "object", required: true, description: "几何体（字段随 shape 而变）".into(), children: vec![
+                    ParamNode { name: "center", type_label: "array<f64,2>", required: false, description: "[shape=circle] 圆心 [lon, lat]".into(), children: vec![] },
+                    ParamNode { name: "radius_km", type_label: "f64", required: false, description: "[shape=circle] 半径 km".into(), children: vec![] },
+                    ParamNode { name: "vertices", type_label: "array<array<f64,2>>", required: false, description: "[shape=polygon] 顶点列表 [[lon,lat],...]".into(), children: vec![] },
                 ]},
-                ParamNode { name: "alt_min_m", type_label: "f64", required: false, description: "高度下界（restricted 必填）".into(), children: vec![] },
-                ParamNode { name: "alt_max_m", type_label: "f64", required: false, description: "高度上界（restricted 必填）".into(), children: vec![] },
+                ParamNode { name: "alt_min_m", type_label: "f64", required: false, description: "高度下界 m（选填；与 alt_max_m 同填同省）".into(), children: vec![] },
+                ParamNode { name: "alt_max_m", type_label: "f64", required: false, description: "高度上界 m（选填；与 alt_min_m 同填同省；双省略=全高度禁入）".into(), children: vec![] },
             ],
         },
         ParamNode {
