@@ -562,17 +562,9 @@ pub fn validate(input: &Input) -> Result<(), AppError> {
             }
         }
     }
-    // 雷达 ∩ 禁飞区重叠（雷达位置在禁飞多边形内）
     for r in &input.red_forces.radars {
-        let g = Geo::new(r.lon, r.lat)
+        Geo::new(r.lon, r.lat)
             .map_err(|_| AppError::InputInvalid(InputInvalidReason::IllegalCoordinate))?;
-        for z in input.zones.iter().filter(|z| z.is_wall()) {
-            if zone_contains(z, &g) {
-                return Err(AppError::InputInvalid(
-                    InputInvalidReason::RadarOverlapNoFly,
-                ));
-            }
-        }
         if r.radius_km <= 0.0 {
             return Err(AppError::InputInvalid(InputInvalidReason::OutOfBounds));
         }
@@ -903,4 +895,46 @@ pub(crate) fn zone_contains_at(z: &Zone, p: &Geo, alt_m: f64) -> bool {
     let Some(min) = z.alt_min_m else { return true };
     let Some(max) = z.alt_max_m else { return true };
     alt_m >= min && alt_m <= max
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn input_json(radars: &str, zones: &str) -> String {
+        format!(
+            r#"{{
+            "aircraft": [{{
+                "id": "a1",
+                "start": {{"lon": 99.5, "lat": 20.0, "alt_m": 5000.0}},
+                "target": {{"lon": 99.5, "lat": 20.1, "alt_m": 5000.0}}
+            }}],
+            "red_forces": {{"radars": [{radars}]}},
+            "zones": [{zones}]
+        }}"#
+        )
+    }
+
+    #[test]
+    fn radar_center_in_no_fly_zone_is_accepted() {
+        let json = input_json(
+            r#"{"id": "r1", "lon": 100.2, "lat": 20.2, "radius_km": 5.0}"#,
+            r#"{"id": "nf1", "shape": "polygon", "geometry": {"vertices": [[100.0, 20.0], [100.4, 20.0], [100.4, 20.4], [100.0, 20.4]]}}"#,
+        );
+        let input = Input::from_json_str(&json).expect("input json should parse");
+        match validate(&input) {
+            Ok(()) => {}
+            Err(e) => panic!("radar center in no-fly zone should be accepted, got: {e}"),
+        }
+    }
+
+    #[test]
+    fn radar_non_positive_radius_rejected() {
+        let json = input_json(r#"{"id": "r1", "lon": 110.0, "lat": 30.0, "radius_km": 0.0}"#, "");
+        let input = Input::from_json_str(&json).expect("input json should parse");
+        assert!(matches!(
+            validate(&input),
+            Err(AppError::InputInvalid(InputInvalidReason::OutOfBounds))
+        ));
+    }
 }
