@@ -22,8 +22,6 @@ pub enum InputInvalidReason {
     TargetInNoFly,
     /// 中途必经点落在禁飞区/限飞区内部（必经点不可绕行 → fail-fast，P5）
     MidWaypointInNoFly,
-    /// 雷达部署区与禁飞区重叠
-    RadarOverlapNoFly,
     /// 地形数据空洞残留（加载后仍有 NaN/NoData 且未声明容忍）
     TerrainHolesRemain,
     /// 飞行器参数不自洽（如多机速度/半径/场景互相矛盾）
@@ -41,7 +39,6 @@ impl std::fmt::Display for InputInvalidReason {
             Self::DegenerateStartEqualsTarget => "degenerate_start_equals_target",
             Self::TargetInNoFly => "target_in_no_fly",
             Self::MidWaypointInNoFly => "mid_waypoint_in_no_fly",
-            Self::RadarOverlapNoFly => "radar_overlap_no_fly",
             Self::TerrainHolesRemain => "terrain_holes_remain",
             Self::VehicleParamsInconsistent => "vehicle_params_inconsistent",
             Self::MissingAircraft => "missing_aircraft",
